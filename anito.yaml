@@ -1,0 +1,26 @@
+# anito.yaml — place this in the root of any repo deploying to Anito
+#
+# This file defines how Anito builds and runs your service.
+# Commit it to your repo. It is the full deployment contract.
+
+name: my-service          # unique name across all your local-prod services
+
+type: binary              # binary | static
+                          # binary: a self-contained executable (Go binary, etc.)
+                          # static: a built SPA / static files served by Anito
+
+# For type: binary
+build: go build -o ./dist/my-service .
+output: ./dist/my-service
+
+# For type: static
+# build: npm run build
+# output: ./dist
+
+# Optional: path to a .env file to load when starting the service
+# The PORT variable is always injected by Anito — do not set it here.
+env_file: .env.local-prod
+
+# Optional: health check path (default /health)
+# Anito polls this after start to confirm the service is up.
+health_check: /health
