@@ -5,6 +5,7 @@
 *.so
 *.dylib
 dist/
+example/hello-service/hello-service
 
 # Test
 *.test
