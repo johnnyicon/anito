@@ -1,0 +1,5 @@
+name: hello-service
+type: binary
+build: go build -o ./dist/hello-service .
+output: ./dist/hello-service
+health_check: /health
