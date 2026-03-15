@@ -190,7 +190,13 @@ See [`example/hello-service/`](example/hello-service/) for a minimal compliant G
 
 ## Claude Code integration
 
-When working with Claude Code, drop the snippet from [`docs/claude-setup.md`](docs/claude-setup.md) into your project's `CLAUDE.md`. It tells Claude how to deploy, manage, and debug your service via anito — so you can just say "deploy this" and it knows what to do.
+See [`docs/claude-setup.md`](docs/claude-setup.md) for a ready-to-use `ANITO.md` template. Drop it in your project root and Claude knows how to deploy, manage, and debug your service without being told each time.
+
+If you already have a `CLAUDE.md`, add one line to it:
+
+```
+@ANITO.md
+```
 
 ---
 

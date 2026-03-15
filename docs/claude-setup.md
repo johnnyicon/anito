@@ -1,25 +1,35 @@
-# Anito CLAUDE.md setup snippet
+# Anito prompt setup
 
-Copy the block below into your project's `CLAUDE.md` (create one if it doesn't exist).
+Save the template below as `ANITO.md` in your project root.
 Replace `<service-name>` with the `name:` field from your `anito.yaml`.
+
+If you already have a `CLAUDE.md`, add this one line to it so Claude picks up the context automatically:
+
+```
+@ANITO.md
+```
+
+Otherwise just reference `ANITO.md` directly when starting a session.
 
 ---
 
+## Template — save as `ANITO.md`
+
 ```markdown
-## Local deployment
+# Local deployment
 
 This project runs as a persistent local service managed by [anito](https://github.com/johnnyicon/anito).
 Anito keeps it always-on at a fixed port, surviving reboots via launchd.
 
-### Deploy
+## Deploy
 
 ```bash
 anito deploy          # build + register + start (reads anito.yaml)
 ```
 
-Re-deploy any time you want to ship a new local build. The port never changes.
+Re-deploy any time you want to push a new local build. The port never changes.
 
-### Manage
+## Manage
 
 ```bash
 anito status <service-name>    # check if it's running and what port it's on
@@ -28,13 +38,13 @@ anito stop <service-name>      # stop without removing from registry
 anito services                 # list everything anito is running
 ```
 
-### Logs
+## Logs
 
 ```bash
 tail -f ~/.anito/logs/<service-name>.log
 ```
 
-### If the daemon isn't running
+## If the daemon isn't running
 
 ```bash
 # Check
@@ -47,9 +57,9 @@ launchctl load ~/Library/LaunchAgents/com.anito.daemon.plist
 anito daemon
 ```
 
-### Service contract
+## Service contract
 
-This binary must:
-- Read `PORT` from the environment and listen on it
-- Expose `GET /health` returning `200 OK`
+This binary:
+- Reads `PORT` from the environment and listens on it
+- Exposes `GET /health` returning `200 OK`
 ```
