@@ -1,4 +1,5 @@
 name: hello-service
+port: 3000
 type: binary
 build: go build -o ./dist/hello-service .
 output: ./dist/hello-service

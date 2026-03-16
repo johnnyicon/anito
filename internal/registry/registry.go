@@ -9,15 +9,15 @@ import (
 	"time"
 )
 
-// ServiceType defines how Anito handles the service
+// ServiceType defines how Anito handles the service.
 type ServiceType string
 
 const (
-	TypeBinary ServiceType = "binary" // self-contained Go binary
-	TypeStatic ServiceType = "static" // SPA / static files, wrapped by Anito
+	TypeBinary ServiceType = "binary" // self-contained binary; Anito proxies to it
+	TypeStatic ServiceType = "static" // SPA / static files; Anito serves them directly
 )
 
-// ServiceStatus reflects the current runtime state
+// ServiceStatus reflects the current runtime state.
 type ServiceStatus string
 
 const (
@@ -26,38 +26,36 @@ const (
 	StatusFailed  ServiceStatus = "failed"
 )
 
-// Service is a registered service in the Anito registry
+// Service is a registered service entry.
 type Service struct {
-	Name       string        `json:"name"`
-	Type       ServiceType   `json:"type"`
-	BinaryPath string        `json:"binary_path"`         // path to binary (TypeBinary) or static dir (TypeStatic)
-	Port       int           `json:"port"`                // assigned by Anito
-	EnvFile    string        `json:"env_file,omitempty"`  // optional .env file
-	Status     ServiceStatus `json:"status"`
-	PID        int           `json:"pid,omitempty"`
-	DeployedAt time.Time     `json:"deployed_at"`
-	UpdatedAt  time.Time     `json:"updated_at"`
+	Name         string        `json:"name"`
+	Type         ServiceType   `json:"type"`
+	BinaryPath   string        `json:"binary_path"`            // binary path (TypeBinary) or static dir (TypeStatic)
+	StablePort   int           `json:"stable_port"`            // permanent port exposed to consumers via proxy
+	InternalPort int           `json:"internal_port,omitempty"` // ephemeral port the process is actually on
+	EnvFile      string        `json:"env_file,omitempty"`
+	HealthCheck  string        `json:"health_check"` // path, e.g. "/health"
+	Status       ServiceStatus `json:"status"`
+	PID          int           `json:"pid,omitempty"`
+	DeployedAt   time.Time     `json:"deployed_at"`
+	UpdatedAt    time.Time     `json:"updated_at"`
 }
 
-// Registry manages the on-disk service registry
+// Registry manages the on-disk service registry.
 type Registry struct {
 	mu       sync.RWMutex
 	path     string
 	services map[string]*Service
-	portMin  int
-	portMax  int
 }
 
 type registryFile struct {
 	Services map[string]*Service `json:"services"`
 }
 
-func New(dataDir string, portMin, portMax int) (*Registry, error) {
+func New(dataDir string) (*Registry, error) {
 	r := &Registry{
 		path:     filepath.Join(dataDir, "registry.json"),
 		services: make(map[string]*Service),
-		portMin:  portMin,
-		portMax:  portMax,
 	}
 	if err := os.MkdirAll(dataDir, 0755); err != nil {
 		return nil, err
@@ -71,7 +69,7 @@ func New(dataDir string, portMin, portMax int) (*Registry, error) {
 func (r *Registry) load() error {
 	data, err := os.ReadFile(r.path)
 	if os.IsNotExist(err) {
-		return nil // fresh start
+		return nil
 	}
 	if err != nil {
 		return err
@@ -93,31 +91,14 @@ func (r *Registry) save() error {
 	return os.WriteFile(r.path, data, 0644)
 }
 
-// AllocatePort finds the next free port in the configured range
-func (r *Registry) AllocatePort() (int, error) {
-	r.mu.RLock()
-	defer r.mu.RUnlock()
-
-	used := make(map[int]bool)
-	for _, s := range r.services {
-		used[s.Port] = true
-	}
-	for p := r.portMin; p <= r.portMax; p++ {
-		if !used[p] {
-			return p, nil
-		}
-	}
-	return 0, fmt.Errorf("no available ports in range %d-%d", r.portMin, r.portMax)
-}
-
-// Register adds or updates a service entry
+// Register adds or updates a service entry.
+// On re-deploy, StablePort is preserved from the existing entry.
 func (r *Registry) Register(s *Service) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	existing, exists := r.services[s.Name]
-	if exists {
-		s.Port = existing.Port // keep the same port on re-deploy
+	if existing, exists := r.services[s.Name]; exists {
+		s.StablePort = existing.StablePort // never change the stable port
 		s.DeployedAt = existing.DeployedAt
 	} else {
 		s.DeployedAt = time.Now()
@@ -127,7 +108,7 @@ func (r *Registry) Register(s *Service) error {
 	return r.save()
 }
 
-// Get returns a service by name
+// Get returns a service by name.
 func (r *Registry) Get(name string) (*Service, bool) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
@@ -135,7 +116,7 @@ func (r *Registry) Get(name string) (*Service, bool) {
 	return s, ok
 }
 
-// All returns all registered services
+// All returns all registered services.
 func (r *Registry) All() []*Service {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
@@ -146,7 +127,7 @@ func (r *Registry) All() []*Service {
 	return out
 }
 
-// UpdateStatus updates the runtime status of a service
+// UpdateStatus updates the runtime status and PID of a service.
 func (r *Registry) UpdateStatus(name string, status ServiceStatus, pid int) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -160,7 +141,20 @@ func (r *Registry) UpdateStatus(name string, status ServiceStatus, pid int) erro
 	return r.save()
 }
 
-// Remove deletes a service from the registry
+// UpdateInternalPort records the ephemeral port the process is running on.
+func (r *Registry) UpdateInternalPort(name string, port int) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	s, ok := r.services[name]
+	if !ok {
+		return fmt.Errorf("service %q not found", name)
+	}
+	s.InternalPort = port
+	s.UpdatedAt = time.Now()
+	return r.save()
+}
+
+// Remove deletes a service from the registry.
 func (r *Registry) Remove(name string) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()

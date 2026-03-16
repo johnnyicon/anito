@@ -8,14 +8,14 @@ Named after the *anito* of Filipino indigenous cosmology — ancestral spirits t
 
 ## What it is
 
-Anito is a daemon that runs on your Mac and keeps your local services always on — surviving reboots, automatically restarting crashed processes, and giving each service a stable port that never changes.
+Anito is a daemon that runs on your Mac and keeps your local services always on — surviving reboots, restarting crashed processes, and giving each service a **stable port that never changes**.
 
 ```
 Dev environment     →   Anito (local prod)    →   Railway (real prod)
 (hot reload, any port)  (fixed ports, always on)   (when ready to ship)
 ```
 
-You deploy to Anito the same way you'd deploy anywhere: run a build command, point at the output. Anito registers the service, starts it, and keeps it running. Re-deploy and it rebuilds in-place on the same port.
+Anito acts as a **reverse proxy**. It owns the stable port. Your process runs on an ephemeral internal port. When you re-deploy, Anito starts the new process, waits for it to pass a health check, then atomically swaps the proxy — old process drains, new one takes over, with zero downtime. Connections to the stable port (browsers, MCP hosts, other services) never see a blip.
 
 ---
 
@@ -31,7 +31,7 @@ go build -o /usr/local/bin/anito ./cmd/anito/
 
 **2. Install the launchd agent (macOS)**
 
-Edit `com.anito.daemon.plist` — replace `YOUR_USERNAME` with your actual macOS username:
+Edit `com.anito.daemon.plist` — replace `YOUR_USERNAME` with your macOS username:
 
 ```xml
 <string>/Users/YOUR_USERNAME/.anito/logs/anito.log</string>
@@ -44,12 +44,12 @@ cp com.anito.daemon.plist ~/Library/LaunchAgents/
 launchctl load ~/Library/LaunchAgents/com.anito.daemon.plist
 ```
 
-The daemon starts immediately and will auto-start on every login.
+The daemon starts immediately and auto-starts on every login.
 
 **3. Verify it's running**
 
 ```bash
-curl http://localhost:6660/health
+curl http://localhost:7700/health
 # {"status":"ok"}
 ```
 
@@ -57,14 +57,15 @@ curl http://localhost:6660/health
 
 ## Deploying your first service
 
-**1. Add `anito.yaml` to your repo root:**
+**1. Add `.anito/config.yaml` to your repo:**
 
 ```yaml
 name: my-api
+port: 3000              # stable port — what consumers connect to
 type: binary
 build: go build -o ./dist/my-api .
 output: ./dist/my-api
-env_file: .env.local-prod   # optional
+env_file: .env.local    # optional
 ```
 
 **2. Deploy:**
@@ -72,19 +73,23 @@ env_file: .env.local-prod   # optional
 ```bash
 cd my-api/
 anito deploy
+# building my-api...
+# deploying my-api → localhost:3000...
+# ✓ my-api running on localhost:3000
 ```
 
 Anito will:
-- Run your `build` command with stdout/stderr visible
-- Register the service and assign it a port (e.g. `8100`)
-- Start the binary with `PORT=8100` injected
-- Keep it running — if it crashes, Anito marks it failed and you can restart
+- Run your `build` command
+- Start the binary on an internal ephemeral port
+- Wait for `GET /health → 200` before forwarding traffic
+- Proxy `localhost:3000` → the live process permanently
 
 **3. Re-deploy after changes:**
 
 ```bash
-# rebuild and restart in-place — same port, zero config
 anito deploy
+# Starts new process, health-checks it, swaps proxy, drains old process
+# localhost:3000 stays live throughout
 ```
 
 ---
@@ -93,69 +98,84 @@ anito deploy
 
 ```bash
 # Deployment
-anito deploy                  # deploy from ./anito.yaml
-anito deploy path/to/config   # deploy from a specific file
+anito deploy                    # build + deploy from .anito/config.yaml
+anito deploy path/to/config     # deploy from a specific file
 
 # Service management
-anito services                # list all services, ports, and status
-anito status <name>           # full detail for one service
-anito restart <name>          # restart a service (e.g. after a manual binary swap)
-anito stop <name>             # stop a service (stays registered)
-anito remove <name>           # stop and remove from registry entirely
+anito services                  # list all services, ports, and status
+anito status <name>             # full detail for one service
+anito restart <name>            # restart with health-check gating
+anito stop <name>               # stop a service (stays registered)
+anito remove <name>             # stop, remove from registry, close proxy port
 
 # Daemon
-anito daemon                  # start the daemon manually (normally launchd does this)
-anito daemon --port 6660 --port-min 8100 --port-max 8200
+anito daemon                    # start manually (normally launchd does this)
+anito daemon --port 7700        # override management API port
 ```
 
 ---
 
 ## Service contract
 
-Every service deploying to Anito must follow three rules:
+Every service deploying to Anito must follow two rules:
 
 | Rule | Details |
 |------|---------|
-| Read `PORT` from environment | Anito injects `PORT=<assigned>` at startup |
-| Serve HTTP on that port | Any framework, any language |
-| Expose `GET /health → 200 OK` | Used for status checks |
+| Read `PORT` from environment | Anito injects the ephemeral internal port at startup |
+| Expose `GET /health → 200 OK` | Used to gate proxy swaps and verify restarts |
 
-That's it. Anito doesn't care what's inside the binary.
+That's it. Anito doesn't care about the language, framework, or what's inside the binary.
 
 ---
 
-## anito.yaml reference
+## `.anito/config.yaml` reference
 
 ```yaml
-name: my-service          # required — unique across all your services
+name: my-service          # required — unique name across all your services
+
+port: 3000                # required — stable port consumers connect to
+                          # Anito holds this port permanently via its proxy
 
 type: binary              # binary (default) | static
                           # binary: a self-contained executable
-                          # static: a built SPA, served by Anito's static wrapper
+                          # static: a built SPA dir, served by Anito directly
 
-build: go build -o ./dist/my-service .   # shell command to build; runs in current dir
+build: go build -o ./dist/my-service .   # shell command to run before deploy
 output: ./dist/my-service               # path to binary (binary) or dir (static)
 
-env_file: .env.local-prod  # optional — KEY=VALUE file loaded at service start
-                           # PORT is always injected by Anito; do not set it here
+env_file: .env.local      # optional — KEY=VALUE file loaded at service start
+                          # PORT is always injected by Anito; do not set it here
 
-health_check: /health      # optional — path Anito uses to verify the service is up
-                           # default: /health
+health_check: /health     # optional — path used to gate proxy swaps
+                          # default: /health
 ```
 
 ---
 
-## Port ranges
+## Port architecture
 
 | What | Port |
 |------|------|
-| Anito API | `6660` (fixed) |
-| Service allocation range | `8100–8200` (default) |
+| Anito management API | `7700` (fixed) |
+| Your service (stable) | whatever you set in `config.yaml` — e.g. `3000` |
+| Your process (internal) | ephemeral, managed by Anito |
 
-Ports are assigned automatically on first deploy and never change for a service. Override the range:
+You choose the stable port for each service. Anito owns it via a persistent proxy listener. The actual process moves to a new ephemeral port on every deploy — your consumers never notice.
 
-```bash
-anito daemon --port-min 9000 --port-max 9100
+---
+
+## Hot-swap flow
+
+```
+anito deploy
+  1. Build new binary
+  2. Start new process on ephemeral port (e.g. :51234)
+  3. Poll GET :51234/health until 200
+  4. Atomically swap proxy: :3000 → :51234
+  5. SIGTERM old process → SIGKILL after 5s grace period
+
+Consumers connected to :3000 see zero downtime.
+SSE streams and MCP connections survive.
 ```
 
 ---
@@ -204,5 +224,5 @@ If you already have a `CLAUDE.md`, add one line to it:
 
 | Type | What it is | How Anito runs it |
 |------|-----------|-------------------|
-| `binary` | Self-contained executable | Runs directly, injects `PORT` |
-| `static` | Built SPA / static files | Wrapped in Anito's built-in file server |
+| `binary` | Self-contained executable | Starts on ephemeral port, proxied to stable port |
+| `static` | Built SPA / static files | Served directly by Anito's built-in file server |

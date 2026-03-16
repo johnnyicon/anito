@@ -9,21 +9,23 @@ import (
 	"github.com/johnnyicon/anito/internal/registry"
 )
 
-// Client talks to the anito daemon over HTTP
+// Client talks to the anito daemon over HTTP.
 type Client struct {
-	base string // e.g. "http://localhost:6660"
+	base string // e.g. "http://localhost:7700"
 }
 
 func New(port int) *Client {
 	return &Client{base: fmt.Sprintf("http://localhost:%d", port)}
 }
 
-// DeployRequest mirrors server.DeployRequest
+// DeployRequest mirrors server.DeployRequest.
 type DeployRequest struct {
-	Name    string               `json:"name"`
-	Type    registry.ServiceType `json:"type"`
-	Path    string               `json:"path"`
-	EnvFile string               `json:"env_file,omitempty"`
+	Name        string               `json:"name"`
+	Type        registry.ServiceType `json:"type"`
+	Path        string               `json:"path"`
+	StablePort  int                  `json:"stable_port"`
+	EnvFile     string               `json:"env_file,omitempty"`
+	HealthCheck string               `json:"health_check,omitempty"`
 }
 
 func (c *Client) Deploy(req DeployRequest) (*registry.Service, error) {
@@ -65,7 +67,7 @@ func (c *Client) Remove(name string) error {
 func (c *Client) getJSON(path string, out any) error {
 	resp, err := http.Get(c.base + path)
 	if err != nil {
-		return fmt.Errorf("daemon unreachable: %w", err)
+		return fmt.Errorf("daemon unreachable — is anito running? (try: anito daemon): %w", err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode >= 400 {
@@ -86,7 +88,7 @@ func (c *Client) postJSON(path string, body any, out any) error {
 	}
 	resp, err := http.Post(c.base+path, "application/json", &buf)
 	if err != nil {
-		return fmt.Errorf("daemon unreachable: %w", err)
+		return fmt.Errorf("daemon unreachable — is anito running? (try: anito daemon): %w", err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode >= 400 {

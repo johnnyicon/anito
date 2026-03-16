@@ -14,20 +14,17 @@ import (
 	"github.com/johnnyicon/anito/internal/client"
 	"github.com/johnnyicon/anito/internal/config"
 	"github.com/johnnyicon/anito/internal/process"
+	"github.com/johnnyicon/anito/internal/proxy"
 	"github.com/johnnyicon/anito/internal/registry"
 	"github.com/johnnyicon/anito/internal/server"
 )
 
-const defaultDaemonPort = 6660
+const defaultDaemonPort = 7700
 
 func main() {
-	var (
-		daemonCmd = flag.NewFlagSet("daemon", flag.ExitOnError)
-		port      = daemonCmd.Int("port", defaultDaemonPort, "port for the Anito API server")
-		dataDir   = daemonCmd.String("data", defaultDataDir(), "directory for registry and logs")
-		portMin   = daemonCmd.Int("port-min", 8100, "start of port allocation range")
-		portMax   = daemonCmd.Int("port-max", 8200, "end of port allocation range")
-	)
+	daemonCmd := flag.NewFlagSet("daemon", flag.ExitOnError)
+	daemonPort := daemonCmd.Int("port", defaultDaemonPort, "port for the Anito management API")
+	dataDir := daemonCmd.String("data", defaultDataDir(), "directory for registry and logs")
 
 	if len(os.Args) < 2 {
 		printUsage()
@@ -39,10 +36,10 @@ func main() {
 	switch os.Args[1] {
 	case "daemon":
 		_ = daemonCmd.Parse(os.Args[2:])
-		runDaemon(*port, *dataDir, *portMin, *portMax)
+		runDaemon(*daemonPort, *dataDir)
 
 	case "deploy":
-		configPath := "anito.yaml"
+		configPath := defaultConfigPath()
 		if len(os.Args) >= 3 {
 			configPath = os.Args[2]
 		}
@@ -89,13 +86,12 @@ func runDeploy(cli *client.Client, configPath string) {
 		fatal(err)
 	}
 
-	// Resolve output path to absolute so the daemon can find it
+	// Resolve output path to absolute so the daemon can find it regardless of cwd.
 	absOutput, err := filepath.Abs(cfg.Output)
 	if err != nil {
 		fatal(err)
 	}
 
-	// Run build command if specified
 	if cfg.Build != "" {
 		fmt.Printf("building %s...\n", cfg.Name)
 		parts := strings.Fields(cfg.Build)
@@ -107,18 +103,20 @@ func runDeploy(cli *client.Client, configPath string) {
 		}
 	}
 
-	fmt.Printf("deploying %s...\n", cfg.Name)
+	fmt.Printf("deploying %s → localhost:%d...\n", cfg.Name, cfg.Port)
 	svc, err := cli.Deploy(client.DeployRequest{
-		Name:    cfg.Name,
-		Type:    registry.ServiceType(cfg.Type),
-		Path:    absOutput,
-		EnvFile: cfg.EnvFile,
+		Name:        cfg.Name,
+		Type:        registry.ServiceType(cfg.Type),
+		Path:        absOutput,
+		StablePort:  cfg.Port,
+		EnvFile:     cfg.EnvFile,
+		HealthCheck: cfg.HealthCheck,
 	})
 	if err != nil {
 		fatal(err)
 	}
 
-	fmt.Printf("deployed %s on port %d\n", svc.Name, svc.Port)
+	fmt.Printf("✓ %s running on localhost:%d\n", svc.Name, svc.StablePort)
 }
 
 func runServices(cli *client.Client) {
@@ -138,8 +136,8 @@ func runServices(cli *client.Client) {
 		if s.PID > 0 {
 			pid = fmt.Sprintf("%d", s.PID)
 		}
-		fmt.Fprintf(w, "%s\t%d\t%s\t%s\t%s\n",
-			s.Name, s.Port, s.Status, pid,
+		fmt.Fprintf(w, "%s\t:%d\t%s\t%s\t%s\n",
+			s.Name, s.StablePort, s.Status, pid,
 			s.DeployedAt.Format(time.DateTime),
 		)
 	}
@@ -152,22 +150,22 @@ func runStatus(cli *client.Client, name string) {
 		fatal(err)
 	}
 
-	fmt.Printf("name:       %s\n", svc.Name)
-	fmt.Printf("type:       %s\n", svc.Type)
-	fmt.Printf("port:       %d\n", svc.Port)
-	fmt.Printf("status:     %s\n", svc.Status)
+	fmt.Printf("name:          %s\n", svc.Name)
+	fmt.Printf("type:          %s\n", svc.Type)
+	fmt.Printf("port:          localhost:%d\n", svc.StablePort)
+	fmt.Printf("status:        %s\n", svc.Status)
 	if svc.PID > 0 {
-		fmt.Printf("pid:        %d\n", svc.PID)
+		fmt.Printf("pid:           %d (internal :%d)\n", svc.PID, svc.InternalPort)
 	}
-	fmt.Printf("binary:     %s\n", svc.BinaryPath)
-	fmt.Printf("deployed:   %s\n", svc.DeployedAt.Format(time.DateTime))
-	fmt.Printf("updated:    %s\n", svc.UpdatedAt.Format(time.DateTime))
+	fmt.Printf("binary:        %s\n", svc.BinaryPath)
+	fmt.Printf("deployed:      %s\n", svc.DeployedAt.Format(time.DateTime))
+	fmt.Printf("updated:       %s\n", svc.UpdatedAt.Format(time.DateTime))
 }
 
-func runDaemon(apiPort int, dataDir string, portMin, portMax int) {
+func runDaemon(apiPort int, dataDir string) {
 	logDir := filepath.Join(dataDir, "logs")
 
-	reg, err := registry.New(dataDir, portMin, portMax)
+	reg, err := registry.New(dataDir)
 	if err != nil {
 		log.Fatalf("registry: %v", err)
 	}
@@ -177,17 +175,37 @@ func runDaemon(apiPort int, dataDir string, portMin, portMax int) {
 		log.Fatalf("process manager: %v", err)
 	}
 
-	// Restore previously running services on startup
+	prx := proxy.NewManager()
+
+	// Restore services that were running before the daemon last stopped.
 	for _, svc := range reg.All() {
+		if svc.StablePort == 0 {
+			continue
+		}
+		if err := prx.Register(svc.Name, svc.StablePort); err != nil {
+			log.Printf("warn: could not re-register proxy for %s: %v", svc.Name, err)
+			continue
+		}
 		if svc.Status == registry.StatusRunning {
-			log.Printf("restoring %s on port %d", svc.Name, svc.Port)
-			if err := mgr.Start(svc); err != nil {
+			log.Printf("restoring %s on localhost:%d", svc.Name, svc.StablePort)
+			if svc.Type == registry.TypeStatic {
+				if err := prx.SwapStatic(svc.Name, svc.BinaryPath); err != nil {
+					log.Printf("warn: static swap failed for %s: %v", svc.Name, err)
+				}
+				continue
+			}
+			internalPort, err := mgr.Start(svc)
+			if err != nil {
 				log.Printf("warn: could not restore %s: %v", svc.Name, err)
+				continue
+			}
+			if err := prx.Swap(svc.Name, internalPort); err != nil {
+				log.Printf("warn: proxy swap failed for %s: %v", svc.Name, err)
 			}
 		}
 	}
 
-	srv := server.New(reg, mgr, apiPort)
+	srv := server.New(reg, mgr, prx, apiPort)
 	log.Fatal(srv.Start())
 }
 
@@ -211,21 +229,24 @@ func defaultDataDir() string {
 	return filepath.Join(home, ".anito")
 }
 
+// defaultConfigPath looks for .anito/config.yaml in the current directory.
+func defaultConfigPath() string {
+	return filepath.Join(".anito", "config.yaml")
+}
+
 func printUsage() {
 	fmt.Println(`anito — local production service manager
 
 Usage:
-  anito daemon [flags]     start the anito daemon
-  anito deploy [config]    deploy from anito.yaml (default: ./anito.yaml)
-  anito services           list all registered services
-  anito status <name>      get status of a service
-  anito stop <name>        stop a service
-  anito restart <name>     restart a service
-  anito remove <name>      stop and remove a service
+  anito daemon [flags]          start the anito daemon
+  anito deploy [config]         build + deploy (default: .anito/config.yaml)
+  anito services                list all running services
+  anito status <name>           show status and port for a service
+  anito stop <name>             stop a service
+  anito restart <name>          restart a service
+  anito remove <name>           stop and remove a service
 
 Daemon flags:
-  --port      API server port (default 6660)
-  --data      data directory  (default ~/.anito)
-  --port-min  start of port range (default 8100)
-  --port-max  end of port range   (default 8200)`)
+  --port   management API port (default 7700)
+  --data   data directory      (default ~/.anito)`)
 }

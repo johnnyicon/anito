@@ -7,17 +7,18 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// Config is the structure of an anito.yaml file
+// Config is the structure of a .anito/config.yaml file.
 type Config struct {
 	Name        string `yaml:"name"`
-	Type        string `yaml:"type"`         // "binary" | "static"
-	Build       string `yaml:"build"`        // build command to run
+	Port        int    `yaml:"port"`         // stable port consumers connect to (required)
+	Type        string `yaml:"type"`         // "binary" | "static" (default: binary)
+	Build       string `yaml:"build"`        // build command to run before deploying
 	Output      string `yaml:"output"`       // path to resulting binary or static dir
 	EnvFile     string `yaml:"env_file"`     // optional .env file
-	HealthCheck string `yaml:"health_check"` // health check path (default /health)
+	HealthCheck string `yaml:"health_check"` // health check path (default: /health)
 }
 
-// Load reads and parses an anito.yaml file
+// Load reads and parses a .anito/config.yaml file.
 func Load(path string) (*Config, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -32,11 +33,17 @@ func Load(path string) (*Config, error) {
 	if cfg.Name == "" {
 		return nil, fmt.Errorf("%s: name is required", path)
 	}
+	if cfg.Port == 0 {
+		return nil, fmt.Errorf("%s: port is required", path)
+	}
 	if cfg.Output == "" {
 		return nil, fmt.Errorf("%s: output is required", path)
 	}
 	if cfg.Type == "" {
 		cfg.Type = "binary"
+	}
+	if cfg.HealthCheck == "" {
+		cfg.HealthCheck = "/health"
 	}
 
 	return &cfg, nil
