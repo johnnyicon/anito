@@ -9,14 +9,15 @@ import (
 
 // Config is the structure of a .anito/config.yaml file.
 type Config struct {
-	Name        string `yaml:"name"`
-	Version     string `yaml:"version"`      // optional — semantic version tag, e.g. "v1.2.3"
-	Port        int    `yaml:"port"`         // stable port consumers connect to (0 = auto-allocate)
-	Type        string `yaml:"type"`         // "binary" | "static" (default: binary)
-	Build       string `yaml:"build"`        // build command to run before deploying
-	Output      string `yaml:"output"`       // path to resulting binary or static dir
-	EnvFile     string `yaml:"env_file"`     // optional .env file
-	HealthCheck string `yaml:"health_check"` // health check path (default: /health)
+	Name        string   `yaml:"name"`
+	Version     string   `yaml:"version"`      // optional — semantic version tag, e.g. "v1.2.3"
+	Port        int      `yaml:"port"`         // stable port consumers connect to (0 = auto-allocate)
+	Type        string   `yaml:"type"`         // "binary" | "static" (default: binary)
+	Build       string   `yaml:"build"`        // build command to run before deploying
+	Output      string   `yaml:"output"`       // path to resulting binary or static dir
+	Args        []string `yaml:"args"`         // optional arguments passed to the binary at startup
+	EnvFile     string   `yaml:"env_file"`     // optional .env file
+	HealthCheck string   `yaml:"health_check"` // health check path (default: /health)
 }
 
 // Load reads and parses a .anito/config.yaml file.

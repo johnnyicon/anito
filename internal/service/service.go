@@ -30,6 +30,12 @@ const (
 	healthCheckTimeout  = 15 * time.Second
 )
 
+// reservedPorts are Anito's own ports — never allocate these to user services.
+var reservedPorts = map[int]bool{
+	7700: true, // management API
+	7701: true, // MCP server
+}
+
 // Service owns the core Anito operations. Create one per daemon via New.
 type Service struct {
 	reg    *registry.Registry
@@ -47,8 +53,9 @@ type DeployRequest struct {
 	Name        string
 	Version     string // optional semver tag, e.g. "v1.2.3"
 	Type        registry.ServiceType
-	Path        string // binary path or static dir
-	StablePort  int    // 0 = auto-allocate from [portRangeStart, portRangeEnd]
+	Path        string   // binary path or static dir
+	Args        []string // optional arguments passed to the binary at startup
+	StablePort  int      // 0 = auto-allocate from [portRangeStart, portRangeEnd]
 	EnvFile     string
 	HealthCheck string
 }
@@ -81,6 +88,7 @@ func (s *Service) Deploy(req DeployRequest) (*registry.Service, error) {
 		Version:     version,
 		Type:        req.Type,
 		BinaryPath:  req.Path,
+		Args:        req.Args,
 		StablePort:  stablePort,
 		EnvFile:     req.EnvFile,
 		HealthCheck: req.HealthCheck,
@@ -281,6 +289,9 @@ func (s *Service) allocatePort(name string, preferred int) (int, error) {
 	}
 
 	if preferred != 0 {
+		if reservedPorts[preferred] {
+			return 0, fmt.Errorf("port %d is reserved by Anito and cannot be assigned to a service", preferred)
+		}
 		if err := s.prx.Register(name, preferred); err == nil {
 			return preferred, nil
 		}

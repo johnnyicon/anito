@@ -24,6 +24,7 @@ type DeployRequest struct {
 	Version     string               `json:"version,omitempty"`
 	Type        registry.ServiceType `json:"type"`
 	Path        string               `json:"path"`
+	Args        []string             `json:"args,omitempty"`
 	StablePort  int                  `json:"stable_port"`
 	EnvFile     string               `json:"env_file,omitempty"`
 	HealthCheck string               `json:"health_check,omitempty"`

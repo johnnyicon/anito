@@ -24,7 +24,16 @@
       "Bash(curl -s -X POST http://localhost:7701 -H \"Content-Type: application/json\" -d '{\"\"\"\"jsonrpc\"\"\"\":\"\"\"\"2.0\"\"\"\",\"\"\"\"id\"\"\"\":1,\"\"\"\"method\"\"\"\":\"\"\"\"initialize\"\"\"\",\"\"\"\"params\"\"\"\":{\"\"\"\"protocolVersion\"\"\"\":\"\"\"\"2024-11-05\"\"\"\",\"\"\"\"capabilities\"\"\"\":{},\"\"\"\"clientInfo\"\"\"\":{\"\"\"\"name\"\"\"\":\"\"\"\"test\"\"\"\",\"\"\"\"version\"\"\"\":\"\"\"\"1.0\"\"\"\"}}}')",
       "Bash(curl -sv -X POST http://localhost:7701 -H \"Content-Type: application/json\" -H \"Accept: application/json, text/event-stream\" -d '{\"\"\"\"jsonrpc\"\"\"\":\"\"\"\"2.0\"\"\"\",\"\"\"\"id\"\"\"\":1,\"\"\"\"method\"\"\"\":\"\"\"\"initialize\"\"\"\",\"\"\"\"params\"\"\"\":{\"\"\"\"protocolVersion\"\"\"\":\"\"\"\"2024-11-05\"\"\"\",\"\"\"\"capabilities\"\"\"\":{},\"\"\"\"clientInfo\"\"\"\":{\"\"\"\"name\"\"\"\":\"\"\"\"test\"\"\"\",\"\"\"\"version\"\"\"\":\"\"\"\"1.0\"\"\"\"}}}')",
       "Bash(launchctl unload:*)",
-      "Bash(anito deploy:*)"
+      "Bash(anito deploy:*)",
+      "Bash(git tag:*)",
+      "Bash(anito reload:*)",
+      "Bash(anito version:*)",
+      "Bash(gh issue:*)",
+      "Bash(make help:*)",
+      "mcp__anito__anito_setup",
+      "Read(//Users/kanekoa/Workspace/maykapal-os/tmp/**)",
+      "Bash(npm --version)",
+      "Bash(make reload:*)"
     ],
     "additionalDirectories": [
       "/Users/kanekoa/.anito",

@@ -48,6 +48,7 @@ type DeployRequest struct {
 	Version     string               `json:"version,omitempty"`
 	Type        registry.ServiceType `json:"type"`
 	Path        string               `json:"path"`
+	Args        []string             `json:"args,omitempty"`
 	StablePort  int                  `json:"stable_port,omitempty"`
 	EnvFile     string               `json:"env_file,omitempty"`
 	HealthCheck string               `json:"health_check,omitempty"`
@@ -94,6 +95,7 @@ func (s *Server) handleDeploy(w http.ResponseWriter, r *http.Request) {
 		Version:     req.Version,
 		Type:        req.Type,
 		Path:        req.Path,
+		Args:        req.Args,
 		StablePort:  req.StablePort,
 		EnvFile:     req.EnvFile,
 		HealthCheck: req.HealthCheck,

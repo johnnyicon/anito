@@ -32,6 +32,7 @@ type Service struct {
 	Type         ServiceType   `json:"type"`
 	Version      string        `json:"version,omitempty"`       // optional semantic version tag, e.g. "v1.2.3"
 	BinaryPath   string        `json:"binary_path"`             // binary path (TypeBinary) or static dir (TypeStatic)
+	Args         []string      `json:"args,omitempty"`          // optional arguments passed to the binary
 	StablePort   int           `json:"stable_port"`             // permanent port exposed to consumers via proxy
 	InternalPort int           `json:"internal_port,omitempty"` // ephemeral port the process is actually on
 	EnvFile      string        `json:"env_file,omitempty"`

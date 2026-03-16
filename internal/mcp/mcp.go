@@ -50,13 +50,14 @@ func (s *Server) Start() error {
 // --- input/output types ---
 
 type deployInput struct {
-	Name        string `json:"name"         jsonschema:"service name, must be unique"`
-	Version     string `json:"version"      jsonschema:"optional semver tag for this build, e.g. v1.2.3"`
-	Path        string `json:"path"         jsonschema:"absolute path to the binary or static directory"`
-	StablePort  int    `json:"stable_port"  jsonschema:"preferred stable port consumers connect to (0 = auto-allocate)"`
-	Type        string `json:"type"         jsonschema:"service type: binary (default) or static"`
-	EnvFile     string `json:"env_file"     jsonschema:"optional path to a KEY=VALUE env file"`
-	HealthCheck string `json:"health_check" jsonschema:"health check path polled after start (default: /health)"`
+	Name        string   `json:"name"         jsonschema:"service name, must be unique"`
+	Version     string   `json:"version"      jsonschema:"optional semver tag for this build, e.g. v1.2.3"`
+	Path        string   `json:"path"         jsonschema:"absolute path to the binary or static directory"`
+	Args        []string `json:"args"         jsonschema:"optional arguments passed to the binary at startup, e.g. [\"serve\", \"--config\", \"prod.yaml\"]"`
+	StablePort  int      `json:"stable_port"  jsonschema:"preferred stable port consumers connect to (0 = auto-allocate); ports 7700 and 7701 are reserved"`
+	Type        string   `json:"type"         jsonschema:"service type: binary (default) or static"`
+	EnvFile     string   `json:"env_file"     jsonschema:"optional path to a KEY=VALUE env file"`
+	HealthCheck string   `json:"health_check" jsonschema:"health check path polled after start (default: /health)"`
 }
 
 type serviceView struct {
@@ -130,6 +131,7 @@ func (s *Server) registerTools(srv *sdkmcp.Server) {
 			Name:        in.Name,
 			Type:        registry.ServiceType(in.Type),
 			Path:        in.Path,
+			Args:        in.Args,
 			StablePort:  in.StablePort,
 			EnvFile:     in.EnvFile,
 			HealthCheck: in.HealthCheck,

@@ -138,6 +138,7 @@ func runDeploy(cli *client.Client, configPath string) {
 		Version:     cfg.Version,
 		Type:        registry.ServiceType(cfg.Type),
 		Path:        absOutput,
+		Args:        cfg.Args,
 		StablePort:  cfg.Port,
 		EnvFile:     cfg.EnvFile,
 		HealthCheck: cfg.HealthCheck,

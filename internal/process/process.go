@@ -172,7 +172,7 @@ func (m *Manager) buildCmd(svc *registry.Service, port int) (*exec.Cmd, error) {
 		return nil, fmt.Errorf("buildCmd: static services do not run a process")
 	}
 
-	cmd := exec.Command(svc.BinaryPath)
+	cmd := exec.Command(svc.BinaryPath, svc.Args...)
 
 	// Inject the ephemeral port — the process binds here, not on the stable port.
 	cmd.Env = append(os.Environ(), "PORT="+strconv.Itoa(port))
