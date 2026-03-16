@@ -33,7 +33,9 @@
       "mcp__anito__anito_setup",
       "Read(//Users/kanekoa/Workspace/maykapal-os/tmp/**)",
       "Bash(npm --version)",
-      "Bash(make reload:*)"
+      "Bash(make reload:*)",
+      "Bash(npm install:*)",
+      "Read(//Users/kanekoa/go/pkg/mod/github.com/modelcontextprotocol/**)"
     ],
     "additionalDirectories": [
       "/Users/kanekoa/.anito",

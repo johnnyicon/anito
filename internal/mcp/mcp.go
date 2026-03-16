@@ -38,9 +38,14 @@ func (s *Server) Start() error {
 
 	s.registerTools(srv)
 
+	// Stateless mode: no session ID validation. Each request gets a fresh
+	// temporary session. This means the server can be reloaded (anito reload)
+	// without agents getting "session not found" errors on subsequent calls.
+	// Our tools are all request/response — no server-initiated messages — so
+	// stateless is correct here.
 	handler := sdkmcp.NewStreamableHTTPHandler(func(r *http.Request) *sdkmcp.Server {
 		return srv
-	}, nil)
+	}, &sdkmcp.StreamableHTTPOptions{Stateless: true})
 
 	addr := fmt.Sprintf("localhost:%d", s.port)
 	log.Printf("[STARTUP] MCP server listening on http://%s", addr)
@@ -61,14 +66,15 @@ type deployInput struct {
 }
 
 type serviceView struct {
-	Name         string `json:"name"`
-	Version      string `json:"version,omitempty"`
-	Type         string `json:"type"`
-	StablePort   int    `json:"stable_port"`
-	InternalPort int    `json:"internal_port,omitempty"`
-	Status       string `json:"status"`
-	PID          int    `json:"pid,omitempty"`
-	BinaryPath   string `json:"binary_path"`
+	Name          string `json:"name"`
+	Version       string `json:"version,omitempty"`
+	Type          string `json:"type"`
+	StablePort    int    `json:"stable_port"`
+	PinnedAddress string `json:"pinned_address"` // permanent address — never changes on redeploy
+	InternalPort  int    `json:"internal_port,omitempty"`
+	Status        string `json:"status"`
+	PID           int    `json:"pid,omitempty"`
+	BinaryPath    string `json:"binary_path"`
 }
 
 type setupInput struct {
@@ -124,7 +130,11 @@ func (s *Server) registerTools(srv *sdkmcp.Server) {
 		Description: "Deploy a service to Anito. Starts the binary on an ephemeral port, " +
 			"polls /health until 200, then atomically swaps the reverse proxy. " +
 			"Re-deploying an existing service is zero-downtime. " +
-			"If stable_port is 0 or omitted, a port is auto-allocated.",
+			"If stable_port is 0 or omitted, a port is auto-allocated from the range 8100-8200. " +
+			"IMPORTANT: the stable_port returned is permanent and pinned to this service name. " +
+			"It will never change on subsequent deploys. Record it — other services and agents " +
+			"should connect to this service at localhost:<stable_port> going forward. " +
+			"Ports 7700 (management API) and 7701 (MCP) are reserved and cannot be used.",
 	}, func(ctx context.Context, req *sdkmcp.CallToolRequest, in deployInput) (*sdkmcp.CallToolResult, serviceView, error) {
 		log.Printf("[MCP] tool=anito_deploy name=%s path=%s port=%d", in.Name, in.Path, in.StablePort)
 		svc, err := s.svc.Deploy(service.DeployRequest{
@@ -251,13 +261,14 @@ func (s *Server) registerTools(srv *sdkmcp.Server) {
 
 func toView(svc *registry.Service) serviceView {
 	return serviceView{
-		Name:         svc.Name,
-		Version:      svc.Version,
-		Type:         string(svc.Type),
-		StablePort:   svc.StablePort,
-		InternalPort: svc.InternalPort,
-		Status:       string(svc.Status),
-		PID:          svc.PID,
-		BinaryPath:   svc.BinaryPath,
+		Name:          svc.Name,
+		Version:       svc.Version,
+		Type:          string(svc.Type),
+		StablePort:    svc.StablePort,
+		PinnedAddress: fmt.Sprintf("http://localhost:%d", svc.StablePort),
+		InternalPort:  svc.InternalPort,
+		Status:        string(svc.Status),
+		PID:           svc.PID,
+		BinaryPath:    svc.BinaryPath,
 	}
 }
