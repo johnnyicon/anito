@@ -1,0 +1,34 @@
+{
+  "permissions": {
+    "allow": [
+      "WebFetch(domain:github.com)",
+      "WebFetch(domain:raw.githubusercontent.com)",
+      "WebFetch(domain:api.github.com)",
+      "Bash(/tmp/anito-test --help)",
+      "Bash(/tmp/anito-test mcp:*)",
+      "Bash(/usr/local/bin/anito)",
+      "Bash(sudo cp:*)",
+      "Bash(anito)",
+      "Bash(echo $PATH)",
+      "Read(//Users/kanekoa/bin/**)",
+      "Read(//Users/kanekoa/.local/bin/**)",
+      "Bash(launchctl load:*)",
+      "Bash(curl -s http://localhost:7700/health)",
+      "Bash(curl -s -o /dev/null -w \"%{http_code}\" http://localhost:7701)",
+      "Bash(launchctl list:*)",
+      "Bash(claude mcp:*)",
+      "Bash(python3 -c \":*)",
+      "Bash(anito services:*)",
+      "Bash(curl -s http://localhost:3000/)",
+      "Bash(python3 -m json.tool)",
+      "Bash(curl -s -X POST http://localhost:7701 -H \"Content-Type: application/json\" -d '{\"\"\"\"jsonrpc\"\"\"\":\"\"\"\"2.0\"\"\"\",\"\"\"\"id\"\"\"\":1,\"\"\"\"method\"\"\"\":\"\"\"\"initialize\"\"\"\",\"\"\"\"params\"\"\"\":{\"\"\"\"protocolVersion\"\"\"\":\"\"\"\"2024-11-05\"\"\"\",\"\"\"\"capabilities\"\"\"\":{},\"\"\"\"clientInfo\"\"\"\":{\"\"\"\"name\"\"\"\":\"\"\"\"test\"\"\"\",\"\"\"\"version\"\"\"\":\"\"\"\"1.0\"\"\"\"}}}')",
+      "Bash(curl -sv -X POST http://localhost:7701 -H \"Content-Type: application/json\" -H \"Accept: application/json, text/event-stream\" -d '{\"\"\"\"jsonrpc\"\"\"\":\"\"\"\"2.0\"\"\"\",\"\"\"\"id\"\"\"\":1,\"\"\"\"method\"\"\"\":\"\"\"\"initialize\"\"\"\",\"\"\"\"params\"\"\"\":{\"\"\"\"protocolVersion\"\"\"\":\"\"\"\"2024-11-05\"\"\"\",\"\"\"\"capabilities\"\"\"\":{},\"\"\"\"clientInfo\"\"\"\":{\"\"\"\"name\"\"\"\":\"\"\"\"test\"\"\"\",\"\"\"\"version\"\"\"\":\"\"\"\"1.0\"\"\"\"}}}')",
+      "Bash(launchctl unload:*)",
+      "Bash(anito deploy:*)"
+    ],
+    "additionalDirectories": [
+      "/Users/kanekoa/.anito",
+      "/Users/kanekoa/Library/LaunchAgents"
+    ]
+  }
+}

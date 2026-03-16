@@ -30,8 +30,9 @@ const (
 type Service struct {
 	Name         string        `json:"name"`
 	Type         ServiceType   `json:"type"`
-	BinaryPath   string        `json:"binary_path"`            // binary path (TypeBinary) or static dir (TypeStatic)
-	StablePort   int           `json:"stable_port"`            // permanent port exposed to consumers via proxy
+	Version      string        `json:"version,omitempty"`       // optional semantic version tag, e.g. "v1.2.3"
+	BinaryPath   string        `json:"binary_path"`             // binary path (TypeBinary) or static dir (TypeStatic)
+	StablePort   int           `json:"stable_port"`             // permanent port exposed to consumers via proxy
 	InternalPort int           `json:"internal_port,omitempty"` // ephemeral port the process is actually on
 	EnvFile      string        `json:"env_file,omitempty"`
 	HealthCheck  string        `json:"health_check"` // path, e.g. "/health"
@@ -152,6 +153,19 @@ func (r *Registry) UpdateInternalPort(name string, port int) error {
 	s.InternalPort = port
 	s.UpdatedAt = time.Now()
 	return r.save()
+}
+
+// UsedPorts returns a set of all stable ports currently in use.
+func (r *Registry) UsedPorts() map[int]bool {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	ports := make(map[int]bool, len(r.services))
+	for _, svc := range r.services {
+		if svc.StablePort != 0 {
+			ports[svc.StablePort] = true
+		}
+	}
+	return ports
 }
 
 // Remove deletes a service from the registry.

@@ -1,8 +1,11 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
   "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<!-- 
+<!--
+  Replace YOUR_USERNAME with your macOS username before installing.
+
   Install:
+    mkdir -p ~/.anito/logs
     cp com.anito.daemon.plist ~/Library/LaunchAgents/
     launchctl load ~/Library/LaunchAgents/com.anito.daemon.plist
 
@@ -19,7 +22,9 @@
     <string>/usr/local/bin/anito</string>
     <string>daemon</string>
     <string>--port</string>
-    <string>6660</string>
+    <string>7700</string>
+    <string>--mcp-port</string>
+    <string>7701</string>
   </array>
 
   <key>RunAtLoad</key>

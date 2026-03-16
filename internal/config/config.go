@@ -10,7 +10,8 @@ import (
 // Config is the structure of a .anito/config.yaml file.
 type Config struct {
 	Name        string `yaml:"name"`
-	Port        int    `yaml:"port"`         // stable port consumers connect to (required)
+	Version     string `yaml:"version"`      // optional — semantic version tag, e.g. "v1.2.3"
+	Port        int    `yaml:"port"`         // stable port consumers connect to (0 = auto-allocate)
 	Type        string `yaml:"type"`         // "binary" | "static" (default: binary)
 	Build       string `yaml:"build"`        // build command to run before deploying
 	Output      string `yaml:"output"`       // path to resulting binary or static dir
@@ -33,9 +34,7 @@ func Load(path string) (*Config, error) {
 	if cfg.Name == "" {
 		return nil, fmt.Errorf("%s: name is required", path)
 	}
-	if cfg.Port == 0 {
-		return nil, fmt.Errorf("%s: port is required", path)
-	}
+	// port is optional — 0 means Anito auto-allocates from its port range.
 	if cfg.Output == "" {
 		return nil, fmt.Errorf("%s: output is required", path)
 	}

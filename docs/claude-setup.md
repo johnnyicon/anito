@@ -43,7 +43,8 @@ anito services                 # list everything anito is managing
 ## Logs
 
 ```bash
-tail -f ~/.anito/logs/<service-name>.log
+anito logs <service-name>            # last 100 lines
+tail -f ~/.anito/logs/<service-name>.log   # live tail
 ```
 
 ## If the daemon isn't running

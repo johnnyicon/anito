@@ -2,6 +2,7 @@ package process
 
 import (
 	"fmt"
+	"log"
 	"net"
 	"os"
 	"os/exec"
@@ -79,6 +80,7 @@ func (m *Manager) Start(svc *registry.Service) (internalPort int, err error) {
 		delete(m.procs, svc.Name)
 		m.mu.Unlock()
 		_ = m.reg.UpdateStatus(svc.Name, registry.StatusFailed, 0)
+		log.Printf("[CRASH] name=%s pid=%d", svc.Name, cmd.Process.Pid)
 	}()
 
 	return port, nil
@@ -133,6 +135,24 @@ func (m *Manager) IsRunning(name string) bool {
 	defer m.mu.RUnlock()
 	_, ok := m.procs[name]
 	return ok
+}
+
+// Deregister removes name from the tracked process table without sending any
+// signal, and returns the old PID. Use this before starting a replacement
+// process so the name slot is free; drain the returned PID after the new
+// process passes its health check.
+func (m *Manager) Deregister(name string) int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	rp, ok := m.procs[name]
+	if !ok {
+		return 0
+	}
+	delete(m.procs, name)
+	if rp.cmd.Process != nil {
+		return rp.cmd.Process.Pid
+	}
+	return 0
 }
 
 // InternalPort returns the ephemeral port for a running service, or 0.

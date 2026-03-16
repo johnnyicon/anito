@@ -3,30 +3,26 @@ package server
 import (
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
-	"github.com/johnnyicon/anito/internal/process"
-	"github.com/johnnyicon/anito/internal/proxy"
 	"github.com/johnnyicon/anito/internal/registry"
+	"github.com/johnnyicon/anito/internal/service"
 )
 
-const (
-	healthCheckInterval = 200 * time.Millisecond
-	healthCheckTimeout  = 15 * time.Second
-)
-
-// Server is the Anito management API (runs on port 7700).
+// Server is the Anito HTTP management API (default port 7700).
+// It is a thin wrapper around the shared service layer.
 type Server struct {
-	reg   *registry.Registry
-	mgr   *process.Manager
-	prx   *proxy.Manager
-	port  int
+	svc     *service.Service
+	port    int
+	version string // daemon version, embedded at build time
 }
 
-func New(reg *registry.Registry, mgr *process.Manager, prx *proxy.Manager, port int) *Server {
-	return &Server{reg: reg, mgr: mgr, prx: prx, port: port}
+func New(svc *service.Service, port int, version string) *Server {
+	return &Server{svc: svc, port: port, version: version}
 }
 
 func (s *Server) Start() error {
@@ -38,20 +34,45 @@ func (s *Server) Start() error {
 	mux.HandleFunc("/restart/", s.handleRestart)
 	mux.HandleFunc("/status/", s.handleStatus)
 	mux.HandleFunc("/remove/", s.handleRemove)
+	mux.HandleFunc("/logs/", s.handleLogs)
 
 	addr := fmt.Sprintf("localhost:%d", s.port)
-	fmt.Printf("anito daemon listening on %s\n", addr)
-	return http.ListenAndServe(addr, mux)
+	log.Printf("[STARTUP] management API listening on %s", addr)
+	return http.ListenAndServe(addr, requestLogger(mux))
 }
 
 // DeployRequest is the payload for POST /deploy.
+// stable_port is optional — omit or set to 0 for auto-allocation.
 type DeployRequest struct {
 	Name        string               `json:"name"`
+	Version     string               `json:"version,omitempty"`
 	Type        registry.ServiceType `json:"type"`
-	Path        string               `json:"path"`         // binary path or static dir
-	StablePort  int                  `json:"stable_port"`  // the port consumers connect to
+	Path        string               `json:"path"`
+	StablePort  int                  `json:"stable_port,omitempty"`
 	EnvFile     string               `json:"env_file,omitempty"`
-	HealthCheck string               `json:"health_check"` // e.g. "/health"
+	HealthCheck string               `json:"health_check,omitempty"`
+}
+
+// requestLogger wraps a handler and logs every request with method, path,
+// status code, and duration. Output goes to the daemon log file via stdout.
+func requestLogger(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		start := time.Now()
+		rec := &statusRecorder{ResponseWriter: w, status: http.StatusOK}
+		next.ServeHTTP(rec, r)
+		log.Printf("[API] %s %s → %d (%s)", r.Method, r.URL.Path, rec.status, time.Since(start).Round(time.Millisecond))
+	})
+}
+
+// statusRecorder captures the HTTP status code written by a handler.
+type statusRecorder struct {
+	http.ResponseWriter
+	status int
+}
+
+func (r *statusRecorder) WriteHeader(code int) {
+	r.status = code
+	r.ResponseWriter.WriteHeader(code)
 }
 
 func (s *Server) handleDeploy(w http.ResponseWriter, r *http.Request) {
@@ -59,7 +80,6 @@ func (s *Server) handleDeploy(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-
 	var req DeployRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, "invalid request body", http.StatusBadRequest)
@@ -69,88 +89,31 @@ func (s *Server) handleDeploy(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "name and path are required", http.StatusBadRequest)
 		return
 	}
-	if req.StablePort == 0 {
-		http.Error(w, "stable_port is required", http.StatusBadRequest)
-		return
-	}
-	if req.Type == "" {
-		req.Type = registry.TypeBinary
-	}
-	if req.HealthCheck == "" {
-		req.HealthCheck = "/health"
-	}
-
-	// Ensure proxy listener is registered on the stable port (idempotent).
-	if err := s.prx.Register(req.Name, req.StablePort); err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-
-	svc := &registry.Service{
+	svc, err := s.svc.Deploy(service.DeployRequest{
 		Name:        req.Name,
+		Version:     req.Version,
 		Type:        req.Type,
-		BinaryPath:  req.Path,
+		Path:        req.Path,
 		StablePort:  req.StablePort,
 		EnvFile:     req.EnvFile,
 		HealthCheck: req.HealthCheck,
-	}
-
-	if err := s.reg.Register(svc); err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-
-	// Re-fetch so we have the persisted values (DeployedAt etc).
-	svc, _ = s.reg.Get(req.Name)
-
-	if req.Type == registry.TypeStatic {
-		// Static services: just swap the file server — no process needed.
-		if err := s.prx.SwapStatic(req.Name, req.Path); err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
-		_ = s.reg.UpdateStatus(req.Name, registry.StatusRunning, 0)
-		svc, _ = s.reg.Get(req.Name)
-		writeJSON(w, svc)
-		return
-	}
-
-	// Binary service: start new process, health-check it, then swap proxy.
-	oldPID := svc.PID
-
-	internalPort, err := s.mgr.Start(svc)
+	})
 	if err != nil {
+		log.Printf("[ERROR] deploy name=%s error=%q", req.Name, err)
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-
-	if err := waitHealthy(internalPort, req.HealthCheck); err != nil {
-		_ = s.mgr.Stop(req.Name)
-		http.Error(w, fmt.Sprintf("health check failed: %v", err), http.StatusBadGateway)
-		return
-	}
-
-	// Proxy now points at new process — old process can be drained.
-	if err := s.prx.Swap(req.Name, internalPort); err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-
-	if oldPID > 0 {
-		go process.StopPID(oldPID)
-	}
-
-	svc, _ = s.reg.Get(req.Name)
 	writeJSON(w, svc)
 }
 
 func (s *Server) handleServices(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, s.reg.All())
+	writeJSON(w, s.svc.Services())
 }
 
 func (s *Server) handleStop(w http.ResponseWriter, r *http.Request) {
 	name := strings.TrimPrefix(r.URL.Path, "/stop/")
-	if err := s.mgr.Stop(name); err != nil {
+	if err := s.svc.Stop(name); err != nil {
+		log.Printf("[ERROR] stop name=%s error=%q", name, err)
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -159,37 +122,19 @@ func (s *Server) handleStop(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleRestart(w http.ResponseWriter, r *http.Request) {
 	name := strings.TrimPrefix(r.URL.Path, "/restart/")
-	svc, ok := s.reg.Get(name)
-	if !ok {
-		http.Error(w, "service not found", http.StatusNotFound)
-		return
-	}
-
-	internalPort, err := s.mgr.Restart(svc)
-	if err != nil {
+	if err := s.svc.Restart(name); err != nil {
+		log.Printf("[ERROR] restart name=%s error=%q", name, err)
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-
-	if svc.Type == registry.TypeBinary {
-		if err := waitHealthy(internalPort, svc.HealthCheck); err != nil {
-			http.Error(w, fmt.Sprintf("health check failed after restart: %v", err), http.StatusBadGateway)
-			return
-		}
-		if err := s.prx.Swap(name, internalPort); err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
-	}
-
 	writeJSON(w, map[string]string{"status": "restarted", "name": name})
 }
 
 func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	name := strings.TrimPrefix(r.URL.Path, "/status/")
-	svc, ok := s.reg.Get(name)
-	if !ok {
-		http.Error(w, "service not found", http.StatusNotFound)
+	svc, err := s.svc.Status(name)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusNotFound)
 		return
 	}
 	writeJSON(w, svc)
@@ -197,9 +142,8 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleRemove(w http.ResponseWriter, r *http.Request) {
 	name := strings.TrimPrefix(r.URL.Path, "/remove/")
-	_ = s.mgr.Stop(name)
-	s.prx.Remove(name)
-	if err := s.reg.Remove(name); err != nil {
+	if err := s.svc.Remove(name); err != nil {
+		log.Printf("[ERROR] remove name=%s error=%q", name, err)
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -207,24 +151,73 @@ func (s *Server) handleRemove(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, map[string]string{"status": "ok"})
+	writeJSON(w, map[string]string{"status": "ok", "version": s.version})
 }
 
-// waitHealthy polls the process's health endpoint until it responds 200 or times out.
-func waitHealthy(internalPort int, path string) error {
-	url := fmt.Sprintf("http://localhost:%d%s", internalPort, path)
-	deadline := time.Now().Add(healthCheckTimeout)
-	for time.Now().Before(deadline) {
-		resp, err := http.Get(url) //nolint:noctx
-		if err == nil {
-			resp.Body.Close()
-			if resp.StatusCode == http.StatusOK {
-				return nil
-			}
-		}
-		time.Sleep(healthCheckInterval)
+// handleLogs serves GET /logs/:name
+//
+//   - ?lines=N    — return last N lines as JSON array (default 100)
+//   - ?follow=true — stream new lines as SSE (also sends backlog first)
+func (s *Server) handleLogs(w http.ResponseWriter, r *http.Request) {
+	name := strings.TrimPrefix(r.URL.Path, "/logs/")
+	if name == "" {
+		http.Error(w, "service name required", http.StatusBadRequest)
+		return
 	}
-	return fmt.Errorf("timed out after %s waiting for %s", healthCheckTimeout, url)
+
+	lines := 100
+	if v := r.URL.Query().Get("lines"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			lines = n
+		}
+	}
+
+	if r.URL.Query().Get("follow") == "true" {
+		s.streamLogs(w, r, name, lines)
+		return
+	}
+
+	logLines, err := s.svc.Logs(name, lines)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusNotFound)
+		return
+	}
+	writeJSON(w, logLines)
+}
+
+// streamLogs sends the backlog then tails new lines as SSE.
+func (s *Server) streamLogs(w http.ResponseWriter, r *http.Request, name string, backlogLines int) {
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		http.Error(w, "streaming not supported", http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+
+	backlog, err := s.svc.Logs(name, backlogLines)
+	if err != nil {
+		fmt.Fprintf(w, "event: error\ndata: %s\n\n", err.Error())
+		flusher.Flush()
+		return
+	}
+	for _, line := range backlog {
+		fmt.Fprintf(w, "data: %s\n\n", line)
+	}
+	flusher.Flush()
+
+	ch, err := s.svc.LogStream(r.Context(), name)
+	if err != nil {
+		fmt.Fprintf(w, "event: error\ndata: %s\n\n", err.Error())
+		flusher.Flush()
+		return
+	}
+	for line := range ch {
+		fmt.Fprintf(w, "data: %s\n\n", line)
+		flusher.Flush()
+	}
 }
 
 func writeJSON(w http.ResponseWriter, v any) {

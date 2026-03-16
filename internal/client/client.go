@@ -21,6 +21,7 @@ func New(port int) *Client {
 // DeployRequest mirrors server.DeployRequest.
 type DeployRequest struct {
 	Name        string               `json:"name"`
+	Version     string               `json:"version,omitempty"`
 	Type        registry.ServiceType `json:"type"`
 	Path        string               `json:"path"`
 	StablePort  int                  `json:"stable_port"`
@@ -62,6 +63,23 @@ func (c *Client) Restart(name string) error {
 
 func (c *Client) Remove(name string) error {
 	return c.postJSON("/remove/"+name, nil, nil)
+}
+
+func (c *Client) DaemonVersion() (string, error) {
+	var result map[string]string
+	if err := c.getJSON("/health", &result); err != nil {
+		return "", err
+	}
+	return result["version"], nil
+}
+
+func (c *Client) Logs(name string, lines int) ([]string, error) {
+	var out []string
+	path := fmt.Sprintf("/logs/%s?lines=%d", name, lines)
+	if err := c.getJSON(path, &out); err != nil {
+		return nil, err
+	}
+	return out, nil
 }
 
 func (c *Client) getJSON(path string, out any) error {
