@@ -205,7 +205,7 @@ func generateConfig(name, buildCmd, outputPath string) string {
 	var sb strings.Builder
 	sb.WriteString("# .anito/config.yaml\n")
 	sb.WriteString(fmt.Sprintf("name: %s\n", name))
-	sb.WriteString("version: v0.1.0\n")
+	sb.WriteString("# version: v0.1.0  # set this — omit to auto-generate a sha: hash\n")
 	sb.WriteString("type: binary\n")
 	if buildCmd != "" {
 		sb.WriteString(fmt.Sprintf("build: %s\n", buildCmd))
@@ -240,8 +240,9 @@ func generateInstructions(r *Result, buildCmd string) []string {
 		steps = append(steps, "✓ This repo already meets the Anito service contract.")
 	}
 	steps = append(steps,
-		fmt.Sprintf("%d. Test locally: build the binary and confirm GET /health returns 200", n),
-		fmt.Sprintf("%d. Deploy: run `anito deploy` from %s", n+1, r.RepoPath),
+		fmt.Sprintf("%d. Set a version: add `version: v0.1.0` to .anito/config.yaml. Bump this on every release. If omitted, Anito auto-generates a SHA hash (sha:xxxxxxxx) which is unique but not human-readable.", n),
+		fmt.Sprintf("%d. Test locally: build the binary and confirm GET /health returns 200", n+1),
+		fmt.Sprintf("%d. Deploy: run `anito deploy` from %s", n+2, r.RepoPath),
 	)
 	return steps
 }
