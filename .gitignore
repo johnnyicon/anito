@@ -19,3 +19,6 @@ example/hello-service/hello-service
 .vscode/
 *.swp
 *.swo
+
+# Claude Code project settings (user-specific)
+.claude/

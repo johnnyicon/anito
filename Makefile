@@ -1,11 +1,20 @@
 VERSION ?= $(shell git describe --tags --exact-match 2>/dev/null || echo "dev")
 BINARY  := ~/.local/bin/anito
 BUILD   := go build -ldflags "-X main.version=$(VERSION)" -o $(BINARY) ./cmd/anito/
+UI_DIR  := internal/server/ui
 
-.PHONY: build install reload release test
+.PHONY: build install reload release test ui-build ui-dev
 
-## build: compile the binary to ~/.local/bin/anito
-build:
+## ui-build: compile the React SPA into internal/server/ui/dist
+ui-build:
+	cd $(UI_DIR) && npm run build
+
+## ui-dev: run the Vite dev server (proxies API to localhost:7700)
+ui-dev:
+	cd $(UI_DIR) && npm run dev
+
+## build: compile the React SPA then the Go binary to ~/.local/bin/anito
+build: ui-build
 	$(BUILD)
 	@echo "built anito $(VERSION) → $(BINARY)"
 
