@@ -1,0 +1,28 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(anito)",
+      "Bash(anito deploy:*)",
+      "Bash(anito reload:*)",
+      "Bash(anito services:*)",
+      "Bash(anito version:*)",
+      "Bash(anito mcp:*)",
+      "Bash(make:*)",
+      "Bash(npm --version)",
+      "Bash(npm install:*)",
+      "Bash(npm run:*)",
+      "Bash(launchctl load:*)",
+      "Bash(launchctl unload:*)",
+      "Bash(launchctl list:*)",
+      "Bash(curl -s http://localhost:7700/health)",
+      "Bash(curl -s -o /dev/null -w \"%{http_code}\" http://localhost:7701)",
+      "Bash(git tag:*)",
+      "Bash(gh issue:*)",
+      "Bash(claude mcp:*)",
+      "WebFetch(domain:github.com)",
+      "WebFetch(domain:raw.githubusercontent.com)",
+      "WebFetch(domain:api.github.com)",
+      "mcp__anito__anito_setup"
+    ]
+  }
+}

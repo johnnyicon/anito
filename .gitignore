@@ -20,5 +20,5 @@ example/hello-service/hello-service
 *.swp
 *.swo
 
-# Claude Code project settings (user-specific)
-.claude/
+# Claude Code local overrides (machine-specific permissions)
+.claude/settings.local.json
