@@ -204,10 +204,14 @@ anito logs <name>
 # Redeploy after a code change (zero downtime)
 anito deploy
 
-# Reload the daemon after updating the binary
-launchctl unload ~/Library/LaunchAgents/com.anito.daemon.plist
-go build -o ~/.local/bin/anito ./cmd/anito/
-launchctl load  ~/Library/LaunchAgents/com.anito.daemon.plist
+# Rebuild the binary and hot-swap the running daemon
+make reload
+
+# Start the daemon (if manually stopped or after first install)
+make start
+
+# Stop the daemon
+make stop
 ```
 
 ---
