@@ -3,7 +3,9 @@ BINARY  := ~/.local/bin/anito
 BUILD   := go build -ldflags "-X main.version=$(VERSION)" -o $(BINARY) ./cmd/anito/
 UI_DIR  := internal/server/ui
 
-.PHONY: build install reload release test ui-build ui-dev
+PLIST := $(HOME)/Library/LaunchAgents/com.anito.daemon.plist
+
+.PHONY: build install reload start stop release test ui-build ui-dev
 
 ## ui-build: compile the React SPA into internal/server/ui/dist
 ui-build:
@@ -24,6 +26,16 @@ install: build
 ## reload: build + reload the running daemon (requires launchd agent installed)
 reload: build
 	anito reload
+
+## start: load the launchd agent (starts the daemon)
+start:
+	launchctl load $(PLIST)
+	@echo "anito started"
+
+## stop: unload the launchd agent (stops the daemon)
+stop:
+	launchctl unload $(PLIST)
+	@echo "anito stopped"
 
 ## release VERSION=v1.2.3: tag + build
 release:
