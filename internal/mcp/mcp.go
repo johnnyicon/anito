@@ -80,20 +80,37 @@ type serviceView struct {
 	BinaryPath    string `json:"binary_path"`
 }
 
+// setupInput is the unified input for anito_setup.
+// For a single-service repo: provide only Path.
+// For a composite app: also provide Services and Relationships.
 type setupInput struct {
-	Path string `json:"path" jsonschema:"absolute path to the repo root to inspect"`
+	Path          string          `json:"path"          jsonschema:"absolute path to the repo root to inspect or coordinate"`
+	Services      []coordinateSvc `json:"services"      jsonschema:"for composite apps only: list each service with its name, path, and optional preferred_port. Omit for single-service repos — anito_setup will inspect the repo at Path automatically."`
+	Relationships []coordinateRel `json:"relationships" jsonschema:"for composite apps only: which services communicate with each other. Each entry drives proxy config generation (e.g. Vite proxy) and env var injection."`
 }
 
-type setupOutput struct {
-	RepoPath        string        `json:"repo_path"`
-	ServiceName     string        `json:"service_name"`
-	Language        string        `json:"language"`
-	HasAnitoConfig  bool          `json:"has_anito_config"`
-	HasPORT         bool          `json:"has_port"`
-	HasHealthRoute  bool          `json:"has_health_route"`
-	Issues          []setupIssue  `json:"issues"`
-	SuggestedConfig string        `json:"suggested_config"`
-	Instructions    []string      `json:"instructions"`
+// setupResult is the unified output from anito_setup.
+// mode is either 'single' (one service inspected) or 'composite' (multi-service coordinated).
+// In both modes, generated_files contains everything to write and instructions is the action list.
+type setupResult struct {
+	Mode    string `json:"mode"`     // "single" | "composite"
+	RepoPath string `json:"repo_path"`
+
+	// Single-service inspection results (mode: single)
+	ServiceName    string       `json:"service_name,omitempty"`
+	Language       string       `json:"language,omitempty"`
+	HasAnitoConfig bool         `json:"has_anito_config,omitempty"`
+	HasPORT        bool         `json:"has_port,omitempty"`
+	HasHealthRoute bool         `json:"has_health_route,omitempty"`
+	Issues         []setupIssue `json:"issues,omitempty"`
+
+	// Composite coordination results (mode: composite)
+	Allocations map[string]int `json:"allocations,omitempty"` // service name → stable port
+
+	// Shared in both modes: files to write + source patches + action list
+	GeneratedFiles []coordinateFile  `json:"generated_files,omitempty"`
+	SourcePatches  []coordinatePatch `json:"source_patches,omitempty"`
+	Instructions   []string          `json:"instructions"`
 }
 
 type setupIssue struct {
@@ -103,12 +120,6 @@ type setupIssue struct {
 }
 
 // --- coordinate types ---
-
-type coordinateInput struct {
-	RepoPath      string           `json:"repo_path"      jsonschema:"absolute path to the repository root"`
-	Services      []coordinateSvc  `json:"services"       jsonschema:"services to coordinate — each gets a stable port assignment"`
-	Relationships []coordinateRel  `json:"relationships"  jsonschema:"which services talk to each other; drives proxy config in Vite/Next"`
-}
 
 type coordinateSvc struct {
 	Name          string `json:"name"           jsonschema:"service name — must be unique, becomes the Anito service identifier"`
@@ -308,88 +319,89 @@ func (s *Server) registerTools(srv *sdkmcp.Server) {
 	})
 
 	sdkmcp.AddTool(srv, &sdkmcp.Tool{
-		Name: "anito_coordinate",
-		Description: "Set up port coordination for a composite app (multiple services that talk to each other). " +
-			"Assigns stable ports to all services, generates .anito/ports.env (the shared address map), " +
-			"per-service .anito/*.yaml config files, and [anito:managed] source patches for frameworks " +
-			"that need them (Vite proxy config, Next.js rewrites, etc.). " +
-			"The generated blocks are marked with [anito:managed] — tell developers not to edit them manually. " +
-			"Call anito_reserve for each service after getting the allocations to lock the ports in the registry. " +
-			"Then deploy with anito_deploy using the generated config files.",
-	}, func(ctx context.Context, req *sdkmcp.CallToolRequest, in coordinateInput) (*sdkmcp.CallToolResult, coordinateOutput, error) {
-		log.Printf("[MCP] tool=anito_coordinate repo=%s services=%d", in.RepoPath, len(in.Services))
-
-		// Convert input to setup.ServiceSpec
-		specs := make([]setup.ServiceSpec, len(in.Services))
-		for i, svc := range in.Services {
-			specs[i] = setup.ServiceSpec{
-				Name:          svc.Name,
-				Path:          svc.Path,
-				PreferredPort: svc.PreferredPort,
-			}
-		}
-		rels := make([]setup.Relationship, len(in.Relationships))
-		for i, rel := range in.Relationships {
-			rels[i] = setup.Relationship{
-				From:      rel.From,
-				To:        rel.To,
-				ProxyPath: rel.ProxyPath,
-			}
-		}
-
-		result, err := setup.CoordinateApp(in.RepoPath, specs, rels, s.svc.UsedPorts())
-		if err != nil {
-			log.Printf("[MCP] tool=anito_coordinate repo=%s error=%q", in.RepoPath, err)
-			return nil, coordinateOutput{}, err
-		}
-
-		out := coordinateOutput{
-			Allocations:  map[string]int(result.Allocations),
-			PortsEnvPath: result.PortsEnvPath,
-		}
-		for _, f := range result.GeneratedFiles {
-			out.GeneratedFiles = append(out.GeneratedFiles, coordinateFile{RelPath: f.RelPath, Content: f.Content})
-		}
-		for _, p := range result.SourcePatches {
-			out.SourcePatches = append(out.SourcePatches, coordinatePatch{
-				RelPath:     p.RelPath,
-				Marker:      p.Marker,
-				Block:       p.Block,
-				Instruction: p.Instruction,
-			})
-		}
-		out.Instructions = result.Instructions
-		return nil, out, nil
-	})
-
-	sdkmcp.AddTool(srv, &sdkmcp.Tool{
 		Name: "anito_setup",
-		Description: "Inspect a repo and return everything needed to make it Anito-compatible. " +
-			"Detects the language, checks for PORT env var usage and a /health endpoint, " +
-			"generates a suggested .anito/config.yaml, and returns step-by-step instructions. " +
-			"Use this when onboarding a new repo.",
-	}, func(ctx context.Context, req *sdkmcp.CallToolRequest, in setupInput) (*sdkmcp.CallToolResult, setupOutput, error) {
-		log.Printf("[MCP] tool=anito_setup path=%s", in.Path)
+		Description: "Set up a repo for Anito — works for both single-service repos and composite apps. " +
+			"SINGLE SERVICE: call with only path. Inspects the repo, checks the Anito service contract " +
+			"(PORT env var, /health route), generates .anito/config.yaml, returns issues and instructions. " +
+			"COMPOSITE APP (multiple services that talk to each other): also provide services[] and relationships[]. " +
+			"Assigns stable ports to all services, generates .anito/ports.env (shared address map), " +
+			"per-service config files, dev wrapper scripts, and [anito:managed] source patches for " +
+			"frameworks that need them (Vite proxy config, Next.js rewrites, etc.). " +
+			"In both modes, generated_files contains every file to write and instructions is the action list. " +
+			"After setup, call anito_reserve for each service to lock ports, then anito_deploy to start them.",
+	}, func(ctx context.Context, req *sdkmcp.CallToolRequest, in setupInput) (*sdkmcp.CallToolResult, setupResult, error) {
+		// --- composite mode ---
+		if len(in.Services) > 0 {
+			log.Printf("[MCP] tool=anito_setup mode=composite path=%s services=%d", in.Path, len(in.Services))
+			specs := make([]setup.ServiceSpec, len(in.Services))
+			for i, svc := range in.Services {
+				specs[i] = setup.ServiceSpec{
+					Name:          svc.Name,
+					Path:          svc.Path,
+					PreferredPort: svc.PreferredPort,
+				}
+			}
+			rels := make([]setup.Relationship, len(in.Relationships))
+			for i, rel := range in.Relationships {
+				rels[i] = setup.Relationship{
+					From:      rel.From,
+					To:        rel.To,
+					ProxyPath: rel.ProxyPath,
+				}
+			}
+			result, err := setup.CoordinateApp(in.Path, specs, rels, s.svc.UsedPorts())
+			if err != nil {
+				log.Printf("[MCP] tool=anito_setup mode=composite path=%s error=%q", in.Path, err)
+				return nil, setupResult{}, err
+			}
+			out := setupResult{
+				Mode:        "composite",
+				RepoPath:    in.Path,
+				Allocations: map[string]int(result.Allocations),
+				Instructions: result.Instructions,
+			}
+			for _, f := range result.GeneratedFiles {
+				out.GeneratedFiles = append(out.GeneratedFiles, coordinateFile{RelPath: f.RelPath, Content: f.Content})
+			}
+			for _, p := range result.SourcePatches {
+				out.SourcePatches = append(out.SourcePatches, coordinatePatch{
+					RelPath: p.RelPath, Marker: p.Marker, Block: p.Block, Instruction: p.Instruction,
+				})
+			}
+			return nil, out, nil
+		}
+
+		// --- single-service mode ---
+		log.Printf("[MCP] tool=anito_setup mode=single path=%s", in.Path)
 		result, err := setup.Inspect(in.Path)
 		if err != nil {
-			log.Printf("[MCP] tool=anito_setup path=%s error=%q", in.Path, err)
-			return nil, setupOutput{}, err
+			log.Printf("[MCP] tool=anito_setup mode=single path=%s error=%q", in.Path, err)
+			return nil, setupResult{}, err
 		}
 		issues := make([]setupIssue, len(result.Issues))
 		for i, iss := range result.Issues {
 			issues[i] = setupIssue{Severity: iss.Severity, What: iss.What, Fix: iss.Fix}
 		}
-		return nil, setupOutput{
-			RepoPath:        result.RepoPath,
-			ServiceName:     result.ServiceName,
-			Language:        string(result.Language),
-			HasAnitoConfig:  result.HasAnitoConfig,
-			HasPORT:         result.HasPORT,
-			HasHealthRoute:  result.HasHealthRoute,
-			Issues:          issues,
-			SuggestedConfig: result.SuggestedConfig,
-			Instructions:    result.Instructions,
-		}, nil
+		out := setupResult{
+			Mode:           "single",
+			RepoPath:       result.RepoPath,
+			ServiceName:    result.ServiceName,
+			Language:       string(result.Language),
+			HasAnitoConfig: result.HasAnitoConfig,
+			HasPORT:        result.HasPORT,
+			HasHealthRoute: result.HasHealthRoute,
+			Issues:         issues,
+			Instructions:   result.Instructions,
+		}
+		// Surface the suggested config as a generated file so the LLM can
+		// write it directly — same pattern as composite mode.
+		if result.SuggestedConfig != "" {
+			out.GeneratedFiles = append(out.GeneratedFiles, coordinateFile{
+				RelPath: ".anito/config.yaml",
+				Content: result.SuggestedConfig,
+			})
+		}
+		return nil, out, nil
 	})
 }
 

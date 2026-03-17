@@ -122,8 +122,38 @@ Stop a service and remove it from the Anito registry. The stable port is release
 
 ---
 
+### `anito_setup`
+Set up a repo for Anito. Works for both single-service repos and composite apps — one tool, one call.
+
+**Single-service repo:** call with only `path`. Inspects the repo, checks the service contract (PORT env var, `/health` route), and returns a `.anito/config.yaml` to write plus a list of any issues to fix.
+
+**Composite app (multiple services that talk to each other):** also provide `services` and `relationships`. Assigns stable ports to all services, generates `.anito/ports.env` (shared address map), per-service config files, dev wrapper scripts, and `[anito:managed]` source patches for frameworks that need them (Vite proxy config, etc.).
+
+In both modes, `generated_files` contains every file to write and `instructions` is the ordered action list.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `path` | string | yes | Absolute path to the repo root |
+| `services` | array | no | **Composite only.** Each: `{ name, path, preferred_port? }`. Omit for single-service repos. |
+| `relationships` | array | no | **Composite only.** Each: `{ from, to, proxy_path? }`. Drives Vite proxy config generation. |
+
+Returns:
+
+| Field | When present | Description |
+|-------|-------------|-------------|
+| `mode` | always | `"single"` or `"composite"` |
+| `issues` | single | Contract violations: missing PORT, missing /health, etc. |
+| `allocations` | composite | `{ name: port }` — assigned stable port per service |
+| `generated_files` | always | Files to write into the repo (config.yaml, ports.env, wrapper scripts) |
+| `source_patches` | composite | `[anito:managed]` blocks to apply to `vite.config.ts` etc. |
+| `instructions` | always | Ordered action list |
+
+**`[anito:managed]` blocks** are delimited by `// [anito:managed start]` / `// [anito:managed end]` comments. These blocks are owned by Anito — do not edit them manually. Run `anito setup` again to regenerate.
+
+---
+
 ### `anito_reserve`
-Reserve a stable port for a named service before its binary exists. Use this during composite app setup to guarantee port assignments before any builds run. A subsequent `anito_deploy` for the same name will use the reserved port — the assignment is permanent.
+Reserve a stable port for a named service before its binary exists. Called by the LLM after `anito_setup` returns composite allocations — locks each port in the registry so nothing else can claim it before the binary is built and deployed.
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
@@ -131,31 +161,6 @@ Reserve a stable port for a named service before its binary exists. Use this dur
 | `preferred_port` | int | no | Preferred port (0 = auto-allocate from 8100–8200) |
 
 Returns `{ name, stable_port, address }`.
-
----
-
-### `anito_coordinate`
-Set up port coordination for a composite app — multiple services in one repo that talk to each other. Assigns stable ports, generates `.anito/ports.env` (the shared address map), per-service `.anito/*.yaml` config files, and `[anito:managed]` source patches for frameworks that need them (Vite proxy config, Next.js rewrites, etc.).
-
-**Workflow:** call this first → it tells you exactly what to write where → call `anito_reserve` for each service to lock the ports → then `anito_deploy` per service.
-
-| Parameter | Type | Required | Description |
-|-----------|------|----------|-------------|
-| `repo_path` | string | yes | Absolute path to the repository root |
-| `services` | array | yes | Services to coordinate. Each: `{ name, path, preferred_port? }` |
-| `relationships` | array | no | Which services talk to which. Each: `{ from, to, proxy_path? }` |
-
-Returns:
-
-| Field | Description |
-|-------|-------------|
-| `allocations` | `{ name: port }` — assigned stable port per service |
-| `ports_env_path` | Always `.anito/ports.env` |
-| `generated_files` | Files to write: `ports.env`, per-service `*.yaml`, dev wrapper scripts |
-| `source_patches` | `[anito:managed]` blocks to apply to `vite.config.ts` etc. |
-| `instructions` | Ordered action list for the LLM |
-
-**`[anito:managed]` blocks** are delimited by `// [anito:managed start]` / `// [anito:managed end]` comments. Tell the developer: **do not edit these manually** — run `anito setup` to regenerate them. The same markers let `anito setup --refresh` update them automatically on the next coordination run.
 
 ---
 
@@ -224,30 +229,36 @@ anito_logs(name="~daemon", lines=50)
 # look for [WATCH], [RESTART], [CRASH], [ERROR] entries
 ```
 
+**Set up a single-service repo:**
+```
+result = anito_setup(path="/abs/path/to/my-api")
+# result.mode == "single"
+# result.issues → any contract violations to fix
+# result.generated_files[0] → .anito/config.yaml content to write
+# follow result.instructions
+```
+
 **Set up a composite app (backend + frontend that talk to each other):**
 ```
-# 1. Get port assignments and generated files
-result = anito_coordinate(
-  repo_path="/abs/path/to/my-app",
+result = anito_setup(
+  path="/abs/path/to/my-app",
   services=[
-    { name="my-api",  path="/abs/path/to/my-app" },
-    { name="my-web",  path="/abs/path/to/my-app/apps/web" }
+    { name="my-api", path="/abs/path/to/my-app" },
+    { name="my-web", path="/abs/path/to/my-app/apps/web" }
   ],
   relationships=[
     { from="my-web", to="my-api", proxy_path="/api" }
   ]
 )
+# result.mode == "composite"
 # result.allocations → { "my-api": 8100, "my-web": 8101 }
-
-# 2. Write all generated files (result.generated_files) to the repo
-# 3. Apply source patches (result.source_patches) — e.g. vite.config.ts server block
-# 4. Lock the ports in the Anito registry
-anito_reserve(name="my-api", preferred_port=8100)
+# result.generated_files → ports.env, config yamls, wrapper scripts — write them all
+# result.source_patches → [anito:managed] blocks for vite.config.ts etc.
+# follow result.instructions, then:
+anito_reserve(name="my-api", preferred_port=8100)   # lock ports
 anito_reserve(name="my-web", preferred_port=8101)
-
-# 5. Deploy
-anito_deploy(name="my-api", path="/abs/path/to/binary", stable_port=8100, env_file=".anito/ports.env")
-anito_deploy(name="my-web", path=".anito/my-web-dev.sh", stable_port=8101, env_file=".anito/ports.env")
+anito_deploy(name="my-api", path="/abs/path/to/binary", env_file=".anito/ports.env")
+anito_deploy(name="my-web", path=".anito/my-web-dev.sh", env_file=".anito/ports.env")
 # my-api → http://localhost:8100 (permanent)
-# my-web → http://localhost:8101 (permanent, Vite proxies /api to my-api)
+# my-web → http://localhost:8101 (permanent, Vite proxies /api → my-api)
 ```
