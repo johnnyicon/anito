@@ -1,0 +1,24 @@
+{
+  "$schema": "https://maykapal.dev/schemas/gomanan/project-config/v1.json",
+  "version": 1,
+  "project_slug": "anito",
+  "project_id": "019cf98a-a430-7bf3-aa4c-24bc45c7efa2",
+  "workspace_path": "/Users/kanekoa/Workspace/anito",
+  "docs": {
+    "adr_dir": "docs/adr",
+    "decision_journals_dir": "docs/decision-journals"
+  },
+  "blog": {
+    "enabled": true,
+    "output_dir": "/Users/kanekoa/Workspace/anito-blog",
+    "auto_commit": true
+  },
+  "tolus": {
+    "decided": true,
+    "enabled": true,
+    "languages": [
+      "go",
+      "typescript"
+    ]
+  }
+}
