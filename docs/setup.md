@@ -119,6 +119,57 @@ anito deploy
 
 ---
 
+## 7. Watch mode — automatic restart on file changes
+
+Add a `watch` field to `.anito/config.yaml` to have Anito automatically restart the service whenever a file changes in the listed directories:
+
+```yaml
+name: my-service
+port: 3000
+type: binary
+output: ./dist/my-service
+health_check: /health
+watch:
+  - /abs/path/to/src/
+```
+
+When any file under a watched directory is written or created, Anito:
+1. Debounces events for 500ms (rapid saves collapse into one restart)
+2. Calls `Restart` — starts a new process, health-checks it, swaps the proxy
+3. Drains the old process gracefully
+
+The stable port never disconnects. Consumers (browsers, MCP hosts) reconnect automatically after the brief swap.
+
+**Typical use case — `go run` dev tier:**
+
+```yaml
+name: my-daemon-dev
+port: 8101
+type: binary
+output: .anito/my-daemon-dev-server   # shell script: exec go run ./cmd/my-daemon/
+health_check: /health
+watch:
+  - /abs/path/to/src/
+```
+
+Every source file save triggers a fresh `go run` compile (~3–5s) and a zero-downtime proxy swap. No manual restart needed.
+
+**Deploying with watch mode:**
+
+```bash
+anito deploy .anito/config.yaml
+# ✓ my-service running on localhost:3000
+# watcher active on /abs/path/to/src/
+```
+
+Watch paths are stored in the registry and survive daemon restarts — the watcher is restored automatically the next time Anito starts.
+
+**Crash auto-restart:**
+
+Services with `watch` paths also restart automatically if the process exits unexpectedly (after a 2s cooldown). Services without `watch` paths are not auto-restarted on crash — they stay `failed` until you intervene.
+
+---
+
 ## Port reference
 
 | What | Port |
@@ -162,16 +213,21 @@ The log uses a structured `[TAG] key=value` format designed for grepping:
 | `[API]` | Every HTTP management API request — method, path, status, duration |
 | `[MCP]` | Every MCP tool call — tool name and key parameters |
 | `[DEPLOY]` | Successful deploy — service name, stable port, internal port, PID |
+| `[WATCH]` | File change detected — service name, triggering file path |
+| `[RESTART]` | Service restarted — with `port=` and `internal=` on success, `reason=crash` on crash recovery |
+| `[DRAIN]` | Old process intentionally killed after a hot-swap — not a crash |
 | `[STOP]` | Service stopped |
-| `[RESTART]` | Service restarted |
 | `[REMOVE]` | Service removed from registry |
 | `[CRASH]` | Unexpected process exit — service name and PID |
 | `[ERROR]` | Operation failed — includes the error message |
 
 **Useful grep patterns:**
 ```bash
-# All errors
+# All errors and unexpected crashes
 grep '\[ERROR\]\|\[CRASH\]' ~/.anito/logs/anito.log
+
+# Watch and restart activity for one service
+grep '\[WATCH\]\|\[RESTART\]\|\[DRAIN\]' ~/.anito/logs/anito.log | grep my-service
 
 # Deploy history for one service
 grep '\[DEPLOY\] name=my-service' ~/.anito/logs/anito.log
@@ -179,6 +235,10 @@ grep '\[DEPLOY\] name=my-service' ~/.anito/logs/anito.log
 # All MCP tool calls
 grep '\[MCP\]' ~/.anito/logs/anito.log
 ```
+
+**Daemon log in the dashboard:**
+
+Open [http://localhost:7700](http://localhost:7700) and click **"daemon log"** in the header to see `anito.log` streaming live with colour-coded tags — no terminal required.
 
 Per-service logs (the service's own stdout/stderr) live separately:
 ```bash

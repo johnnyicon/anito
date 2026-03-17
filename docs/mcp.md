@@ -59,8 +59,11 @@ Deploy a service. The binary must already be built. Anito handles the start, hea
 | `type` | string | no | `binary` (default) or `static` |
 | `env_file` | string | no | Path to a `KEY=VALUE` env file |
 | `health_check` | string | no | Health check path (default: `/health`) |
+| `watch_paths` | []string | no | Directories to watch for file changes. Any write triggers an automatic restart (debounced 500ms). Also enables crash auto-restart. |
 
 Returns the service record including the assigned stable port.
+
+Watch paths are persisted in the registry and survive daemon restarts — the watcher is restored automatically.
 
 ---
 
@@ -85,8 +88,10 @@ Return recent log output for a service. Use this to diagnose failures or inspect
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
-| `name` | string | yes | Service name |
+| `name` | string | yes | Service name, or `~daemon` for the Anito daemon log |
 | `lines` | int | no | Number of recent lines to return (default: 100) |
+
+Pass `name="~daemon"` to read Anito's own log (`~/.anito/logs/anito.log`). This contains `[DEPLOY]`, `[WATCH]`, `[RESTART]`, `[CRASH]`, `[MCP]`, and `[ERROR]` entries for all services — useful for diagnosing why a service restarted or failed.
 
 ---
 
@@ -162,4 +167,22 @@ anito_logs(name="my-service", lines=50)
 # Build the binary first (outside Anito), then:
 anito_deploy(name="my-service", path="/abs/path/to/binary")
 # stable port is preserved automatically
+```
+
+**Deploy a dev-tier service that auto-restarts on source changes:**
+```
+anito_deploy(
+  name="my-daemon-dev",
+  path="/abs/path/to/dev-server-script",   # shell script: exec go run ./cmd/...
+  stable_port=8101,
+  health_check="/health",
+  watch_paths=["/abs/path/to/src/"]
+)
+# any .go file change now triggers automatic recompile + restart
+```
+
+**Check why a service restarted:**
+```
+anito_logs(name="~daemon", lines=50)
+# look for [WATCH], [RESTART], [CRASH], [ERROR] entries
 ```
