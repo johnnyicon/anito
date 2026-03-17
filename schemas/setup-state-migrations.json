@@ -1,0 +1,66 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://anito.dev/schemas/setup-state-migrations/v1.json",
+  "title": "AnitoSetupMigrations",
+  "description": "Registry of schema version changes. Each entry describes what changed, why, and what Anito should do when it encounters a state file at the previous version.",
+  "type": "object",
+  "required": ["migrations"],
+  "properties": {
+    "migrations": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/Migration"
+      }
+    }
+  },
+  "$defs": {
+    "Migration": {
+      "type": "object",
+      "required": ["fromVersion", "toVersion", "reason", "breaking", "instructions"],
+      "additionalProperties": false,
+      "properties": {
+        "fromVersion": {
+          "type": "string",
+          "pattern": "^\\d+\\.\\d+\\.\\d+$",
+          "description": "The schema version this migration upgrades from."
+        },
+        "toVersion": {
+          "type": "string",
+          "pattern": "^\\d+\\.\\d+\\.\\d+$",
+          "description": "The schema version this migration produces."
+        },
+        "date": {
+          "type": "string",
+          "format": "date",
+          "description": "Date this migration was introduced."
+        },
+        "reason": {
+          "type": "string",
+          "description": "Why this schema change was made. Required — future engineers and LLMs need this context."
+        },
+        "breaking": {
+          "type": "boolean",
+          "description": "True if this migration removes or renames fields. Breaking migrations cannot be auto-applied."
+        },
+        "autoMigratable": {
+          "type": "boolean",
+          "description": "True if Anito can apply this migration automatically without developer input."
+        },
+        "addedSteps": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Step IDs introduced in this version."
+        },
+        "removedSteps": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Step IDs removed in this version. Removal requires a reason."
+        },
+        "instructions": {
+          "type": "string",
+          "description": "Instructions shown to the developer when their state file is behind this version. Written for humans and LLMs alike."
+        }
+      }
+    }
+  }
+}

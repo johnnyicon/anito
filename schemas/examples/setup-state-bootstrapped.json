@@ -1,0 +1,26 @@
+{
+  "_comment": "Example: setup-state.json synthesized from an existing .anito/config.yaml (legacy project, no prior state file). bootstrapped:true tells Anito to treat this state with extra caution.",
+  "schemaVersion": "1.0.0",
+  "anitoBinaryVersion": "unknown",
+  "projectName": "my-legacy-service",
+  "bootstrapped": true,
+  "lastSetupAt": "2026-03-16T00:00:00Z",
+  "appliedSteps": [
+    {
+      "id": "init-config-dir",
+      "stepVersion": "1.0.0",
+      "description": "Inferred: .anito/config.yaml already present at bootstrap time.",
+      "appliedAt": "1970-01-01T00:00:00Z"
+    },
+    {
+      "id": "register-service",
+      "stepVersion": "1.0.0",
+      "description": "Inferred: service config found at .anito/config.yaml.",
+      "appliedAt": "1970-01-01T00:00:00Z",
+      "data": {
+        "stablePort": 3000,
+        "type": "binary"
+      }
+    }
+  ]
+}

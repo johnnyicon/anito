@@ -22,3 +22,6 @@ example/hello-service/hello-service
 
 # Claude Code local overrides (machine-specific permissions)
 .claude/settings.local.json
+
+# Scratch / temp files
+tmp/

@@ -1,0 +1,25 @@
+{
+  "schemaVersion": "1.0.0",
+  "anitoBinaryVersion": "0.1.0",
+  "projectName": "hello-service",
+  "bootstrapped": false,
+  "lastSetupAt": "2026-03-16T00:00:00Z",
+  "appliedSteps": [
+    {
+      "id": "init-config-dir",
+      "stepVersion": "1.0.0",
+      "description": "Created .anito/ directory and base config.yaml",
+      "appliedAt": "2026-03-16T00:00:00Z"
+    },
+    {
+      "id": "register-service",
+      "stepVersion": "1.0.0",
+      "description": "Registered service with Anito daemon",
+      "appliedAt": "2026-03-16T00:00:00Z",
+      "data": {
+        "stablePort": 3000,
+        "type": "binary"
+      }
+    }
+  ]
+}
