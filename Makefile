@@ -5,7 +5,7 @@ UI_DIR  := internal/server/ui
 
 PLIST := $(HOME)/Library/LaunchAgents/com.anito.daemon.plist
 
-.PHONY: build install reload start stop release test ui-build ui-dev
+.PHONY: build install reload start stop release test ui-build ui-dev install-hooks
 
 ## ui-build: compile the React SPA into internal/server/ui/dist
 ui-build:
@@ -48,6 +48,12 @@ release:
 ## test: run all tests
 test:
 	go test ./...
+
+## install-hooks: install git hooks from scripts/ into .git/hooks/
+install-hooks:
+	cp scripts/pre-commit .git/hooks/pre-commit
+	chmod +x .git/hooks/pre-commit
+	@echo "installed pre-commit hook"
 
 ## help: list targets
 help:

@@ -175,6 +175,12 @@ func (s *Service) Services() []*registry.Service {
 	return s.reg.All()
 }
 
+// UsedPorts returns the set of stable ports currently claimed in the registry.
+// Used by anito_coordinate to avoid port conflicts when allocating new ports.
+func (s *Service) UsedPorts() map[int]bool {
+	return s.reg.UsedPorts()
+}
+
 func (s *Service) Status(name string) (*registry.Service, error) {
 	svc, ok := s.reg.Get(name)
 	if !ok {
@@ -393,6 +399,30 @@ func (s *Service) LogStream(ctx context.Context, name string) (<-chan string, er
 		}
 	}()
 	return ch, nil
+}
+
+// Reserve claims a stable port for a named service without deploying it.
+// It is used by multi-service setup (anito_coordinate) to guarantee port
+// assignments before any binary exists. A subsequent Deploy() for the same
+// service name will re-use the reserved port — the assignment never changes.
+func (s *Service) Reserve(name string, preferredPort int) (int, error) {
+	port, err := s.allocatePort(name, preferredPort)
+	if err != nil {
+		return 0, err
+	}
+	// Write a stub registry entry so the port appears in UsedPorts() for
+	// subsequent allocations and survives daemon restarts.
+	if _, exists := s.reg.Get(name); !exists {
+		_ = s.reg.Register(&registry.Service{
+			Name:        name,
+			StablePort:  port,
+			Type:        registry.TypeBinary,
+			HealthCheck: "/health",
+			Status:      registry.StatusStopped,
+		})
+	}
+	log.Printf("[RESERVE] name=%s port=%d", name, port)
+	return port, nil
 }
 
 // allocatePort returns the stable port to use for the named service.

@@ -1,0 +1,16 @@
+{
+  "$schema": "https://anito.dev/schemas/setup-state-migrations/v1.json",
+  "migrations": [
+    {
+      "fromVersion": "1.0.0",
+      "toVersion": "1.1.0",
+      "date": "2026-03-17",
+      "reason": "Added composite app support: port coordination across multiple services in a monorepo. The new compositeApp field tracks assigned ports, the shared ports.env path, and service relationships. New step IDs (coordinate-ports, write-ports-env, patch-source-file) record what anito_coordinate did so anito setup --refresh can update managed blocks without re-asking the developer. This change is fully backwards-compatible — existing single-service state files at v1.0.0 are unaffected.",
+      "breaking": false,
+      "autoMigratable": true,
+      "addedSteps": ["coordinate-ports", "write-ports-env", "patch-source-file"],
+      "removedSteps": [],
+      "instructions": "No action required. The compositeApp field is optional. Existing single-service projects at schema v1.0.0 continue to work without changes. To opt in to composite app coordination for a multi-service repo, run: anito setup (CLI) or call anito_coordinate via the MCP server."
+    }
+  ]
+}

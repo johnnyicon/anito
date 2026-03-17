@@ -1,0 +1,137 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://anito.dev/schemas/setup-state/v1.1.json",
+  "title": "AnitoSetupState",
+  "description": "Tracks which setup steps have been applied in this project. Lives at .anito/setup-state.json in the consuming repo. Committed to git.",
+  "type": "object",
+  "required": ["schemaVersion", "appliedSteps"],
+  "additionalProperties": false,
+  "properties": {
+    "schemaVersion": {
+      "type": "string",
+      "pattern": "^\\d+\\.\\d+\\.\\d+$",
+      "description": "Semantic version of this schema. Used by Anito to detect when migrations are needed."
+    },
+    "anitoBinaryVersion": {
+      "type": "string",
+      "pattern": "^\\d+\\.\\d+\\.\\d+$",
+      "description": "Version of the Anito binary that last ran setup."
+    },
+    "projectName": {
+      "type": "string",
+      "description": "Name of this project. Matches the name used in service configs."
+    },
+    "lastSetupAt": {
+      "type": "string",
+      "format": "date-time",
+      "description": "ISO 8601 timestamp of the last setup run."
+    },
+    "bootstrapped": {
+      "type": "boolean",
+      "description": "True if this state file was synthesized from an existing .anito/config.yaml rather than recorded during a real first-run setup. Signals that appliedAt timestamps and anitoBinaryVersion may be approximate. Anito treats bootstrapped state files with extra caution — it will not overwrite existing config without confirmation."
+    },
+    "compositeApp": {
+      "type": "object",
+      "description": "Present when this repo was set up as part of a multi-service composite app via anito_coordinate. Tracks port assignments and service relationships so anito setup --refresh can update them without user intervention.",
+      "additionalProperties": false,
+      "properties": {
+        "portsEnvPath": {
+          "type": "string",
+          "description": "Path to the shared ports.env file, relative to the repo root. Usually .anito/ports.env."
+        },
+        "services": {
+          "type": "array",
+          "description": "Services that are part of this composite app.",
+          "items": { "$ref": "#/$defs/CompositeService" }
+        },
+        "relationships": {
+          "type": "array",
+          "description": "Runtime dependencies between services. Drives proxy config in Vite/Next.",
+          "items": { "$ref": "#/$defs/ServiceRelationship" }
+        }
+      }
+    },
+    "appliedSteps": {
+      "type": "array",
+      "description": "Ordered list of setup steps that have been applied to this project.",
+      "items": { "$ref": "#/$defs/AppliedStep" }
+    }
+  },
+  "$defs": {
+    "AppliedStep": {
+      "type": "object",
+      "required": ["id", "stepVersion", "appliedAt"],
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Stable identifier for this setup step. Never changes between schema versions.",
+          "enum": [
+            "init-config-dir",
+            "register-service",
+            "coordinate-ports",
+            "write-ports-env",
+            "patch-source-file"
+          ]
+        },
+        "stepVersion": {
+          "type": "string",
+          "pattern": "^\\d+\\.\\d+\\.\\d+$",
+          "description": "Schema version in which this step was introduced."
+        },
+        "description": {
+          "type": "string",
+          "description": "Human-readable summary of what this step did."
+        },
+        "appliedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "ISO 8601 timestamp of when this step was applied."
+        },
+        "data": {
+          "type": "object",
+          "description": "Step-specific data captured at setup time. Shape varies by step ID.",
+          "additionalProperties": true
+        }
+      }
+    },
+    "CompositeService": {
+      "type": "object",
+      "required": ["name", "stablePort"],
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "type": "string",
+          "description": "Anito service name."
+        },
+        "stablePort": {
+          "type": "integer",
+          "description": "Stable port assigned by anito_coordinate. Permanent — never changes on redeploy."
+        },
+        "path": {
+          "type": "string",
+          "description": "Absolute path to the service root directory."
+        }
+      }
+    },
+    "ServiceRelationship": {
+      "type": "object",
+      "required": ["from", "to"],
+      "additionalProperties": false,
+      "properties": {
+        "from": {
+          "type": "string",
+          "description": "Service that depends on the other's address."
+        },
+        "to": {
+          "type": "string",
+          "description": "Service being depended on."
+        },
+        "proxyPath": {
+          "type": "string",
+          "description": "HTTP path forwarded in Vite/Next proxy config (e.g. /api). Optional."
+        }
+      }
+    }
+  }
+}

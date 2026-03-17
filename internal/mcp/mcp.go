@@ -102,6 +102,59 @@ type setupIssue struct {
 	Fix      string `json:"fix"`
 }
 
+// --- coordinate types ---
+
+type coordinateInput struct {
+	RepoPath      string           `json:"repo_path"      jsonschema:"absolute path to the repository root"`
+	Services      []coordinateSvc  `json:"services"       jsonschema:"services to coordinate — each gets a stable port assignment"`
+	Relationships []coordinateRel  `json:"relationships"  jsonschema:"which services talk to each other; drives proxy config in Vite/Next"`
+}
+
+type coordinateSvc struct {
+	Name          string `json:"name"           jsonschema:"service name — must be unique, becomes the Anito service identifier"`
+	Path          string `json:"path"           jsonschema:"absolute path to this service's root directory"`
+	PreferredPort int    `json:"preferred_port" jsonschema:"preferred stable port (0 or omit = auto-allocate from 8100-8200)"`
+}
+
+type coordinateRel struct {
+	From      string `json:"from"       jsonschema:"service name that needs to know the other's address"`
+	To        string `json:"to"         jsonschema:"service name being depended on"`
+	ProxyPath string `json:"proxy_path" jsonschema:"HTTP path to proxy in Vite/Next dev server, e.g. /api (optional)"`
+}
+
+type coordinateFile struct {
+	RelPath string `json:"rel_path"` // relative to repo root
+	Content string `json:"content"`
+}
+
+type coordinatePatch struct {
+	RelPath     string `json:"rel_path"`    // relative to repo root
+	Marker      string `json:"marker"`      // block marker name
+	Block       string `json:"block"`       // the [anito:managed] block to write
+	Instruction string `json:"instruction"` // plain-language instruction for the LLM
+}
+
+type coordinateOutput struct {
+	Allocations    map[string]int    `json:"allocations"`     // service name → stable port
+	PortsEnvPath   string            `json:"ports_env_path"`  // always ".anito/ports.env"
+	GeneratedFiles []coordinateFile  `json:"generated_files"` // files to write (ports.env, config.yaml, wrapper scripts)
+	SourcePatches  []coordinatePatch `json:"source_patches"`  // [anito:managed] blocks to apply
+	Instructions   []string          `json:"instructions"`    // ordered action list for the LLM
+}
+
+type reserveInput struct {
+	Name          string `json:"name"           jsonschema:"service name"`
+	PreferredPort int    `json:"preferred_port" jsonschema:"preferred stable port (0 = auto-allocate)"`
+}
+
+type reserveOutput struct {
+	Name       string `json:"name"`
+	StablePort int    `json:"stable_port"`
+	Address    string `json:"address"`
+}
+
+// ---
+
 type nameInput struct {
 	Name string `json:"name" jsonschema:"service name"`
 }
@@ -231,6 +284,82 @@ func (s *Server) registerTools(srv *sdkmcp.Server) {
 			return nil, opResult{}, err
 		}
 		return nil, opResult{Status: "removed", Name: in.Name}, nil
+	})
+
+	sdkmcp.AddTool(srv, &sdkmcp.Tool{
+		Name: "anito_reserve",
+		Description: "Reserve a stable port for a service before its binary exists. " +
+			"Use this when you know a service's name and want to guarantee its port " +
+			"before building or deploying. The reserved port will never be auto-allocated " +
+			"to another service. A subsequent anito_deploy for the same name will use the reserved port. " +
+			"Returns the assigned stable port and permanent address.",
+	}, func(ctx context.Context, req *sdkmcp.CallToolRequest, in reserveInput) (*sdkmcp.CallToolResult, reserveOutput, error) {
+		log.Printf("[MCP] tool=anito_reserve name=%s preferred=%d", in.Name, in.PreferredPort)
+		port, err := s.svc.Reserve(in.Name, in.PreferredPort)
+		if err != nil {
+			log.Printf("[MCP] tool=anito_reserve name=%s error=%q", in.Name, err)
+			return nil, reserveOutput{}, err
+		}
+		return nil, reserveOutput{
+			Name:       in.Name,
+			StablePort: port,
+			Address:    fmt.Sprintf("http://localhost:%d", port),
+		}, nil
+	})
+
+	sdkmcp.AddTool(srv, &sdkmcp.Tool{
+		Name: "anito_coordinate",
+		Description: "Set up port coordination for a composite app (multiple services that talk to each other). " +
+			"Assigns stable ports to all services, generates .anito/ports.env (the shared address map), " +
+			"per-service .anito/*.yaml config files, and [anito:managed] source patches for frameworks " +
+			"that need them (Vite proxy config, Next.js rewrites, etc.). " +
+			"The generated blocks are marked with [anito:managed] — tell developers not to edit them manually. " +
+			"Call anito_reserve for each service after getting the allocations to lock the ports in the registry. " +
+			"Then deploy with anito_deploy using the generated config files.",
+	}, func(ctx context.Context, req *sdkmcp.CallToolRequest, in coordinateInput) (*sdkmcp.CallToolResult, coordinateOutput, error) {
+		log.Printf("[MCP] tool=anito_coordinate repo=%s services=%d", in.RepoPath, len(in.Services))
+
+		// Convert input to setup.ServiceSpec
+		specs := make([]setup.ServiceSpec, len(in.Services))
+		for i, svc := range in.Services {
+			specs[i] = setup.ServiceSpec{
+				Name:          svc.Name,
+				Path:          svc.Path,
+				PreferredPort: svc.PreferredPort,
+			}
+		}
+		rels := make([]setup.Relationship, len(in.Relationships))
+		for i, rel := range in.Relationships {
+			rels[i] = setup.Relationship{
+				From:      rel.From,
+				To:        rel.To,
+				ProxyPath: rel.ProxyPath,
+			}
+		}
+
+		result, err := setup.CoordinateApp(in.RepoPath, specs, rels, s.svc.UsedPorts())
+		if err != nil {
+			log.Printf("[MCP] tool=anito_coordinate repo=%s error=%q", in.RepoPath, err)
+			return nil, coordinateOutput{}, err
+		}
+
+		out := coordinateOutput{
+			Allocations:  map[string]int(result.Allocations),
+			PortsEnvPath: result.PortsEnvPath,
+		}
+		for _, f := range result.GeneratedFiles {
+			out.GeneratedFiles = append(out.GeneratedFiles, coordinateFile{RelPath: f.RelPath, Content: f.Content})
+		}
+		for _, p := range result.SourcePatches {
+			out.SourcePatches = append(out.SourcePatches, coordinatePatch{
+				RelPath:     p.RelPath,
+				Marker:      p.Marker,
+				Block:       p.Block,
+				Instruction: p.Instruction,
+			})
+		}
+		out.Instructions = result.Instructions
+		return nil, out, nil
 	})
 
 	sdkmcp.AddTool(srv, &sdkmcp.Tool{

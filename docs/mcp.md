@@ -122,6 +122,43 @@ Stop a service and remove it from the Anito registry. The stable port is release
 
 ---
 
+### `anito_reserve`
+Reserve a stable port for a named service before its binary exists. Use this during composite app setup to guarantee port assignments before any builds run. A subsequent `anito_deploy` for the same name will use the reserved port — the assignment is permanent.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `name` | string | yes | Service name |
+| `preferred_port` | int | no | Preferred port (0 = auto-allocate from 8100–8200) |
+
+Returns `{ name, stable_port, address }`.
+
+---
+
+### `anito_coordinate`
+Set up port coordination for a composite app — multiple services in one repo that talk to each other. Assigns stable ports, generates `.anito/ports.env` (the shared address map), per-service `.anito/*.yaml` config files, and `[anito:managed]` source patches for frameworks that need them (Vite proxy config, Next.js rewrites, etc.).
+
+**Workflow:** call this first → it tells you exactly what to write where → call `anito_reserve` for each service to lock the ports → then `anito_deploy` per service.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `repo_path` | string | yes | Absolute path to the repository root |
+| `services` | array | yes | Services to coordinate. Each: `{ name, path, preferred_port? }` |
+| `relationships` | array | no | Which services talk to which. Each: `{ from, to, proxy_path? }` |
+
+Returns:
+
+| Field | Description |
+|-------|-------------|
+| `allocations` | `{ name: port }` — assigned stable port per service |
+| `ports_env_path` | Always `.anito/ports.env` |
+| `generated_files` | Files to write: `ports.env`, per-service `*.yaml`, dev wrapper scripts |
+| `source_patches` | `[anito:managed]` blocks to apply to `vite.config.ts` etc. |
+| `instructions` | Ordered action list for the LLM |
+
+**`[anito:managed]` blocks** are delimited by `// [anito:managed start]` / `// [anito:managed end]` comments. Tell the developer: **do not edit these manually** — run `anito setup` to regenerate them. The same markers let `anito setup --refresh` update them automatically on the next coordination run.
+
+---
+
 ## Service contract
 
 Every service managed by Anito must:
@@ -185,4 +222,32 @@ anito_deploy(
 ```
 anito_logs(name="~daemon", lines=50)
 # look for [WATCH], [RESTART], [CRASH], [ERROR] entries
+```
+
+**Set up a composite app (backend + frontend that talk to each other):**
+```
+# 1. Get port assignments and generated files
+result = anito_coordinate(
+  repo_path="/abs/path/to/my-app",
+  services=[
+    { name="my-api",  path="/abs/path/to/my-app" },
+    { name="my-web",  path="/abs/path/to/my-app/apps/web" }
+  ],
+  relationships=[
+    { from="my-web", to="my-api", proxy_path="/api" }
+  ]
+)
+# result.allocations → { "my-api": 8100, "my-web": 8101 }
+
+# 2. Write all generated files (result.generated_files) to the repo
+# 3. Apply source patches (result.source_patches) — e.g. vite.config.ts server block
+# 4. Lock the ports in the Anito registry
+anito_reserve(name="my-api", preferred_port=8100)
+anito_reserve(name="my-web", preferred_port=8101)
+
+# 5. Deploy
+anito_deploy(name="my-api", path="/abs/path/to/binary", stable_port=8100, env_file=".anito/ports.env")
+anito_deploy(name="my-web", path=".anito/my-web-dev.sh", stable_port=8101, env_file=".anito/ports.env")
+# my-api → http://localhost:8100 (permanent)
+# my-web → http://localhost:8101 (permanent, Vite proxies /api to my-api)
 ```

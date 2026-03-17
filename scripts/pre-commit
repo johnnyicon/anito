@@ -1,0 +1,89 @@
+#!/usr/bin/env bash
+# Anito pre-commit hook
+#
+# Installed by: make install-hooks
+# Source:       scripts/pre-commit
+#
+# What this does:
+#   1. Schema guard: if a versioned schema file is modified (not new), error —
+#      schemas are immutable once committed. Create a new version file instead.
+#   2. Changelog guard: if a new schema version file is added but schemas/changelog.json
+#      was not updated, error — every new schema version needs a changelog entry.
+#   3. Doc reminder: if internal/ Go files changed but docs/ did not, print an
+#      informational reminder. Does not block the commit.
+
+set -euo pipefail
+
+STAGED=$(git diff --cached --name-only)
+
+# ---------------------------------------------------------------------------
+# 1. Schema immutability guard
+#    Versioned schema files (setup-state.v*.json) must never be modified after
+#    their first commit. To change a schema, create a new version file.
+# ---------------------------------------------------------------------------
+
+MODIFIED_SCHEMAS=$(git diff --cached --name-only --diff-filter=M \
+  | grep -E '^schemas/setup-state\.v[0-9]' || true)
+
+if [ -n "$MODIFIED_SCHEMAS" ]; then
+  echo ""
+  echo "❌  Schema immutability violation:"
+  echo ""
+  echo "    The following versioned schema files were modified:"
+  echo ""
+  while IFS= read -r f; do
+    echo "      $f"
+  done <<< "$MODIFIED_SCHEMAS"
+  echo ""
+  echo "    Schema files are immutable once committed. To make a change:"
+  echo "      1. Create a new version file:  schemas/setup-state.v<next>.json"
+  echo "      2. Add a migration entry to:   schemas/changelog.json"
+  echo "      3. Update the consuming code to reference the new version."
+  echo ""
+  exit 1
+fi
+
+# ---------------------------------------------------------------------------
+# 2. Changelog guard
+#    If a new schema version file is being added, schemas/changelog.json must
+#    also be staged — every new version needs a migration entry.
+# ---------------------------------------------------------------------------
+
+NEW_SCHEMA_VERSIONS=$(git diff --cached --name-only --diff-filter=A \
+  | grep -E '^schemas/setup-state\.v[0-9]' || true)
+
+if [ -n "$NEW_SCHEMA_VERSIONS" ]; then
+  CHANGELOG_STAGED=$(echo "$STAGED" | grep '^schemas/changelog\.json$' || true)
+  if [ -z "$CHANGELOG_STAGED" ]; then
+    echo ""
+    echo "❌  New schema version without changelog entry:"
+    echo ""
+    echo "    New schema file(s) detected:"
+    while IFS= read -r f; do
+      echo "      $f"
+    done <<< "$NEW_SCHEMA_VERSIONS"
+    echo ""
+    echo "    Please add a migration entry to schemas/changelog.json."
+    echo "    See the existing entry in changelog.json for the required format."
+    echo ""
+    exit 1
+  fi
+fi
+
+# ---------------------------------------------------------------------------
+# 3. Doc reminder (informational, does not block)
+#    If internal Go files changed but no docs changed, remind the author to
+#    update docs if the behaviour changed. Not a hard error.
+# ---------------------------------------------------------------------------
+
+INTERNAL_CHANGED=$(echo "$STAGED" | grep '^internal/' || true)
+DOCS_CHANGED=$(echo "$STAGED" | grep '^docs/' || true)
+
+if [ -n "$INTERNAL_CHANGED" ] && [ -z "$DOCS_CHANGED" ]; then
+  echo ""
+  echo "ℹ  internal/ changed, docs/ did not."
+  echo "   If you added or changed a tool, flag, or behaviour, update docs/mcp.md or docs/setup.md."
+  echo ""
+fi
+
+exit 0
