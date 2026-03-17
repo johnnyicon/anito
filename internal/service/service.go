@@ -24,6 +24,15 @@ import (
 	"github.com/johnnyicon/anito/internal/watcher"
 )
 
+// sseHealthCheckPaths is the set of health check paths that require an SSE
+// readiness probe instead of a plain HTTP 200 check.  The MCP SSE transport
+// binds its HTTP listener before the MCP session is ready to serve tool calls,
+// so a plain 200 on /sse is not sufficient — we must read the first SSE event
+// ("event: endpoint") to confirm the MCP server is fully initialised.
+var sseHealthCheckPaths = map[string]bool{
+	"/sse": true,
+}
+
 const (
 	portRangeStart      = 8100
 	portRangeEnd        = 8200
@@ -413,7 +422,19 @@ func hashPath(path string) string {
 	return "sha:" + hex.EncodeToString(h.Sum(nil))[:8]
 }
 
+// waitHealthy polls the health check endpoint until it passes or the deadline
+// is reached.  For SSE endpoints (e.g. /sse), a plain HTTP 200 is not
+// sufficient — we read the first event line to confirm the MCP transport is
+// fully ready to serve tool calls.
 func waitHealthy(internalPort int, path string) error {
+	if sseHealthCheckPaths[path] {
+		return waitSSEReady(internalPort, path)
+	}
+	return waitHTTPReady(internalPort, path)
+}
+
+// waitHTTPReady polls path until it returns HTTP 200.
+func waitHTTPReady(internalPort int, path string) error {
 	url := fmt.Sprintf("http://localhost:%d%s", internalPort, path)
 	deadline := time.Now().Add(healthCheckTimeout)
 	for time.Now().Before(deadline) {
@@ -427,4 +448,57 @@ func waitHealthy(internalPort int, path string) error {
 		time.Sleep(healthCheckInterval)
 	}
 	return fmt.Errorf("timed out after %s waiting for %s", healthCheckTimeout, url)
+}
+
+// waitSSEReady connects to an SSE endpoint and waits for the first event line
+// to be emitted.  For the MCP SSE transport this is the "event: endpoint"
+// advertisement, which is only sent once the server is ready to accept
+// initialize handshakes.  We treat any non-empty "event:" or "data:" line as
+// proof of readiness — the exact event type is not important.
+func waitSSEReady(internalPort int, path string) error {
+	rawURL := fmt.Sprintf("http://localhost:%d%s", internalPort, path)
+	deadline := time.Now().Add(healthCheckTimeout)
+
+	for time.Now().Before(deadline) {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		ready, err := probeSSE(ctx, rawURL)
+		cancel()
+		if err == nil && ready {
+			return nil
+		}
+		time.Sleep(healthCheckInterval)
+	}
+	return fmt.Errorf("timed out after %s waiting for SSE readiness on %s", healthCheckTimeout, rawURL)
+}
+
+// probeSSE opens an SSE connection to url and returns (true, nil) as soon as
+// it receives a non-empty event or data line.  It returns (false, err) if the
+// connection fails or the context expires before an event is received.
+func probeSSE(ctx context.Context, url string) (bool, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return false, err
+	}
+	req.Header.Set("Accept", "text/event-stream")
+	req.Header.Set("Cache-Control", "no-cache")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return false, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return false, fmt.Errorf("SSE probe: unexpected status %d", resp.StatusCode)
+	}
+
+	scanner := bufio.NewScanner(resp.Body)
+	for scanner.Scan() {
+		line := scanner.Text()
+		if strings.HasPrefix(line, "event:") || strings.HasPrefix(line, "data:") {
+			return true, nil
+		}
+	}
+	// scanner.Err() returns nil on clean EOF; either way we got no event.
+	return false, fmt.Errorf("SSE connection closed before first event")
 }
