@@ -103,6 +103,7 @@ type DeployRequest struct {
 	EnvFile     string               `json:"env_file,omitempty"`
 	HealthCheck string               `json:"health_check,omitempty"`
 	WatchPaths  []string             `json:"watch_paths,omitempty"`
+	DrainWindow time.Duration        `json:"drain_window,omitempty"`
 }
 
 func (s *Server) handleHealth(c echo.Context) error {
@@ -131,6 +132,7 @@ func (s *Server) handleDeploy(c echo.Context) error {
 		EnvFile:     req.EnvFile,
 		HealthCheck: req.HealthCheck,
 		WatchPaths:  req.WatchPaths,
+		DrainWindow: req.DrainWindow,
 	})
 	if err != nil {
 		log.Printf("[ERROR] deploy name=%s error=%q", req.Name, err)

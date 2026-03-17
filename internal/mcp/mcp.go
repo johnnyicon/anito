@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"time"
 
 	sdkmcp "github.com/modelcontextprotocol/go-sdk/mcp"
 
@@ -55,15 +56,16 @@ func (s *Server) Start() error {
 // --- input/output types ---
 
 type deployInput struct {
-	Name        string   `json:"name"         jsonschema:"service name, must be unique"`
-	Version     string   `json:"version"      jsonschema:"optional semver tag for this build, e.g. v1.2.3"`
-	Path        string   `json:"path"         jsonschema:"absolute path to the binary or static directory"`
-	Args        []string `json:"args"         jsonschema:"optional arguments passed to the binary at startup, e.g. [\"serve\", \"--config\", \"prod.yaml\"]"`
-	StablePort  int      `json:"stable_port"  jsonschema:"preferred stable port consumers connect to (0 = auto-allocate); ports 7700 and 7701 are reserved"`
-	Type        string   `json:"type"         jsonschema:"service type: binary (default) or static"`
-	EnvFile     string   `json:"env_file"     jsonschema:"optional path to a KEY=VALUE env file"`
-	HealthCheck string   `json:"health_check" jsonschema:"health check path polled after start (default: /health)"`
-	WatchPaths  []string `json:"watch_paths"  jsonschema:"directories to watch for file changes; any change triggers an automatic restart"`
+	Name        string        `json:"name"         jsonschema:"service name, must be unique"`
+	Version     string        `json:"version"      jsonschema:"optional semver tag for this build, e.g. v1.2.3"`
+	Path        string        `json:"path"         jsonschema:"absolute path to the binary or static directory"`
+	Args        []string      `json:"args"         jsonschema:"optional arguments passed to the binary at startup, e.g. [\"serve\", \"--config\", \"prod.yaml\"]"`
+	StablePort  int           `json:"stable_port"  jsonschema:"preferred stable port consumers connect to (0 = auto-allocate); ports 7700 and 7701 are reserved"`
+	Type        string        `json:"type"         jsonschema:"service type: binary (default) or static"`
+	EnvFile     string        `json:"env_file"     jsonschema:"optional path to a KEY=VALUE env file"`
+	HealthCheck string        `json:"health_check" jsonschema:"health check path polled after start (default: /health)"`
+	WatchPaths  []string      `json:"watch_paths"  jsonschema:"directories to watch for file changes; any change triggers an automatic restart"`
+	DrainWindow time.Duration `json:"drain_window" jsonschema:"grace period between proxy swap and SIGTERM to the old process (e.g. 3000000000 for 3s); use this for SSE services to let in-flight connections finish"`
 }
 
 type serviceView struct {
@@ -147,6 +149,7 @@ func (s *Server) registerTools(srv *sdkmcp.Server) {
 			StablePort:  in.StablePort,
 			EnvFile:     in.EnvFile,
 			HealthCheck: in.HealthCheck,
+			DrainWindow: in.DrainWindow,
 		})
 		if err != nil {
 			log.Printf("[MCP] tool=anito_deploy name=%s error=%q", in.Name, err)

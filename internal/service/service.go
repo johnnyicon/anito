@@ -75,7 +75,8 @@ type DeployRequest struct {
 	StablePort  int      // 0 = auto-allocate from [portRangeStart, portRangeEnd]
 	EnvFile     string
 	HealthCheck string
-	WatchPaths  []string // directories to watch for file changes (triggers restart)
+	WatchPaths  []string      // directories to watch for file changes (triggers restart)
+	DrainWindow time.Duration // grace period between proxy swap and SIGTERM to old process (0 = immediate)
 }
 
 // Deploy registers, starts, and health-checks a service.
@@ -111,6 +112,7 @@ func (s *Service) Deploy(req DeployRequest) (*registry.Service, error) {
 		EnvFile:     req.EnvFile,
 		HealthCheck: req.HealthCheck,
 		WatchPaths:  req.WatchPaths,
+		DrainWindow: req.DrainWindow,
 	}
 
 	if err := s.reg.Register(svc); err != nil {
@@ -153,7 +155,14 @@ func (s *Service) Deploy(req DeployRequest) (*registry.Service, error) {
 
 	if oldPID > 0 {
 		s.mgr.MarkDraining(oldPID)
-		go process.StopPID(oldPID)
+		drainWindow := req.DrainWindow
+		go func(pid int, window time.Duration) {
+			if window > 0 {
+				log.Printf("[DRAIN] name=%s pid=%d waiting %s for in-flight requests", req.Name, pid, window)
+				time.Sleep(window)
+			}
+			process.StopPID(pid)
+		}(oldPID, drainWindow)
 	}
 
 	svc, _ = s.reg.Get(req.Name)
@@ -190,21 +199,50 @@ func (s *Service) Restart(name string) error {
 	if !ok {
 		return fmt.Errorf("service %q not found", name)
 	}
-	internalPort, err := s.mgr.Restart(svc)
+
+	if svc.Type != registry.TypeBinary {
+		// Static services don't run a process — nothing to restart.
+		return nil
+	}
+
+	// Blue/green restart: deregister old process (don't kill it yet), start new
+	// one, health-check, swap proxy, then drain the old process.  This keeps the
+	// stable port live throughout and respects the configured drain window.
+	oldPID := s.mgr.Deregister(name)
+	if oldPID == 0 {
+		oldPID = svc.PID
+	}
+
+	internalPort, err := s.mgr.Start(svc)
 	if err != nil {
 		log.Printf("[RESTART] name=%s error=%q", name, err)
+		// Restore old process tracking if start fails — best-effort.
 		return err
 	}
-	if svc.Type == registry.TypeBinary {
-		if err := waitHealthy(internalPort, svc.HealthCheck); err != nil {
-			err = fmt.Errorf("health check failed after restart: %w", err)
-			log.Printf("[RESTART] name=%s error=%q", name, err)
-			return err
-		}
-		if err := s.prx.Swap(name, internalPort); err != nil {
-			return err
-		}
+
+	if err := waitHealthy(internalPort, svc.HealthCheck); err != nil {
+		err = fmt.Errorf("health check failed after restart: %w", err)
+		log.Printf("[RESTART] name=%s error=%q", name, err)
+		_ = s.mgr.Stop(name)
+		return err
 	}
+
+	if err := s.prx.Swap(name, internalPort); err != nil {
+		return err
+	}
+
+	if oldPID > 0 {
+		s.mgr.MarkDraining(oldPID)
+		drainWindow := svc.DrainWindow
+		go func(pid int, window time.Duration) {
+			if window > 0 {
+				log.Printf("[DRAIN] name=%s pid=%d waiting %s for in-flight requests", name, pid, window)
+				time.Sleep(window)
+			}
+			process.StopPID(pid)
+		}(oldPID, drainWindow)
+	}
+
 	log.Printf("[RESTART] name=%s port=%d internal=%d", name, svc.StablePort, internalPort)
 	return nil
 }

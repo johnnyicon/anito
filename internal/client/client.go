@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"time"
 
 	"github.com/johnnyicon/anito/internal/registry"
 )
@@ -29,6 +30,7 @@ type DeployRequest struct {
 	EnvFile     string               `json:"env_file,omitempty"`
 	HealthCheck string               `json:"health_check,omitempty"`
 	WatchPaths  []string             `json:"watch_paths,omitempty"`
+	DrainWindow time.Duration        `json:"drain_window,omitempty"`
 }
 
 func (c *Client) Deploy(req DeployRequest) (*registry.Service, error) {
