@@ -58,6 +58,23 @@ func main() {
 		}
 		runDeploy(cli, configPath)
 
+	case "promote":
+		// promote <stable-config> [dev-name]
+		// Builds the stable binary (runs config.Build) and deploys it as the
+		// stable service.  Functionally identical to `deploy` but named to
+		// make the "dev → stable" promotion intent explicit.
+		// Optional second arg is the dev service name — displayed in output
+		// for clarity but not used mechanically.
+		if len(os.Args) < 3 {
+			fmt.Fprintf(os.Stderr, "usage: anito promote <stable-config.yaml> [dev-service-name]\n")
+			os.Exit(1)
+		}
+		devName := ""
+		if len(os.Args) >= 4 {
+			devName = os.Args[3]
+		}
+		runPromote(cli, os.Args[2], devName)
+
 	case "services":
 		runServices(cli)
 
@@ -106,6 +123,29 @@ func main() {
 	}
 }
 
+// runPromote builds and deploys a stable service from its config YAML.
+// It is semantically identical to runDeploy but uses "promote" terminology
+// to signal that this is a dev → stable promotion.  devName is optional
+// display context.
+func runPromote(cli *client.Client, configPath string, devName string) {
+	cfg, err := config.Load(configPath)
+	if err != nil {
+		fatal(err)
+	}
+	if cfg.Build == "" {
+		fatal(fmt.Errorf("config %s has no build command — nothing to promote", configPath))
+	}
+
+	if devName != "" {
+		fmt.Printf("promoting %s → %s...\n", devName, cfg.Name)
+	} else {
+		fmt.Printf("promoting %s...\n", cfg.Name)
+	}
+
+	// Delegate to runDeploy — it handles build + health-check + proxy swap.
+	runDeploy(cli, configPath)
+}
+
 func runDeploy(cli *client.Client, configPath string) {
 	cfg, err := config.Load(configPath)
 	if err != nil {
@@ -144,6 +184,7 @@ func runDeploy(cli *client.Client, configPath string) {
 		EnvFile:     cfg.EnvFile,
 		HealthCheck: cfg.HealthCheck,
 		WatchPaths:  cfg.Watch,
+		DrainWindow: cfg.DrainWindow,
 	})
 	if err != nil {
 		fatal(err)
@@ -368,20 +409,25 @@ func printUsage() {
 	fmt.Println(`anito — local production service manager
 
 Usage:
-  anito daemon [flags]          start the anito daemon
-  anito deploy [config]         build + deploy (default: .anito/config.yaml)
-  anito services                list all running services
-  anito status <name>           show status and port for a service
-  anito logs <name>             print recent log output
-  anito stop <name>             stop a service
-  anito restart <name>          restart a service
-  anito remove <name>           stop and remove a service
-  anito reload                  reload the daemon with the current binary (launchd)
-  anito version                 print the daemon binary version
-  anito mcp                     show MCP server connection info
+  anito daemon [flags]                      start the anito daemon
+  anito deploy [config]                     build + deploy (default: .anito/config.yaml)
+  anito promote <stable-config> [dev-name]  build stable binary and deploy it
+  anito services                            list all running services
+  anito status <name>                       show status and port for a service
+  anito logs <name>                         print recent log output
+  anito stop <name>                         stop a service
+  anito restart <name>                      restart a service
+  anito remove <name>                       stop and remove a service
+  anito reload                              reload the daemon with the current binary (launchd)
+  anito version                             print the daemon binary version
+  anito mcp                                 show MCP server connection info
 
 Daemon flags:
   --port      management API port (default 7700)
   --mcp-port  MCP server port     (default 7701)
-  --data      data directory      (default ~/.anito)`)
+  --data      data directory      (default ~/.anito)
+
+Examples:
+  anito promote .anito/gomanan-mcp.yaml gomanan-mcp-dev
+    → builds gomanan-daemon binary, deploys it as gomanan-mcp on :8100`)
 }
