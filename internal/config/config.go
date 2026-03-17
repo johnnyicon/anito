@@ -18,6 +18,7 @@ type Config struct {
 	Args        []string `yaml:"args"`         // optional arguments passed to the binary at startup
 	EnvFile     string   `yaml:"env_file"`     // optional .env file
 	HealthCheck string   `yaml:"health_check"` // health check path (default: /health)
+	Watch       []string `yaml:"watch"`        // directories to watch for file changes (triggers restart)
 }
 
 // Load reads and parses a .anito/config.yaml file.

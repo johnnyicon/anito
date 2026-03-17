@@ -102,6 +102,7 @@ type DeployRequest struct {
 	StablePort  int                  `json:"stable_port,omitempty"`
 	EnvFile     string               `json:"env_file,omitempty"`
 	HealthCheck string               `json:"health_check,omitempty"`
+	WatchPaths  []string             `json:"watch_paths,omitempty"`
 }
 
 func (s *Server) handleHealth(c echo.Context) error {
@@ -129,6 +130,7 @@ func (s *Server) handleDeploy(c echo.Context) error {
 		StablePort:  req.StablePort,
 		EnvFile:     req.EnvFile,
 		HealthCheck: req.HealthCheck,
+		WatchPaths:  req.WatchPaths,
 	})
 	if err != nil {
 		log.Printf("[ERROR] deploy name=%s error=%q", req.Name, err)

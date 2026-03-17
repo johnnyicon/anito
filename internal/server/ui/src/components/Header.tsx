@@ -1,9 +1,16 @@
 import { useQuery } from '@tanstack/react-query'
 import { healthQuery } from '@/lib/api'
 import { Badge } from '@/components/ui/badge'
+import { Button } from '@/components/ui/button'
+import { ScrollText } from 'lucide-react'
 import { cn } from '@/lib/utils'
 
-export function Header() {
+interface Props {
+  daemonLogOpen:     boolean
+  onToggleDaemonLog: () => void
+}
+
+export function Header({ daemonLogOpen, onToggleDaemonLog }: Props) {
   const { data: health, isError } = useQuery(healthQuery)
 
   return (
@@ -25,6 +32,15 @@ export function Header() {
           <Badge variant={isError ? 'destructive' : 'running'}>
             {isError ? 'unreachable' : 'daemon ok'}
           </Badge>
+          <Button
+            size="sm"
+            variant={daemonLogOpen ? 'secondary' : 'ghost'}
+            className="h-7 gap-1.5 text-xs"
+            onClick={onToggleDaemonLog}
+          >
+            <ScrollText className="size-3" />
+            daemon log
+          </Button>
         </div>
       </div>
     </header>

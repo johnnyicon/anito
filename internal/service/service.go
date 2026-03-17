@@ -21,6 +21,7 @@ import (
 	"github.com/johnnyicon/anito/internal/process"
 	"github.com/johnnyicon/anito/internal/proxy"
 	"github.com/johnnyicon/anito/internal/registry"
+	"github.com/johnnyicon/anito/internal/watcher"
 )
 
 const (
@@ -28,6 +29,10 @@ const (
 	portRangeEnd        = 8200
 	healthCheckInterval = 200 * time.Millisecond
 	healthCheckTimeout  = 15 * time.Second
+
+	// DaemonLogName is the reserved name for streaming Anito's own daemon log.
+	// Use it with Logs() / LogStream() — no service registry entry is required.
+	DaemonLogName = "~daemon"
 )
 
 // reservedPorts are Anito's own ports — never allocate these to user services.
@@ -42,10 +47,13 @@ type Service struct {
 	mgr    *process.Manager
 	prx    *proxy.Manager
 	logDir string
+	wtch   *watcher.Manager
 }
 
-func New(reg *registry.Registry, mgr *process.Manager, prx *proxy.Manager, logDir string) *Service {
-	return &Service{reg: reg, mgr: mgr, prx: prx, logDir: logDir}
+func New(reg *registry.Registry, mgr *process.Manager, prx *proxy.Manager, logDir string, wtch *watcher.Manager) *Service {
+	svc := &Service{reg: reg, mgr: mgr, prx: prx, logDir: logDir, wtch: wtch}
+	mgr.OnCrash = svc.handleCrash
+	return svc
 }
 
 // DeployRequest describes a service to deploy.
@@ -58,6 +66,7 @@ type DeployRequest struct {
 	StablePort  int      // 0 = auto-allocate from [portRangeStart, portRangeEnd]
 	EnvFile     string
 	HealthCheck string
+	WatchPaths  []string // directories to watch for file changes (triggers restart)
 }
 
 // Deploy registers, starts, and health-checks a service.
@@ -92,6 +101,7 @@ func (s *Service) Deploy(req DeployRequest) (*registry.Service, error) {
 		StablePort:  stablePort,
 		EnvFile:     req.EnvFile,
 		HealthCheck: req.HealthCheck,
+		WatchPaths:  req.WatchPaths,
 	}
 
 	if err := s.reg.Register(svc); err != nil {
@@ -133,11 +143,13 @@ func (s *Service) Deploy(req DeployRequest) (*registry.Service, error) {
 	}
 
 	if oldPID > 0 {
+		s.mgr.MarkDraining(oldPID)
 		go process.StopPID(oldPID)
 	}
 
 	svc, _ = s.reg.Get(req.Name)
 	log.Printf("[DEPLOY] name=%s port=%d internal=%d pid=%d", svc.Name, svc.StablePort, internalPort, svc.PID)
+	s.startWatcher(svc)
 	return svc, nil
 }
 
@@ -154,6 +166,7 @@ func (s *Service) Status(name string) (*registry.Service, error) {
 }
 
 func (s *Service) Stop(name string) error {
+	s.wtch.Stop(name)
 	err := s.mgr.Stop(name)
 	if err != nil {
 		log.Printf("[STOP] name=%s error=%q", name, err)
@@ -188,6 +201,7 @@ func (s *Service) Restart(name string) error {
 }
 
 func (s *Service) Remove(name string) error {
+	s.wtch.Stop(name)
 	_ = s.mgr.Stop(name)
 	s.prx.Remove(name)
 	err := s.reg.Remove(name)
@@ -199,13 +213,70 @@ func (s *Service) Remove(name string) error {
 	return err
 }
 
+// startWatcher launches a file watcher for svc if it has WatchPaths configured.
+func (s *Service) startWatcher(svc *registry.Service) {
+	if len(svc.WatchPaths) == 0 {
+		return
+	}
+	err := s.wtch.Start(svc.Name, svc.WatchPaths, func(trigger string) {
+		log.Printf("[WATCH] name=%s restarting due to change in %s", svc.Name, trigger)
+		if err := s.Restart(svc.Name); err != nil {
+			log.Printf("[ERROR] name=%s watch restart failed: %v", svc.Name, err)
+		}
+	})
+	if err != nil {
+		log.Printf("[ERROR] name=%s could not start watcher: %v", svc.Name, err)
+	}
+}
+
+// StartWatchers starts file watchers for all registered services that have WatchPaths.
+// Called once at daemon startup after services are restored.
+func (s *Service) StartWatchers() {
+	for _, svc := range s.reg.All() {
+		if len(svc.WatchPaths) > 0 {
+			s.startWatcher(svc)
+		}
+	}
+}
+
+// handleCrash is called by the process manager when a service exits unexpectedly.
+// Services with WatchPaths are automatically restarted (with a brief cooldown).
+// Services that were intentionally stopped are not restarted.
+func (s *Service) handleCrash(name string) {
+	svc, ok := s.reg.Get(name)
+	if !ok || len(svc.WatchPaths) == 0 {
+		return
+	}
+	if svc.Status == registry.StatusStopped {
+		return // intentionally stopped — do not restart
+	}
+	time.Sleep(2 * time.Second) // brief cooldown to avoid tight restart loops
+	log.Printf("[RESTART] name=%s reason=crash", name)
+	if err := s.Restart(name); err != nil {
+		log.Printf("[ERROR] name=%s crash restart failed: %v", name, err)
+	}
+}
+
+// logFilePath resolves the log file path for name.
+// The special name DaemonLogName maps to the Anito daemon log; all other names
+// require a registered service entry.
+func (s *Service) logFilePath(name string) (string, error) {
+	if name == DaemonLogName {
+		return filepath.Join(s.logDir, "anito.log"), nil
+	}
+	if _, ok := s.reg.Get(name); !ok {
+		return "", fmt.Errorf("service %q not found", name)
+	}
+	return filepath.Join(s.logDir, name+".log"), nil
+}
+
 // Logs returns the last n lines from the service's log file.
 // If n <= 0, all lines are returned.
 func (s *Service) Logs(name string, n int) ([]string, error) {
-	if _, ok := s.reg.Get(name); !ok {
-		return nil, fmt.Errorf("service %q not found", name)
+	path, err := s.logFilePath(name)
+	if err != nil {
+		return nil, err
 	}
-	path := filepath.Join(s.logDir, name+".log")
 	data, err := os.ReadFile(path)
 	if os.IsNotExist(err) {
 		return []string{}, nil
@@ -223,10 +294,10 @@ func (s *Service) Logs(name string, n int) ([]string, error) {
 // LogStream tails the service's log file and sends new lines to the returned channel.
 // The channel is closed when ctx is done.
 func (s *Service) LogStream(ctx context.Context, name string) (<-chan string, error) {
-	if _, ok := s.reg.Get(name); !ok {
-		return nil, fmt.Errorf("service %q not found", name)
+	path, err := s.logFilePath(name)
+	if err != nil {
+		return nil, err
 	}
-	path := filepath.Join(s.logDir, name+".log")
 	ch := make(chan string, 64)
 	go func() {
 		defer close(ch)

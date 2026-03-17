@@ -20,6 +20,7 @@ import (
 	"github.com/johnnyicon/anito/internal/registry"
 	"github.com/johnnyicon/anito/internal/server"
 	"github.com/johnnyicon/anito/internal/service"
+	"github.com/johnnyicon/anito/internal/watcher"
 )
 
 // version is set at build time:
@@ -142,6 +143,7 @@ func runDeploy(cli *client.Client, configPath string) {
 		StablePort:  cfg.Port,
 		EnvFile:     cfg.EnvFile,
 		HealthCheck: cfg.HealthCheck,
+		WatchPaths:  cfg.Watch,
 	})
 	if err != nil {
 		fatal(err)
@@ -284,6 +286,7 @@ func runDaemon(apiPort, mcpPort int, dataDir string) {
 	}
 
 	prx := proxy.NewManager()
+	wtch := watcher.New()
 
 	// Restore services that were running before the daemon last stopped.
 	for _, svc := range reg.All() {
@@ -315,7 +318,8 @@ func runDaemon(apiPort, mcpPort int, dataDir string) {
 
 	log.Printf("[STARTUP] version=%s data=%s api=:%d mcp=:%d", version, dataDir, apiPort, mcpPort)
 
-	svc := service.New(reg, mgr, prx, logDir)
+	svc := service.New(reg, mgr, prx, logDir, wtch)
+	svc.StartWatchers()
 
 	mcpSrv := mcpserver.New(svc, mcpPort)
 	go func() {

@@ -27,10 +27,12 @@ type runningProc struct {
 
 // Manager supervises running processes.
 type Manager struct {
-	mu     sync.RWMutex
-	procs  map[string]*runningProc
-	logDir string
-	reg    *registry.Registry
+	mu       sync.RWMutex
+	procs    map[string]*runningProc
+	draining map[int]bool // PIDs being intentionally killed; crash monitor ignores these
+	logDir   string
+	reg      *registry.Registry
+	OnCrash  func(name string) // called when a process exits unexpectedly; may be nil
 }
 
 func New(logDir string, reg *registry.Registry) (*Manager, error) {
@@ -38,10 +40,22 @@ func New(logDir string, reg *registry.Registry) (*Manager, error) {
 		return nil, err
 	}
 	return &Manager{
-		procs:  make(map[string]*runningProc),
-		logDir: logDir,
-		reg:    reg,
+		procs:    make(map[string]*runningProc),
+		draining: make(map[int]bool),
+		logDir:   logDir,
+		reg:      reg,
 	}, nil
+}
+
+// MarkDraining registers pid as an intentional kill so the crash monitor ignores it.
+// Call this before StopPID when draining a process that is no longer in m.procs.
+func (m *Manager) MarkDraining(pid int) {
+	if pid <= 0 {
+		return
+	}
+	m.mu.Lock()
+	m.draining[pid] = true
+	m.mu.Unlock()
 }
 
 // Start launches a service process on a free ephemeral port and returns that port.
@@ -74,13 +88,25 @@ func (m *Manager) Start(svc *registry.Service) (internalPort int, err error) {
 	_ = m.reg.UpdateInternalPort(svc.Name, port)
 
 	// Watch for unexpected exit.
+	pid := cmd.Process.Pid
 	go func() {
 		_ = cmd.Wait()
 		m.mu.Lock()
 		delete(m.procs, svc.Name)
+		isDraining := m.draining[pid]
+		delete(m.draining, pid)
 		m.mu.Unlock()
+
+		if isDraining {
+			log.Printf("[DRAIN] name=%s pid=%d", svc.Name, pid)
+			return // intentional kill — not a crash
+		}
+
 		_ = m.reg.UpdateStatus(svc.Name, registry.StatusFailed, 0)
-		log.Printf("[CRASH] name=%s pid=%d", svc.Name, cmd.Process.Pid)
+		log.Printf("[CRASH] name=%s pid=%d", svc.Name, pid)
+		if handler := m.OnCrash; handler != nil {
+			handler(svc.Name)
+		}
 	}()
 
 	return port, nil
@@ -92,6 +118,9 @@ func (m *Manager) Stop(name string) error {
 	rp, ok := m.procs[name]
 	if ok {
 		delete(m.procs, name)
+		if rp.cmd.Process != nil {
+			m.draining[rp.cmd.Process.Pid] = true
+		}
 	}
 	m.mu.Unlock()
 

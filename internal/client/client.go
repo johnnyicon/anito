@@ -28,6 +28,7 @@ type DeployRequest struct {
 	StablePort  int                  `json:"stable_port"`
 	EnvFile     string               `json:"env_file,omitempty"`
 	HealthCheck string               `json:"health_check,omitempty"`
+	WatchPaths  []string             `json:"watch_paths,omitempty"`
 }
 
 func (c *Client) Deploy(req DeployRequest) (*registry.Service, error) {

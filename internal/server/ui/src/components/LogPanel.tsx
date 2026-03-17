@@ -16,6 +16,22 @@ interface LogLine {
 
 let lineId = 0
 
+// Returns a Tailwind text-color class based on the Anito log tag in the line.
+function lineColor(text: string): string {
+  if (/\[ERROR\]|\[CRASH\]/.test(text))   return 'text-destructive'
+  if (/\[DEPLOY\]/.test(text))             return 'text-emerald-500'
+  if (/\[WATCH\]/.test(text))              return 'text-sky-400'
+  if (/\[RESTART\]/.test(text))            return 'text-amber-400'
+  if (/\[MCP\]/.test(text))               return 'text-violet-400'
+  if (/\[STARTUP\]/.test(text))           return 'text-sky-400'
+  if (/\[DRAIN\]|\[STOP\]|\[REMOVE\]/.test(text)) return 'text-muted-foreground/60'
+  return 'text-muted-foreground'
+}
+
+function displayName(name: string): string {
+  return name === '~daemon' ? 'anito daemon' : name
+}
+
 export function LogPanel({ name, onClose }: Props) {
   const [lines, setLines]         = useState<LogLine[]>([])
   const [connected, setConnected] = useState(false)
@@ -54,7 +70,7 @@ export function LogPanel({ name, onClose }: Props) {
       <div className="flex shrink-0 items-center justify-between border-b bg-muted/40 px-4 py-2">
         <div className="flex items-center gap-2 font-mono text-xs text-muted-foreground">
           <span>logs /</span>
-          <span className="font-semibold text-foreground">{name}</span>
+          <span className="font-semibold text-foreground">{displayName(name)}</span>
         </div>
         <div className="flex items-center gap-3">
           <span className={cn("flex items-center gap-1.5 text-xs", connected ? "text-emerald-500" : "text-muted-foreground")}>
@@ -76,10 +92,7 @@ export function LogPanel({ name, onClose }: Props) {
             lines.map(l => (
               <div
                 key={l.id}
-                className={cn(
-                  "whitespace-pre-wrap break-all",
-                  /\[ERROR\]|\[CRASH\]/.test(l.text) ? "text-destructive" : "text-muted-foreground"
-                )}
+                className={cn("whitespace-pre-wrap break-all", lineColor(l.text))}
               >
                 {l.text}
               </div>

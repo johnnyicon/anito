@@ -63,6 +63,7 @@ type deployInput struct {
 	Type        string   `json:"type"         jsonschema:"service type: binary (default) or static"`
 	EnvFile     string   `json:"env_file"     jsonschema:"optional path to a KEY=VALUE env file"`
 	HealthCheck string   `json:"health_check" jsonschema:"health check path polled after start (default: /health)"`
+	WatchPaths  []string `json:"watch_paths"  jsonschema:"directories to watch for file changes; any change triggers an automatic restart"`
 }
 
 type serviceView struct {
@@ -140,6 +141,7 @@ func (s *Server) registerTools(srv *sdkmcp.Server) {
 		svc, err := s.svc.Deploy(service.DeployRequest{
 			Name:        in.Name,
 			Type:        registry.ServiceType(in.Type),
+			WatchPaths:  in.WatchPaths,
 			Path:        in.Path,
 			Args:        in.Args,
 			StablePort:  in.StablePort,

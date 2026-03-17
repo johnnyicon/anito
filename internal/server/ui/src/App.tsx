@@ -6,6 +6,8 @@ import { ServiceCard } from '@/components/ServiceCard'
 import { LogPanel } from '@/components/LogPanel'
 import { Loader2 } from 'lucide-react'
 
+const DAEMON_LOG = '~daemon'
+
 export default function App() {
   const { data: services, isLoading } = useQuery(servicesQuery)
   const [logService, setLogService]   = useState<string | null>(null)
@@ -14,12 +16,19 @@ export default function App() {
     setLogService(prev => prev === name ? null : name)
   }
 
+  function handleToggleDaemonLog() {
+    setLogService(prev => prev === DAEMON_LOG ? null : DAEMON_LOG)
+  }
+
   const running = services?.filter(s => s.status === 'running').length ?? 0
   const total   = services?.length ?? 0
 
   return (
     <div className="flex min-h-screen flex-col">
-      <Header />
+      <Header
+        daemonLogOpen={logService === DAEMON_LOG}
+        onToggleDaemonLog={handleToggleDaemonLog}
+      />
 
       <main className="flex-1 pb-4">
         {/* Section header */}
