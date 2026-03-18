@@ -4,7 +4,21 @@ Ideas that are worth keeping but not building yet. Captured here so they don't g
 
 ---
 
+## Open source + commercial direction
+
+**The plan:** Release the CLI + daemon as MIT open source. The proxy-as-stable-port model is a genuinely novel primitive for local development — open source builds trust and developer adoption.
+
+**Proposed pricing:** $5/month for a pro tier covering unlimited services, watch mode, MCP server, and composite app coordination. Free tier: single service, CLI only.
+
+**Longer-term commercial layer (not yet designed):** Shared port registries across machines, team-level service discovery, remote machine support. These require a networking/sync layer that doesn't exist yet.
+
+**Why not yet:** The tool needs to feel complete first. Current next gates: schema versioning hook, CLI-level composite setup, and at least one external user validating the install experience.
+
+---
+
 ## Schema versioning pre-commit hook
+
+**Status:** Schema files are in place (`schemas/setup-state.v1.json`, `schemas/setup-state-migrations.json`). The hook enforcement is still parked. See ADR-006 for the full schema design and migration registry pattern.
 
 **The idea:** A git pre-commit hook that detects changes to files in `schemas/` and automatically: bumps the `schemaVersion` field in the affected schema file, appends an entry to a human-readable migration log (`schemas/CHANGELOG.md`), and fails the commit if the version was not bumped.
 
@@ -47,34 +61,14 @@ Ideas that are worth keeping but not building yet. Captured here so they don't g
 
 ---
 
-## Admin SPA
+## Admin SPA — v1 BUILT, v2 parked
 
-**The idea:** A minimal single-page application served by Anito itself, providing a read-only dashboard for the services it manages.
+**Shipped (v1, read-only):** Services list, per-service log viewer (live SSE tail), daemon log viewer with tag-aware colourisation (`[ERROR]` red, `[DEPLOY]` green, `[MCP]` violet, etc.), daemon health. Served at `http://localhost:7700`.
 
-**Scope (read-only v1):**
-- Services list — name, stable port, status, PID, last deploy time
-- Per-service log viewer — live tail via the `GET /logs/:name?follow=true` SSE endpoint
-- Daemon health — uptime, API port, MCP port, registry path
-
-**How it would be served:**
-Anito already serves static files for `type: static` services. The admin SPA would be a built-in static route at `http://localhost:7700/admin` — no external service needed, no extra port.
-
-**Tech:** Minimal HTML + vanilla JS or a small preact bundle. No build step required for v1 — just a single HTML file with inline styles and `EventSource` for the log stream.
-
-**Why not yet:** The HTTP API and MCP layer need to be stable first. The SPA is a convenience, not a blocker for any current use case. The `anito services` and `anito logs` CLI commands cover the same ground for now.
-
-**Future scope:** Write operations (restart, stop, remove) could be added in v2 once the read-only view is validated.
+**Parked (v2):** Write operations — restart, stop, remove from the browser. Not yet built. The CLI covers these for now; add when the read-only view is validated in daily use.
 
 ---
 
-## `anito_setup` MCP tool
+## ~~`anito_setup` MCP tool~~ — **BUILT**
 
-**The idea:** An MCP tool that inspects any repo and emits the exact steps needed to make it Anito-compatible — generating the `.anito/config.yaml`, identifying where to add the `PORT` env var, and flagging whether a `/health` endpoint exists.
-
-**Onboarding flow:**
-1. Developer says: "Set up this repo for Anito"
-2. LLM calls `anito_setup(path="/path/to/repo")`
-3. Tool inspects the repo: language, entry point, existing env handling, existing health routes
-4. Returns a structured setup plan — the LLM executes it
-
-**Why not yet:** Needs careful repo introspection logic (language detection, build system detection, existing PORT/health patterns). Worth building once the core deploy/manage/logs loop is proven in daily use.
+`anito_setup` ships as of 2026-03-17. It handles both single-service repos (inspection + contract check + config generation) and composite apps (port coordination, `ports.env`, `[anito:managed]` source patches) in a single tool call. See [docs/mcp.md](mcp.md) for the full reference.
