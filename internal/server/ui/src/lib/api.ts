@@ -14,6 +14,7 @@ export interface Service {
   internal_port: number
   env_file:      string
   health_check:  string
+  watch_paths:   string[]
   status:        ServiceStatus
   pid:           number
   deployed_at:   string

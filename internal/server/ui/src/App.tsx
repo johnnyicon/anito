@@ -3,14 +3,24 @@ import { useQuery } from '@tanstack/react-query'
 import { servicesQuery } from '@/lib/api'
 import { Header } from '@/components/Header'
 import { ServiceCard } from '@/components/ServiceCard'
+import { ServiceRow } from '@/components/ServiceRow'
 import { LogPanel } from '@/components/LogPanel'
-import { Loader2 } from 'lucide-react'
+import { Loader2, LayoutGrid, List } from 'lucide-react'
+import { Button } from '@/components/ui/button'
 
 const DAEMON_LOG = '~daemon'
 
 export default function App() {
   const { data: services, isLoading } = useQuery(servicesQuery)
   const [logService, setLogService]   = useState<string | null>(null)
+  const [viewMode, setViewMode]       = useState<'tile' | 'list'>(() =>
+    (localStorage.getItem('anito-view-mode') as 'tile' | 'list') ?? 'tile'
+  )
+
+  function setView(mode: 'tile' | 'list') {
+    setViewMode(mode)
+    localStorage.setItem('anito-view-mode', mode)
+  }
 
   function handleViewLogs(name: string) {
     setLogService(prev => prev === name ? null : name)
@@ -20,8 +30,9 @@ export default function App() {
     setLogService(prev => prev === DAEMON_LOG ? null : DAEMON_LOG)
   }
 
-  const running = services?.filter(s => s.status === 'running').length ?? 0
-  const total   = services?.length ?? 0
+  const sorted  = [...(services ?? [])].sort((a, b) => a.name.localeCompare(b.name))
+  const running = sorted.filter(s => s.status === 'running').length
+  const total   = sorted.length
 
   return (
     <div className="flex min-h-screen flex-col">
@@ -37,11 +48,31 @@ export default function App() {
             <h2 className="text-xs font-medium uppercase tracking-widest text-muted-foreground">
               Services
             </h2>
-            {services && services.length > 0 && (
-              <span className="font-mono text-xs text-muted-foreground">
-                {running} / {total} running
-              </span>
-            )}
+            <div className="flex items-center gap-3">
+              {total > 0 && (
+                <span className="font-mono text-xs text-muted-foreground">
+                  {running} / {total} running
+                </span>
+              )}
+              <div className="flex items-center gap-0.5">
+                <Button
+                  size="sm"
+                  variant={viewMode === 'tile' ? 'secondary' : 'ghost'}
+                  className="h-7 w-7 p-0"
+                  onClick={() => setView('tile')}
+                >
+                  <LayoutGrid className="size-3.5" />
+                </Button>
+                <Button
+                  size="sm"
+                  variant={viewMode === 'list' ? 'secondary' : 'ghost'}
+                  className="h-7 w-7 p-0"
+                  onClick={() => setView('list')}
+                >
+                  <List className="size-3.5" />
+                </Button>
+              </div>
+            </div>
           </div>
         </div>
 
@@ -59,10 +90,21 @@ export default function App() {
                 Deploy one with <code className="rounded bg-muted px-1 py-0.5">anito deploy</code>
               </p>
             </div>
-          ) : (
+          ) : viewMode === 'tile' ? (
             <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
-              {services.map(svc => (
+              {sorted.map(svc => (
                 <ServiceCard
+                  key={svc.name}
+                  service={svc}
+                  onViewLogs={handleViewLogs}
+                  logOpen={logService === svc.name}
+                />
+              ))}
+            </div>
+          ) : (
+            <div className="flex flex-col gap-1.5">
+              {sorted.map(svc => (
+                <ServiceRow
                   key={svc.name}
                   service={svc}
                   onViewLogs={handleViewLogs}
