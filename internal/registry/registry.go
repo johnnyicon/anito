@@ -45,6 +45,7 @@ type Service struct {
 	PID          int           `json:"pid,omitempty"`
 	DeployedAt   time.Time     `json:"deployed_at"`
 	UpdatedAt    time.Time     `json:"updated_at"`
+	LastDeployedAt time.Time   `json:"last_deployed_at,omitempty"`
 }
 
 // Registry manages the on-disk service registry.
@@ -94,7 +95,11 @@ func (r *Registry) save() error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(r.path, data, 0644)
+	tmp := r.path + ".tmp"
+	if err := os.WriteFile(tmp, data, 0644); err != nil {
+		return err
+	}
+	return os.Rename(tmp, r.path)
 }
 
 // Register adds or updates a service entry.
@@ -143,6 +148,19 @@ func (r *Registry) UpdateStatus(name string, status ServiceStatus, pid int) erro
 	}
 	s.Status = status
 	s.PID = pid
+	s.UpdatedAt = time.Now()
+	return r.save()
+}
+
+// UpdateLastDeployed records the time of the most recent successful deploy.
+func (r *Registry) UpdateLastDeployed(name string, t time.Time) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	s, ok := r.services[name]
+	if !ok {
+		return fmt.Errorf("service %q not found", name)
+	}
+	s.LastDeployedAt = t
 	s.UpdatedAt = time.Now()
 	return r.save()
 }
