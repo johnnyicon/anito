@@ -1,5 +1,9 @@
 # M1 — `drain_window` Passes Nanoseconds, LLMs Will Always Break It
 
+> **Track B:** The root fix is `drain_window_ms INTEGER` in the SQLite schema — the unit is enforced at the storage layer. The MCP input change (accept `"3s"` string) is part of Track B and described in [sqlite-foundation.md](sqlite-foundation.md).
+
+
+
 **Finding:** `deployInput.DrainWindow` is `time.Duration` which JSON-serializes as int64 nanoseconds. The description says "e.g. 3000000000 for 3s." An LLM will pass `"3s"` (string, fails), `3` (three nanoseconds), or `3000` (three microseconds). The correct value (3000000000) is something no LLM will produce from natural language.
 
 ---

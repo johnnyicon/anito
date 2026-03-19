@@ -1,5 +1,9 @@
 # F1 — Version Tracking for Wrapper Scripts
 
+> **Track B:** Solved by the `deploy_events` table — `binary_sha` and `wrapper_sha` columns, populated by `resolveBinarySHA()` on every deploy. The wrapper script parsing logic described below is the implementation for that function in [sqlite-foundation.md](sqlite-foundation.md).
+
+
+
 **Finding:** `version` SHA is computed on the wrapper shell script (~200 bytes, almost never changes), not on the actual binary the script exec's. Every deploy of a wrapper-based service returns the same SHA.
 
 **Affected services:** All 13 services on this machine (all use wrapper scripts).

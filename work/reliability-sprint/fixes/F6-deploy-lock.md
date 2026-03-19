@@ -1,5 +1,9 @@
 # F6 — No Per-Service Deploy Lock
 
+> **Track B:** Solved by using `BEGIN EXCLUSIVE TRANSACTION` on the deploy path in SQLite — concurrent writes to the same service are automatically serialized. The `sync.Map` mutex approach below is the correct interim fix if needed before Track B lands.
+
+
+
 **Finding:** No mutex guards the full deploy transaction (deregister → start → health check → proxy swap). Two concurrent deploys for the same service can interleave, with unpredictable results.
 
 ---

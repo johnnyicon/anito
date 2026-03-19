@@ -1,5 +1,9 @@
 # F5 — Non-Atomic Registry Writes
 
+> **Track B:** This fix is free once SQLite lands. SQLite transactions are ACID — partial writes are structurally impossible. The temp+rename approach below is the correct interim fix if Track A ships before Track B.
+
+
+
 **Finding:** `internal/registry/registry.go` writes with `os.WriteFile()` directly to `registry.json`. On daemon crash mid-write, the file can be partially written and unparseable on the next startup, causing all services to fail to restore.
 
 ---

@@ -1,5 +1,9 @@
 # F4 — No "Did Anything Change?" Feedback in Deploy Response
 
+> **Track A / Track B split:** The `deployed_at` timestamp exposure (Step 1 below) is a Track A fix — it uses the existing `DeployedAt` field from `registry.go`. The `changed` flag and `previous_version` (Step 2) require the `deploy_events` table from Track B.
+
+
+
 **Finding:** `anito_deploy` and `anito_status` return no timestamp. There is no `previous` vs `current` comparison. After a deploy, the LLM and user cannot determine if anything actually changed.
 
 ---
