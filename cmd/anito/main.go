@@ -336,15 +336,13 @@ func runDeploy(cli *client.Client, configPath string) {
 		fatal(err)
 	}
 
-	// Resolve env_file to absolute so the daemon can open it regardless of
-	// its own working directory. Relative paths are resolved from the caller's
-	// CWD, consistent with how output and config_path are handled above.
+	// Resolve env_file to absolute so the daemon can open it regardless of its
+	// own working directory. Relative paths are resolved against the config
+	// file's directory (not CWD) so that configs checked into git work
+	// correctly no matter where `anito deploy` is run from.
 	absEnvFile := cfg.EnvFile
 	if absEnvFile != "" && !filepath.IsAbs(absEnvFile) {
-		absEnvFile, err = filepath.Abs(absEnvFile)
-		if err != nil {
-			fatal(err)
-		}
+		absEnvFile = filepath.Join(filepath.Dir(absConfig), absEnvFile)
 	}
 
 	if cfg.Build != "" {

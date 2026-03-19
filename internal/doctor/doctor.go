@@ -127,13 +127,19 @@ func checkConfig(cfgPath, relPath, repoRoot string, svc StatusFetcher) ConfigRes
 		})
 	}
 
-	// env_file must be absolute — relative paths depend on CWD at deploy time,
-	// which varies by caller (CLI vs MCP) and can silently break on the daemon.
-	if cfg.EnvFile != "" && !filepath.IsAbs(cfg.EnvFile) {
-		cr.add(Issue{Severity: "error", Field: "env_file",
-			Message: fmt.Sprintf("relative path %q is not allowed", cfg.EnvFile),
-			Action:  "use an absolute path in env_file to avoid resolution issues across callers",
-		})
+	// Validate env_file exists. Relative paths are resolved against the config
+	// file's directory (the same resolution the CLI uses at deploy time).
+	if cfg.EnvFile != "" {
+		envFilePath := cfg.EnvFile
+		if !filepath.IsAbs(envFilePath) {
+			envFilePath = filepath.Join(filepath.Dir(cfgPath), envFilePath)
+		}
+		if _, err := os.Stat(envFilePath); os.IsNotExist(err) {
+			cr.add(Issue{Severity: "error", Field: "env_file",
+				Message: fmt.Sprintf("file not found: %s", envFilePath),
+				Action:  "create the env_file or correct the path",
+			})
+		}
 	}
 
 	// Valid type.

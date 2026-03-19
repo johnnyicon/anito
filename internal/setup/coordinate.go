@@ -215,7 +215,9 @@ func generateServiceFiles(svc ServiceSpec, port int, repoRoot string) (Generated
 	cfg.WriteString("# [anito:managed] DO NOT EDIT — regenerate with: anito setup\n")
 	cfg.WriteString(fmt.Sprintf("name: %s\n", svc.Name))
 	cfg.WriteString(fmt.Sprintf("port: %d\n", port))
-	cfg.WriteString("env_file: .anito/ports.env\n")
+	// ports.env lives alongside the config in .anito/ — use a path relative to
+	// the config file so the CLI can resolve it consistently regardless of CWD.
+	cfg.WriteString("env_file: ports.env\n")
 
 	switch svc.Framework {
 	case "vite":
