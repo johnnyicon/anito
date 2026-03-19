@@ -5,6 +5,8 @@ package doctor
 
 import (
 	"fmt"
+	"net"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -180,6 +182,18 @@ func checkConfig(cfgPath, relPath, repoRoot string, svc StatusFetcher) ConfigRes
 		}
 	}
 
+	// Port conflict check — verify nothing else is holding the stable port on
+	// any loopback interface. Anito binds both 127.0.0.1 and [::1]; if a third
+	// process grabbed either side first it will shadow Anito for IPv6 clients.
+	if cfg.Port != 0 {
+		if conflict := detectPortConflict(cfg.Port); conflict != "" {
+			cr.add(Issue{Severity: "error", Field: "port",
+				Message: fmt.Sprintf("port %d has a competing listener: %s", cfg.Port, conflict),
+				Action:  "another process is holding this port — find and stop it, then restart the service",
+			})
+		}
+	}
+
 	// Registry alignment.
 	if svc != nil {
 		reg, err := svc.Status(cfg.Name)
@@ -219,6 +233,38 @@ func (cr *ConfigResult) add(iss Issue) {
 	case "warning":
 		cr.Warnings++
 	}
+}
+
+// detectPortConflict checks whether anything other than Anito's own proxy is
+// holding the given port on any loopback interface. It probes both 127.0.0.1
+// and [::1] and returns a description of the conflict, or "" if clean.
+// Anito's proxy sets X-Anito-Proxy: 1 on every response — any listener
+// missing that header is a foreign process.
+func detectPortConflict(port int) string {
+	addrs := []string{
+		fmt.Sprintf("127.0.0.1:%d", port),
+		fmt.Sprintf("[::1]:%d", port),
+	}
+	client := &http.Client{Timeout: 300 * time.Millisecond}
+	for _, addr := range addrs {
+		// Quick TCP probe first — skip if nothing is listening.
+		conn, err := net.DialTimeout("tcp", addr, 300*time.Millisecond)
+		if err != nil {
+			continue
+		}
+		_ = conn.Close()
+
+		// Something is listening. Check for Anito's fingerprint header.
+		resp, err := client.Get(fmt.Sprintf("http://%s/", addr))
+		if err != nil {
+			return fmt.Sprintf("non-HTTP process on %s", addr)
+		}
+		_ = resp.Body.Close()
+		if resp.Header.Get("X-Anito-Proxy") != "1" {
+			return fmt.Sprintf("foreign process on %s (HTTP %d, no Anito header)", addr, resp.StatusCode)
+		}
+	}
+	return ""
 }
 
 // findAssets walks dir and returns unique asset extensions found and total count.

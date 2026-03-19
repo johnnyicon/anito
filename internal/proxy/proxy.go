@@ -15,10 +15,14 @@ type handlerWrapper struct {
 	h http.Handler
 }
 
-// entry holds the permanent listener and the currently active handler.
+// entry holds the permanent listener(s) and the currently active handler.
+// We bind on both IPv4 (127.0.0.1) and IPv6 ([::1]) so that clients
+// connecting via either loopback family always hit Anito's proxy and not a
+// rogue process that grabbed the IPv6 side first.
 type entry struct {
 	stablePort int
-	listener   net.Listener
+	listener   net.Listener // 127.0.0.1:port
+	listener6  net.Listener // [::1]:port  — nil if IPv6 unavailable
 	server     *http.Server
 	handler    atomic.Value // stores handlerWrapper
 }
@@ -43,12 +47,14 @@ func (m *Manager) Register(name string, stablePort int) error {
 		return nil
 	}
 
-	l, err := net.Listen("tcp", fmt.Sprintf("localhost:%d", stablePort))
+	l, err := net.Listen("tcp4", fmt.Sprintf("127.0.0.1:%d", stablePort))
 	if err != nil {
 		return fmt.Errorf("proxy: cannot bind port %d for %q: %w", stablePort, name, err)
 	}
+	// Best-effort IPv6 bind — don't fail if the system has no IPv6 loopback.
+	l6, _ := net.Listen("tcp6", fmt.Sprintf("[::1]:%d", stablePort))
 
-	e := &entry{stablePort: stablePort, listener: l}
+	e := &entry{stablePort: stablePort, listener: l, listener6: l6}
 
 	// Placeholder handler until Swap is called after a successful health check.
 	e.handler.Store(handlerWrapper{h: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -57,12 +63,16 @@ func (m *Manager) Register(name string, stablePort int) error {
 
 	e.server = &http.Server{
 		Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("X-Anito-Proxy", "1")
 			e.handler.Load().(handlerWrapper).h.ServeHTTP(w, r)
 		}),
 	}
 
 	m.entries[name] = e
 	go e.server.Serve(l) //nolint:errcheck
+	if l6 != nil {
+		go e.server.Serve(l6) //nolint:errcheck
+	}
 	return nil
 }
 
@@ -111,6 +121,9 @@ func (m *Manager) Remove(name string) {
 		return
 	}
 	_ = e.server.Close()
+	if e.listener6 != nil {
+		_ = e.listener6.Close()
+	}
 	delete(m.entries, name)
 }
 
