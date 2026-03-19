@@ -262,3 +262,24 @@ anito_deploy(name="my-web", path=".anito/my-web-dev.sh", env_file=".anito/ports.
 # my-api → http://localhost:8100 (permanent)
 # my-web → http://localhost:8101 (permanent, Vite proxies /api → my-api)
 ```
+
+---
+
+## Migration notes
+
+### `drain_window` format (breaking if previously set)
+
+`drain_window` now accepts a **duration string** (`"3s"`, `"500ms"`) instead of
+nanoseconds. If you were passing it explicitly, update your calls:
+
+```
+# Before (broken — nanoseconds)
+anito_deploy(..., drain_window=3000000000)
+
+# After (correct)
+anito_deploy(..., drain_window="3s")
+```
+
+If you were omitting `drain_window`, no change needed — the default (2s) still applies.
+
+See [CHANGELOG.md](../CHANGELOG.md) for the full list of changes and new fields.

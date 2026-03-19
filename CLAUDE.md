@@ -51,6 +51,21 @@ internal/
   mcp/                  MCP server (not yet built)
 ```
 
+## Changelog discipline
+
+`CHANGELOG.md` at the repo root is the consumer-facing record of breaking and notable changes. Update it whenever you make a material change to any of the API surface files:
+
+- `internal/mcp/mcp.go` — MCP tool schemas, input/output types, tool descriptions
+- `internal/server/server.go` — HTTP management API endpoints or response shapes
+- `internal/registry/registry.go` — `Service` struct fields (added, removed, renamed, type-changed)
+- `internal/config/config.go` — `config.yaml` schema (new fields, changed types, removed fields)
+
+A **material change** is anything a consuming repo or MCP caller might need to update. Internal refactors, bug fixes with no API surface impact, and test changes do not need changelog entries.
+
+The pre-commit hook in `scripts/pre-commit` (installed via `make install-hooks`) will remind you when these files change without `CHANGELOG.md` being staged.
+
+---
+
 ## What's not built yet
 
 - MCP server (`internal/mcp/`) — the next major piece

@@ -71,7 +71,40 @@ if [ -n "$NEW_SCHEMA_VERSIONS" ]; then
 fi
 
 # ---------------------------------------------------------------------------
-# 3. Doc reminder (informational, does not block)
+# 3. API surface changelog guard (informational, does not block)
+#    If files that define the external contract change but CHANGELOG.md did
+#    not, remind the author. Material changes to these files affect consuming
+#    repos and should be documented.
+#
+#    API surface files:
+#      internal/mcp/mcp.go          — MCP tool schemas + input/output types
+#      internal/server/server.go    — HTTP management API endpoints
+#      internal/registry/registry.go — Service struct + persisted fields
+#      internal/config/config.go    — config.yaml schema
+# ---------------------------------------------------------------------------
+
+API_SURFACE_CHANGED=$(echo "$STAGED" | grep -E \
+  '^internal/mcp/mcp\.go$|^internal/server/server\.go$|^internal/registry/registry\.go$|^internal/config/config\.go$' \
+  || true)
+CHANGELOG_STAGED=$(echo "$STAGED" | grep '^CHANGELOG\.md$' || true)
+
+if [ -n "$API_SURFACE_CHANGED" ] && [ -z "$CHANGELOG_STAGED" ]; then
+  echo ""
+  echo "ℹ  API surface changed, CHANGELOG.md did not."
+  echo ""
+  echo "   Changed files:"
+  while IFS= read -r f; do
+    echo "     $f"
+  done <<< "$API_SURFACE_CHANGED"
+  echo ""
+  echo "   If you added, changed, or removed a tool parameter, field, or endpoint,"
+  echo "   add an entry to CHANGELOG.md so consuming repos know what to update."
+  echo "   (This is a reminder, not a hard block — skip if the change is internal only.)"
+  echo ""
+fi
+
+# ---------------------------------------------------------------------------
+# 4. Doc reminder (informational, does not block)
 #    If internal Go files changed but no docs changed, remind the author to
 #    update docs if the behaviour changed. Not a hard error.
 # ---------------------------------------------------------------------------
