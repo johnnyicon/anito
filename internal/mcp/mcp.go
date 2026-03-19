@@ -56,28 +56,33 @@ func (s *Server) Start() error {
 // --- input/output types ---
 
 type deployInput struct {
-	Name        string        `json:"name"         jsonschema:"service name, must be unique"`
-	Version     string        `json:"version"      jsonschema:"optional semver tag for this build, e.g. v1.2.3"`
-	Path        string        `json:"path"         jsonschema:"absolute path to the binary or static directory"`
-	Args        []string      `json:"args"         jsonschema:"optional arguments passed to the binary at startup, e.g. [\"serve\", \"--config\", \"prod.yaml\"]"`
-	StablePort  int           `json:"stable_port"  jsonschema:"preferred stable port consumers connect to (0 = auto-allocate); ports 7700 and 7701 are reserved"`
-	Type        string        `json:"type"         jsonschema:"service type: binary (default) or static"`
-	EnvFile     string        `json:"env_file"     jsonschema:"optional path to a KEY=VALUE env file"`
-	HealthCheck string        `json:"health_check" jsonschema:"health check path polled after start (default: /health)"`
-	WatchPaths  []string      `json:"watch_paths"  jsonschema:"directories to watch for file changes; any change triggers an automatic restart"`
-	DrainWindow time.Duration `json:"drain_window" jsonschema:"grace period between proxy swap and SIGTERM to the old process (e.g. 3000000000 for 3s); use this for SSE services to let in-flight connections finish"`
+	Name               string   `json:"name"                  jsonschema:"service name, must be unique"`
+	Version            string   `json:"version"               jsonschema:"optional semver tag for this build, e.g. v1.2.3"`
+	Path               string   `json:"path"                  jsonschema:"absolute path to the binary or static directory"`
+	Args               []string `json:"args"                  jsonschema:"optional arguments passed to the binary at startup"`
+	StablePort         int      `json:"stable_port"           jsonschema:"preferred stable port consumers connect to (0 = auto-allocate); ports 7700 and 7701 are reserved"`
+	Type               string   `json:"type"                  jsonschema:"service type: binary (default) or static"`
+	EnvFile            string   `json:"env_file"              jsonschema:"optional path to a KEY=VALUE env file"`
+	HealthCheck        string   `json:"health_check"          jsonschema:"health check path polled after start (default: /health)"`
+	WatchPaths         []string `json:"watch_paths"           jsonschema:"directories to watch for file changes; any change triggers an automatic restart"`
+	DrainWindow        string   `json:"drain_window"          jsonschema:"grace period between proxy swap and SIGTERM to the old process (e.g. '3s', '500ms'). Use this for SSE services to let in-flight connections finish."`
+	HealthCheckTimeout string   `json:"health_check_timeout"  jsonschema:"how long to wait for /health to return 200 (e.g. '30s', '60s'). Default: '15s'. Increase for slow-starting services."`
+	RestartPolicy      string   `json:"restart_policy"        jsonschema:"crash restart behavior: 'on-watch' (default, restart only if watch paths set), 'always' (always restart on crash), 'never' (never auto-restart)"`
 }
 
 type serviceView struct {
-	Name          string `json:"name"`
-	Version       string `json:"version,omitempty"`
-	Type          string `json:"type"`
-	StablePort    int    `json:"stable_port"`
-	PinnedAddress string `json:"pinned_address"` // permanent address — never changes on redeploy
-	InternalPort  int    `json:"internal_port,omitempty"`
-	Status        string `json:"status"`
-	PID           int    `json:"pid,omitempty"`
-	BinaryPath    string `json:"binary_path"`
+	Name           string    `json:"name"`
+	Version        string    `json:"version,omitempty"`
+	Type           string    `json:"type"`
+	StablePort     int       `json:"stable_port"`
+	PinnedAddress  string    `json:"pinned_address"` // permanent address — never changes on redeploy
+	InternalPort   int       `json:"internal_port,omitempty"`
+	Status         string    `json:"status"`
+	PID            int       `json:"pid,omitempty"`
+	BinaryPath     string    `json:"binary_path"`
+	DeployedAt     time.Time `json:"deployed_at,omitempty"`
+	UpdatedAt      time.Time `json:"updated_at,omitempty"`
+	LastDeployedAt time.Time `json:"last_deployed_at,omitempty"`
 }
 
 // setupInput is the unified input for anito_setup.
@@ -194,7 +199,8 @@ type opResult struct {
 func (s *Server) registerTools(srv *sdkmcp.Server) {
 	sdkmcp.AddTool(srv, &sdkmcp.Tool{
 		Name: "anito_deploy",
-		Description: "Deploy a service to Anito. Starts the binary on an ephemeral port, " +
+		Description: "Use for both the first deploy and every subsequent redeploy. " +
+			"Deploy a service to Anito. Starts the binary on an ephemeral port, " +
 			"polls /health until 200, then atomically swaps the reverse proxy. " +
 			"Re-deploying an existing service is zero-downtime. " +
 			"If stable_port is 0 or omitted, a port is auto-allocated from the range 8100-8200. " +
@@ -204,16 +210,37 @@ func (s *Server) registerTools(srv *sdkmcp.Server) {
 			"Ports 7700 (management API) and 7701 (MCP) are reserved and cannot be used.",
 	}, func(ctx context.Context, req *sdkmcp.CallToolRequest, in deployInput) (*sdkmcp.CallToolResult, serviceView, error) {
 		log.Printf("[MCP] tool=anito_deploy name=%s path=%s port=%d", in.Name, in.Path, in.StablePort)
+
+		var drainWindow time.Duration
+		if in.DrainWindow != "" {
+			d, err := time.ParseDuration(in.DrainWindow)
+			if err != nil {
+				return nil, serviceView{}, fmt.Errorf("invalid drain_window %q: use a duration string like '3s' or '500ms'", in.DrainWindow)
+			}
+			drainWindow = d
+		}
+		var hcTimeout time.Duration
+		if in.HealthCheckTimeout != "" {
+			d, err := time.ParseDuration(in.HealthCheckTimeout)
+			if err != nil {
+				return nil, serviceView{}, fmt.Errorf("invalid health_check_timeout %q: use a duration string like '30s'", in.HealthCheckTimeout)
+			}
+			hcTimeout = d
+		}
+
 		svc, err := s.svc.Deploy(service.DeployRequest{
-			Name:        in.Name,
-			Type:        registry.ServiceType(in.Type),
-			WatchPaths:  in.WatchPaths,
-			Path:        in.Path,
-			Args:        in.Args,
-			StablePort:  in.StablePort,
-			EnvFile:     in.EnvFile,
-			HealthCheck: in.HealthCheck,
-			DrainWindow: in.DrainWindow,
+			Name:               in.Name,
+			Version:            in.Version,
+			Type:               registry.ServiceType(in.Type),
+			WatchPaths:         in.WatchPaths,
+			Path:               in.Path,
+			Args:               in.Args,
+			StablePort:         in.StablePort,
+			EnvFile:            in.EnvFile,
+			HealthCheck:        in.HealthCheck,
+			DrainWindow:        drainWindow,
+			HealthCheckTimeout: hcTimeout,
+			RestartPolicy:      in.RestartPolicy,
 		})
 		if err != nil {
 			log.Printf("[MCP] tool=anito_deploy name=%s error=%q", in.Name, err)
@@ -249,7 +276,7 @@ func (s *Server) registerTools(srv *sdkmcp.Server) {
 
 	sdkmcp.AddTool(srv, &sdkmcp.Tool{
 		Name:        "anito_logs",
-		Description: "Return the last N lines from a service's log file. Use this to inspect recent output or diagnose failures.",
+		Description: "Return the last N lines from a service's log file. Use this to inspect recent output or diagnose failures. Pass name=\"~daemon\" to read Anito's own daemon log — useful for diagnosing crashes, deploys, and watch events across all services.",
 	}, func(ctx context.Context, req *sdkmcp.CallToolRequest, in logsInput) (*sdkmcp.CallToolResult, logsOutput, error) {
 		lines := in.Lines
 		if lines <= 0 {
@@ -266,18 +293,22 @@ func (s *Server) registerTools(srv *sdkmcp.Server) {
 	sdkmcp.AddTool(srv, &sdkmcp.Tool{
 		Name:        "anito_restart",
 		Description: "Restart a service. Starts a new process, waits for the health check to pass, then swaps the proxy. The stable port stays live throughout.",
-	}, func(ctx context.Context, req *sdkmcp.CallToolRequest, in nameInput) (*sdkmcp.CallToolResult, opResult, error) {
+	}, func(ctx context.Context, req *sdkmcp.CallToolRequest, in nameInput) (*sdkmcp.CallToolResult, serviceView, error) {
 		log.Printf("[MCP] tool=anito_restart name=%s", in.Name)
 		if err := s.svc.Restart(in.Name); err != nil {
 			log.Printf("[MCP] tool=anito_restart name=%s error=%q", in.Name, err)
-			return nil, opResult{}, err
+			return nil, serviceView{}, err
 		}
-		return nil, opResult{Status: "restarted", Name: in.Name}, nil
+		svc, err := s.svc.Status(in.Name)
+		if err != nil {
+			return nil, serviceView{}, err
+		}
+		return nil, toView(svc), nil
 	})
 
 	sdkmcp.AddTool(srv, &sdkmcp.Tool{
 		Name:        "anito_stop",
-		Description: "Stop a running service. The service stays registered; use anito_deploy or anito_restart to bring it back.",
+		Description: "Stop a running service. The service stays registered; use anito_deploy or anito_restart to bring it back. The port assignment is preserved — the same port is reused on restart. Use this for temporary pauses.",
 	}, func(ctx context.Context, req *sdkmcp.CallToolRequest, in nameInput) (*sdkmcp.CallToolResult, opResult, error) {
 		log.Printf("[MCP] tool=anito_stop name=%s", in.Name)
 		if err := s.svc.Stop(in.Name); err != nil {
@@ -288,7 +319,7 @@ func (s *Server) registerTools(srv *sdkmcp.Server) {
 
 	sdkmcp.AddTool(srv, &sdkmcp.Tool{
 		Name:        "anito_remove",
-		Description: "Stop a service and remove it from the Anito registry. The stable port is released and can be reused.",
+		Description: "Stop a service and remove it from the Anito registry. The stable port is released and can be reused. The stable port is released and may be reassigned. Use this to retire a service permanently.",
 	}, func(ctx context.Context, req *sdkmcp.CallToolRequest, in nameInput) (*sdkmcp.CallToolResult, opResult, error) {
 		log.Printf("[MCP] tool=anito_remove name=%s", in.Name)
 		if err := s.svc.Remove(in.Name); err != nil {
@@ -328,7 +359,8 @@ func (s *Server) registerTools(srv *sdkmcp.Server) {
 			"per-service config files, dev wrapper scripts, and [anito:managed] source patches for " +
 			"frameworks that need them (Vite proxy config, Next.js rewrites, etc.). " +
 			"In both modes, generated_files contains every file to write and instructions is the action list. " +
-			"After setup, call anito_reserve for each service to lock ports, then anito_deploy to start them.",
+			"After setup, call anito_reserve for each service to lock ports, then anito_deploy to start them. " +
+			"One-time scaffolding only. If .anito/config.yaml already exists, call anito_deploy instead.",
 	}, func(ctx context.Context, req *sdkmcp.CallToolRequest, in setupInput) (*sdkmcp.CallToolResult, setupResult, error) {
 		// --- composite mode ---
 		if len(in.Services) > 0 {
@@ -407,14 +439,17 @@ func (s *Server) registerTools(srv *sdkmcp.Server) {
 
 func toView(svc *registry.Service) serviceView {
 	return serviceView{
-		Name:          svc.Name,
-		Version:       svc.Version,
-		Type:          string(svc.Type),
-		StablePort:    svc.StablePort,
-		PinnedAddress: fmt.Sprintf("http://localhost:%d", svc.StablePort),
-		InternalPort:  svc.InternalPort,
-		Status:        string(svc.Status),
-		PID:           svc.PID,
-		BinaryPath:    svc.BinaryPath,
+		Name:           svc.Name,
+		Version:        svc.Version,
+		Type:           string(svc.Type),
+		StablePort:     svc.StablePort,
+		PinnedAddress:  fmt.Sprintf("http://localhost:%d", svc.StablePort),
+		InternalPort:   svc.InternalPort,
+		Status:         string(svc.Status),
+		PID:            svc.PID,
+		BinaryPath:     svc.BinaryPath,
+		DeployedAt:     svc.DeployedAt,
+		UpdatedAt:      svc.UpdatedAt,
+		LastDeployedAt: svc.LastDeployedAt,
 	}
 }
