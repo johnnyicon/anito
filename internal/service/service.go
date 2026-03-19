@@ -20,12 +20,22 @@ import (
 	"sync"
 	"time"
 
+	"github.com/johnnyicon/anito/internal/config"
 	"github.com/johnnyicon/anito/internal/notify"
 	"github.com/johnnyicon/anito/internal/process"
 	"github.com/johnnyicon/anito/internal/proxy"
 	"github.com/johnnyicon/anito/internal/registry"
 	"github.com/johnnyicon/anito/internal/watcher"
+	"gopkg.in/yaml.v3"
 )
+
+// buildConfig holds the subset of config fields needed by BuildLog.
+type buildConfig struct {
+	Build string `yaml:"build"`
+}
+
+// yamlUnmarshal is a thin alias so loadConfig doesn't need a direct yaml import reference.
+var yamlUnmarshal = yaml.Unmarshal
 
 // sseHealthCheckPaths is the set of health check paths that require an SSE
 // readiness probe instead of a plain HTTP 200 check.  The MCP SSE transport
@@ -454,6 +464,54 @@ func (s *Service) handleCrash(name string) {
 	if err := s.Restart(name); err != nil {
 		log.Printf("[ERROR] name=%s crash restart failed: %v", name, err)
 	}
+}
+
+// BuildLog runs the build command from the service's config_path and pipes
+// output to ~/.anito/logs/<name>-build.log.
+// Returns the build log path (always) and a non-nil error if the build failed.
+func (s *Service) BuildLog(name string) (string, error) {
+	svc, ok := s.reg.Get(name)
+	if !ok {
+		return "", fmt.Errorf("service %q not found", name)
+	}
+	if svc.ConfigPath == "" {
+		return "", fmt.Errorf("service %q has no config_path — cannot run build", name)
+	}
+
+	cfg, err := config.Load(svc.ConfigPath)
+	if err != nil {
+		return "", fmt.Errorf("loading config: %w", err)
+	}
+	if cfg.Build == "" {
+		return "", fmt.Errorf("service %q config has no build command", name)
+	}
+
+	buildLogPath := filepath.Join(s.logDir, name+"-build.log")
+	logFile, err := os.Create(buildLogPath)
+	if err != nil {
+		return "", fmt.Errorf("creating build log: %w", err)
+	}
+	defer logFile.Close()
+
+	parts := strings.Fields(cfg.Build)
+	cmd := exec.Command(parts[0], parts[1:]...)
+	cmd.Dir = filepath.Dir(svc.ConfigPath)
+	cmd.Stdout = logFile
+	cmd.Stderr = logFile
+
+	if runErr := cmd.Run(); runErr != nil {
+		return buildLogPath, fmt.Errorf("build failed: %w", runErr)
+	}
+	return buildLogPath, nil
+}
+
+// buildLogFilePath returns the path to the build log for a service.
+// Returns an error if the service is not registered.
+func (s *Service) buildLogFilePath(name string) (string, error) {
+	if _, ok := s.reg.Get(name); !ok {
+		return "", fmt.Errorf("service %q not found", name)
+	}
+	return filepath.Join(s.logDir, name+"-build.log"), nil
 }
 
 // logFilePath resolves the log file path for name.
