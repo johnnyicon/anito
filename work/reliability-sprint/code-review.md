@@ -1,285 +1,537 @@
-# Reliability Sprint Code Review
+# Reliability Sprint — Independent Code Review
+
+**Reviewer role:** Senior Go engineer, independent review
+**Date:** 2026-03-19
+**Codebase read:** full — `internal/service`, `internal/process`, `internal/registry`, `internal/proxy`, `internal/mcp`, `internal/server`, `internal/watcher`, `internal/config`, `internal/client`, `cmd/anito/main.go`, all sprint docs, all fix files, UI source
+
+---
 
 ## Executive Summary
 
-The sprint correctly identifies real reliability problems, but the highest-risk issue in the current implementation is not framed clearly in the audit: Anito persists `running` state too early and does not roll state back cleanly when deploy, restart, or restore paths fail after process start but before a successful proxy swap.
+The sprint materials correctly identify real problems. Most of the proposed fixes are directionally sound. But the audit misses two issues that are more important than anything currently in the F-series: the registry writes `status=running` before Anito has earned it (premature state persistence), and the `Stop()` path never writes `status=stopped` (intentional stops leave state wrong).
 
-That problem is more important than the current F2 wording. It means the registry can report a replacement process as live before Anito has actually proved that it is healthy and serving the stable port.
+These are state-model correctness bugs, not just observability gaps. They mean:
+- a service that fails its health check can appear `running` for a window before the crash write fires
+- a deliberately stopped service shows `running` indefinitely if it was stopped while healthy
 
-The immediate sprint work is therefore not safe to ship exactly as described. Track A needs one more class of fix beyond the current notes: lifecycle-state correctness and rollback behavior. Track B is directionally right, but the SQLite plan is still incomplete as an operational design. Track C is reasonable only after the state model and contract surface are corrected.
+The current Track A plan does not fix either of these. If Track A ships without addressing them, it improves what callers see without fixing what the daemon actually knows.
+
+Track B (SQLite) is architecturally correct but the operational design is unfinished: locking model, WAL/busy-timeout decisions, and migration crash recovery are all unspecified. The schema is not wrong, but it is not ready to implement against.
+
+Track C should wait. Building history and verify tools on top of a lifecycle model that still has premature state writes would encode the ambiguity more permanently.
+
+---
 
 ## Findings
 
-### 1. New finding — lifecycle state is written before Anito has earned `running`
+Ordered by severity. Each finding is labeled against the audit's existing claims.
 
-**Severity:** Critical
+---
 
-`internal/process/process.go` writes `status=running`, `pid`, and `internal_port` immediately after `cmd.Start()` in `Start()`. Health-check validation and proxy swap happen later in `internal/service/service.go`.
+### CRIT-1 — New finding: registry writes `status=running` before health check and before proxy swap
 
-That creates a broken invariant across deploy, restart, and restore:
+**Severity: Critical**
+**Audit status: Missed**
 
-- the registry can point at a replacement process before health check succeeds
-- the registry can point at a replacement process before the stable-port proxy is swapped
-- failure paths can leave stale or misleading persisted state
+`internal/process/process.go` line 87 writes `status=running` and the new PID to the registry immediately after `cmd.Start()` succeeds. Health-check validation and proxy swap happen afterward in `internal/service/service.go`.
 
-This is the core correctness problem in the current implementation.
+```
+process.Start()
+  cmd.Start()           ← process spawned
+  reg.UpdateStatus(running, newPID)  ← registry says "running" right here
+  return internalPort
 
-**Assessment of current sprint docs:** missed.
+service.Deploy() / Restart()
+  mgr.Start()           ← returns internalPort
+  waitHealthy()         ← may fail
+  prx.Swap()            ← may fail
+```
 
-**Recommended fix direction:** move the authoritative `running` transition to the point after successful health check and successful proxy swap, or introduce a distinct transitional state and rollback logic.
+During the window between `cmd.Start()` and a successful proxy swap, the registry reports the new process as `running` at the new PID — but the stable-port proxy may still be pointing at the old process. A caller that reads status during this window gets a lie.
 
-### 2. New finding — deploy/restart failure paths do not roll registry state back cleanly
+On health-check failure, `service.go` stops the new process but the registry already shows the new (failed) process's PID as `running`. The crash goroutine will eventually write `status=failed`, but the intermediate window is false.
 
-**Severity:** Critical
+On proxy-swap failure, there is no cleanup at all. The new process is running, the registry says running with the new PID, but the stable port is still pointing at the old process (or nothing).
 
-In `internal/service/service.go`, both `Deploy()` and `Restart()` start the replacement process before health check and swap. On failure:
+**Proposed fix analysis:** The current sprint does not address this. The F2 fix says "write `status=running` after successful swap in all paths" — but the problem is that the process layer writes `running` *before* any of those checks pass.
 
-- if `waitHealthy()` fails, the replacement process is stopped, but the registry has already been updated to the new PID/internal port by `Start()`
-- if `Swap()` fails, the function returns without cleaning up the new process or restoring registry state to the old one
+**Required fix direction:** The process layer should not write `running` status. It should write only what it knows: `starting` (or nothing, leaving the previous status). The authoritative `running` write belongs in the service layer after `waitHealthy()` and `prx.Swap()` both succeed, paired with explicit rollback on any failure after `cmd.Start()`.
 
-Impact:
+---
 
-- a failed restart can leave the old process still serving while the registry points at the failed replacement
-- a failed swap can leave a stray process alive but unserved
-- callers can receive state that does not match what the stable port is actually serving
+### CRIT-2 — New finding: `Stop()` never writes `status=stopped` to the registry
 
-**Assessment of current sprint docs:** missed.
+**Severity: Critical**
+**Audit status: Missed**
 
-**Recommended fix direction:** define rollback semantics explicitly for every failure edge after `Start()`, including restoration of old PID/internal port state where appropriate.
+`internal/service/service.go` lines 235–244:
 
-### 3. Partially confirmed — F2 status divergence is real, but the audit frames the wrong root cause
+```go
+func (s *Service) Stop(name string) error {
+    s.wtch.Stop(name)
+    err := s.mgr.Stop(name)
+    // ...
+    return err
+}
+```
 
-**Severity:** High
+`mgr.Stop()` sends SIGTERM and marks the PID as draining so the crash monitor ignores it. The crash monitor's goroutine (`cmd.Wait()` path) sees `isDraining=true` and returns without writing any new status. Result: the registry status is whatever it was before the stop — usually `running`.
 
-The stale-state symptom is real. The audit's exact race framing is weaker than the broader invariant failure.
+A service that is cleanly stopped shows `status=running` in `anito_services` and `anito_status` indefinitely.
 
-The current F2 writeup focuses on `failed` potentially overwriting `running` after successful recovery. The verified implementation shows a more fundamental issue: lifecycle state is written too early, and restart/deploy/restore paths do not establish a clean final authoritative state transition after swap success.
+The only paths that write `StatusStopped` are `Reserve()` (stub registration) and test fixtures. Nothing in the operational flow writes it.
 
-The proposed fix note for F2 says to write `status=running` after successful swap in every path. That is necessary, but not sufficient by itself. It does not solve stale PID/internal-port state after failed health checks or failed swaps.
+**Consequences:**
+- daemon restores show `status==running` in the registry and attempt to re-start a service the user intentionally stopped
+- `handleCrash()` guards on `svc.Status == registry.StatusStopped` to avoid crash-restart on intentional stops — this guard never fires because stop never sets the state
 
-**Assessment of proposed fix:** incomplete.
+**Proposed fix analysis:** Not addressed in any sprint document. This is a fundamental lifecycle gap.
 
-### 4. New finding — intentional `stop` does not persist `stopped`, and static-service stop semantics look broken
+---
 
-**Severity:** High
+### HIGH-1 — Confirmed: F2 status divergence is real, but the cause is broader than the audit frames
 
-`internal/service/service.go` calls `mgr.Stop(name)` and logs the result, but no path writes `status=stopped` to the registry after a successful stop.
+**Severity: High**
+**Audit status: Partially confirmed**
 
-Because `process.Stop()` marks the PID as draining, the crash monitor intentionally skips the `failed` write. That leaves the previous persisted state intact, which can remain `running` after a clean stop.
+The `gomanan-ui-dev` symptom is real. The audit says "the crash recovery path does not write `status=running` after a successful swap." That is true, and it should be fixed.
 
-There is a second issue: static services do not have a managed process, but `Service.Stop()` still routes through `mgr.Stop()`, which means stop behavior for static services is effectively an error path rather than a clean lifecycle operation.
+But the broader issue (CRIT-1 above) means: even the Deploy path has a window where state is wrong. The F2 fix note is necessary but not sufficient. Writing `status=running` after swap in all paths does fix the stuck-failed symptom. But until CRIT-1 is also addressed, there will still be a false-running window during every start attempt.
 
-**Assessment of current sprint docs:** missed.
+**Proposed fix analysis:** The F2 fix note is correct for the observed symptom. It should land as part of Track A. Framing it as the complete fix is inaccurate.
 
-**Recommended fix direction:** make stop semantics explicit for binary and static services and persist `stopped` authoritatively.
+---
 
-### 5. Confirmed — F1 version tracking hashes the wrapper path, not the executed binary
+### HIGH-2 — Confirmed: F1 version tracking hashes the wrapper, not the binary
 
-**Severity:** High
+**Severity: High**
+**Audit status: Confirmed**
 
-`internal/service/service.go` computes the fallback version from `hashPath(req.Path)`. If `req.Path` is a wrapper script, the version reflects the wrapper content rather than the real binary.
+`service.go` lines 125–128 compute `version = hashPath(req.Path)`. `req.Path` is the binary_path field, which for all 13 observed services is a wrapper script. The hash never changes.
 
-This makes deploy responses untrustworthy for wrapper-based services.
+The Track B fix (store `binary_sha` by parsing the `exec` target from the wrapper) is correct. But this fix is not strictly dependent on SQLite — the `resolveBinarySHA()` logic can be added to Track A if immediate deploy confidence matters. The sprint defers it to Track B as a convenience, but that choice delays the most visible symptom.
 
-The Track B design in `fixes/F1-version-tracking.md` and `fixes/sqlite-foundation.md` is directionally correct: store both `binary_sha` and `wrapper_sha` and compute them explicitly.
+**Proposed fix analysis:** Sound. Track B dependency is a design choice, not a technical requirement.
 
-**Assessment of proposed fix:** sound, but not strictly dependent on SQLite. A smaller Track A fix is possible if immediate deploy-confidence is important.
+---
 
-### 6. Partially confirmed — F4 deploy feedback is real, but the timestamp semantics are inconsistent across sprint docs
+### HIGH-3 — Confirmed: M1 duration type is broken — but the problem exists in both MCP and HTTP API
 
-**Severity:** High
+**Severity: High**
+**Audit status: Confirmed, but scope is too narrow**
 
-The sprint is correct that deploy feedback is insufficient today. However, the documents disagree on timestamp meaning:
+`deployInput.DrainWindow` in `mcp.go` is `time.Duration`. The HTTP `DeployRequest` in `server.go` also uses `time.Duration`. The `client.go` `DeployRequest` also uses `time.Duration`. The fix note covers only `mcp.go`.
 
-- `fixes/M3-timestamps-hidden.md` correctly describes `DeployedAt` as first registration time and `UpdatedAt` as last registry mutation time
-- `fixes/F4-deploy-feedback.md` proposes setting `deployed_at` on every successful deploy/restart
+Any caller — CLI via HTTP, MCP tool call, or future integration — that tries to pass a human-readable duration gets silently broken behavior. The CLI path works today only because `config.go` uses gopkg.in/yaml.v3, which handles duration strings natively before the value reaches the HTTP client.
 
-Those are different semantics.
+**Proposed fix analysis:** Correct direction but incomplete scope. The fix should touch `mcp.go`, `server.go`/`DeployRequest`, and the documented behavior. The `client.go` struct also uses `time.Duration` but since CLI callers go through `config.go`, the practical blast radius today is limited to MCP callers. Still: fix all three consistently.
 
-Exposing current `DeployedAt` and `UpdatedAt` is a reasonable Track A improvement, but it does not answer `did anything change?` and it does not provide a clean last-successful-swap timestamp.
+---
 
-**Assessment of proposed fix:** partially sound.
+### HIGH-4 — New finding: daemon restore path swaps proxy without health check
 
-**Required adjustment:** define a distinct `LastDeployedAt` or equivalent field for successful swap time instead of overloading existing `DeployedAt`.
+**Severity: High**
+**Audit status: Missed**
 
-### 7. Confirmed — F3/F7 watch logging is pre-debounce and floods the daemon log
+`cmd/anito/main.go` lines 611–619:
 
-**Severity:** High
+```go
+internalPort, err := mgr.Start(svc)
+if err != nil {
+    log.Printf("[RESTORE_FAILED] ...")
+    _ = reg.UpdateStatus(svc.Name, registry.StatusFailed, 0)
+    continue
+}
+if err := prx.Swap(svc.Name, internalPort); err != nil {
+    log.Printf("warn: proxy swap failed ...")
+}
+```
 
-`internal/watcher/watcher.go` logs `[WATCH]` per filesystem event before debounce collapse. The debounce callback only triggers restart; it does not own the primary logging.
+There is no `waitHealthy()` call between `mgr.Start()` and `prx.Swap()` in the restore path. On daemon restart, every previously-running service is immediately pointed at a fresh process without any confirmation that the process is healthy.
 
-This matches the audit's log-noise claim.
+If a service takes longer than the proxy swap to become ready (slow startup, needs time to initialize), callers immediately behind the stable port receive `502 Bad Gateway` from the proxy's error handler.
 
-The proposed post-debounce logging change is correct and should land.
+This also inherits CRIT-1: `mgr.Start()` writes `status=running` before anything is verified.
 
-The broader `watch_exclude` idea is also reasonable, but that is a larger feature than the immediate log-noise fix.
+**Proposed fix analysis:** Not in the sprint at all. The restore path needs the same health-check gate as the deploy path.
 
-**Assessment of proposed fix:** sound for log flood; broader exclusion work should stay separated from the minimal Track A repair.
+---
 
-### 8. Confirmed — M1 duration contract is broken, and the problem exists in both MCP and HTTP API
+### HIGH-5 — Confirmed: F3/F7 watch log flood is pre-debounce
 
-**Severity:** High
+**Severity: High**
+**Audit status: Confirmed**
 
-`internal/mcp/mcp.go` exposes `DrainWindow time.Duration` in a JSON-facing struct. `internal/server/server.go` does the same for the HTTP API.
+`internal/watcher/watcher.go` line 135 logs `[WATCH]` for every fsnotify event before the debounce timer fires. The debounce only gates the restart callback, not the log line. A single git operation touching N files produces N log lines.
 
-This is not an MCP-only problem.
+The post-debounce logging fix is correct and low-risk.
 
-Natural caller input such as `"3s"` will not map cleanly to those JSON contracts. The current shape is hostile to both humans and agents.
+**Proposed fix analysis:** Sound. The `coalesced=N` format improvement is a good addition.
 
-**Assessment of proposed fix:** correct direction, but scope is too narrow.
+---
 
-**Required adjustment:** fix both MCP and HTTP API contracts together.
+### HIGH-6 — New finding: MCP deploy does not pass `Version` or `HealthCheckTimeout` or `RestartPolicy` through to the service layer
 
-### 9. Confirmed — M2 restart response is too weak; the same problem exists in the HTTP API
+**Severity: High**
+**Audit status: Missed**
 
-**Severity:** Medium
+`mcp.go` lines 207–217:
 
-The MCP `anito_restart` tool returns a bare operation result instead of a full service view. That is exactly the problem described in the sprint note.
+```go
+svc, err := s.svc.Deploy(service.DeployRequest{
+    Name:        in.Name,
+    Type:        registry.ServiceType(in.Type),
+    WatchPaths:  in.WatchPaths,
+    Path:        in.Path,
+    Args:        in.Args,
+    StablePort:  in.StablePort,
+    EnvFile:     in.EnvFile,
+    HealthCheck: in.HealthCheck,
+    DrainWindow: in.DrainWindow,
+})
+```
 
-The same response shape exists in the HTTP API restart endpoint.
+Three fields from `deployInput` are silently dropped:
+- `in.Version` — the optional semver tag is in the input type but not passed through
+- `HealthCheckTimeout` — not in `deployInput` at all, so MCP callers cannot override the 15s default
+- `RestartPolicy` — not in `deployInput` at all, so MCP callers cannot set `always` or `never`
 
-Returning a full service view after restart is the right direction, assuming state semantics are corrected first.
+The HTTP API supports all three via `server.DeployRequest`.
 
-**Assessment of proposed fix:** sound, but should be applied consistently across MCP and HTTP API.
+An LLM deploying a service that needs a 60s health check timeout (slow JVM startup, database migration) cannot override the 15s default via MCP. The service will fail to deploy even though it would succeed if deployed via CLI.
 
-### 10. Confirmed — M3 timestamps are hidden from MCP, but this is only one part of the deploy-confidence problem
+**Proposed fix analysis:** Not addressed in any sprint document. This is a contract completeness bug.
 
-**Severity:** Medium
+---
 
-The registry model includes `DeployedAt` and `UpdatedAt`. `toView()` in `internal/mcp/mcp.go` drops them.
+### MED-1 — Partially confirmed: F2 rollback is incomplete after health-check failure
 
-Exposing them is a valid Track A improvement. But the sprint should not overstate the value:
+**Severity: Medium**
+**Audit status: Partially confirmed**
 
-- `UpdatedAt` is not `last deployed`
-- current `DeployedAt` is first registration time, not successful latest deploy time
+In `service.Deploy()`, if `waitHealthy()` fails:
 
-**Assessment of proposed fix:** sound as an additive visibility improvement; insufficient as a full F4 solution.
+```go
+if err := waitHealthy(internalPort, req.HealthCheck, hcTimeout); err != nil {
+    _ = s.mgr.Stop(req.Name)
+    return nil, err
+}
+```
 
-### 11. Partially confirmed — F5 non-atomic registry writes are a real risk, but the practical severity is lower than the higher-priority state-model bugs
+The new process is stopped. But:
+1. The registry already shows the new process's PID and `status=running` (from CRIT-1)
+2. `mgr.Stop()` marks the PID draining, the crash monitor ignores it, and no `UpdateStatus` runs
+3. The registry is left with the failed process's PID in a `running` state
 
-**Severity:** Medium
+The old process was deregistered from `m.procs` by `Deregister()` before `Start()` was called, so `mgr.Stop()` here actually stops the **new** (failed) process. But the old process, which was serving the stable port before this deploy attempt, is now orphaned in the drain goroutine — the drain goroutine was set up for the old process, not the failed new one. After health-check failure, the old process gets drained anyway.
 
-`internal/registry/registry.go` writes the registry file directly with `os.WriteFile()`. A temp-file plus rename pattern would be safer.
+This means a failed deploy can:
+1. Leave the registry pointing at a failed process
+2. Drain the old working process (which was still serving the stable port)
+3. Leave the stable port with no valid upstream
 
-This is a legitimate reliability concern, but it is lower priority than the already-observed stale-state problems. The sprint should not treat atomic-write concerns as the primary source of false service state.
+**Proposed fix analysis:** The F2 fix note adds `status=running` after swap, which is correct. But it does not address this scenario where the old process should be preserved and the new process cleaned up on health-check failure.
 
-The temp-file + rename approach is a good interim fix. The `.bak` recovery extension is optional, not mandatory for the first repair.
+---
 
-**Assessment of proposed fix:** sound.
+### MED-2 — Confirmed: F6 concurrent deploy race is real; proposed fix introduces a new bug
 
-### 12. Partially confirmed — F6 concurrent deploy race is real, but both the interim and SQLite locking stories need work
+**Severity: Medium**
+**Audit status: Confirmed (fix has a defect)**
 
-**Severity:** Medium
+The absence of a per-service deploy lock is a real problem. Two concurrent deploys for the same service can interleave, producing two live processes with only one served.
 
-The absence of a per-service deploy lock is a real correctness problem. Two concurrent deploys for the same service can interleave and produce misleading success outcomes.
+However, `fixes/F6-deploy-lock.md` contains a broken cancellation pattern:
 
-However, the proposed fix note contains a broken cancellation example: the goroutine-based `lockForDeploy(ctx, name)` helper can still acquire the mutex after the caller times out, with no guaranteed unlock path. That can deadlock future deploys.
+```go
+func (s *Service) lockForDeploy(ctx context.Context, name string) (func(), error) {
+    v, _ := s.deployLocks.LoadOrStore(name, &sync.Mutex{})
+    mu := v.(*sync.Mutex)
+    done := make(chan struct{})
+    go func() { mu.Lock(); close(done) }()  // goroutine acquires lock
+    select {
+    case <-done:
+        return mu.Unlock, nil
+    case <-ctx.Done():
+        return nil, ctx.Err()   // returns without unlocking — goroutine still runs
+    }
+}
+```
 
-The Track B proposal to use `BEGIN EXCLUSIVE` as the deploy lock is also too coarse if it serializes unrelated services through a whole-database write lock.
+When the context times out, the function returns `nil, ctx.Err()`. The goroutine continues running and will eventually acquire the mutex. When it does, `done` is closed but the caller already returned — nobody calls `mu.Unlock`. The mutex stays locked until the service is restarted or the daemon exits. All future deploys for that service name hang forever.
 
-**Assessment of proposed fix:** risk introduced.
+The correct approach is a simple per-service mutex with no goroutine: use `sync.Mutex.TryLock()` or just block. If blocking is acceptable (it is — deploys should serialize), the simple approach is:
 
-**Required adjustment:** use a correct per-service in-memory lock for Track A, and avoid a whole-database exclusive strategy as the default design for Track B unless the team explicitly accepts global serialization.
+```go
+func (s *Service) lockForDeploy(name string) func() {
+    v, _ := s.deployLocks.LoadOrStore(name, &sync.Mutex{})
+    mu := v.(*sync.Mutex)
+    mu.Lock()
+    return mu.Unlock
+}
+```
 
-### 13. New finding — daemon restore path is under-reviewed and currently unsafe by the same lifecycle standards
+**Proposed fix analysis:** The fix note introduces a goroutine-leak + mutex-lock bug. Replace with simple blocking mutex. The SQLite `BEGIN EXCLUSIVE` comment in Track B also needs qualification — see SQLite section below.
 
-**Severity:** Medium
+---
 
-`cmd/anito/main.go` restores services by re-registering the proxy and calling `mgr.Start()` for services marked `running`. It then swaps the proxy without a health-check gate.
+### MED-3 — Confirmed: F5 non-atomic registry writes are a real risk
 
-This path inherits the same early-state-write problem as deploy/restart and adds another issue: restore currently trusts process start enough to swap immediately.
+**Severity: Medium**
+**Audit status: Confirmed**
 
-If restore fails midway, state and serving behavior can diverge.
+`registry.go` `save()` uses `os.WriteFile()` directly. On APFS the CoW semantics make this low-probability, but a partial write leaves the registry unparseable and all services unrestorable on next startup.
 
-**Assessment of current sprint docs:** under-scoped.
+The temp-file + rename approach is correct and low-risk.
 
-### 14. New finding — MCP deploy surface is not parity-complete with the service layer
+**Proposed fix analysis:** Sound. The `.bak` extension for fallback is a nice improvement but optional for Track A. SQLite fixes this permanently in Track B.
 
-**Severity:** Medium
+---
 
-The MCP deploy input includes `Version`, but `anito_deploy` does not pass it through into `service.DeployRequest`.
+### MED-4 — Confirmed: M2 restart returns no useful information; same issue in HTTP API
 
-In the other direction, the service layer and HTTP API support controls such as `HealthCheckTimeout` and `RestartPolicy`, but the MCP input does not expose them.
+**Severity: Medium**
+**Audit status: Confirmed, scope too narrow**
 
-This means external callers do not actually have the contract surface the type definitions imply.
+`anito_restart` returns `opResult{Status: "restarted"}`. The fix note (return `toView(svc)` after calling `s.svc.Status()`) is correct.
 
-**Assessment of current sprint docs:** missed.
+The HTTP API `handleRestart` has the exact same problem — it returns `{"status": "restarted", "name": name}` with no service view. Neither the fix note nor the plan mentions this.
 
-### 15. New finding — log file descriptor ownership is unclear and likely leaks across process restarts
+**Proposed fix analysis:** Sound for MCP. Apply the same fix to `handleRestart` in `server.go` for consistency.
 
-**Severity:** Medium
+---
 
-`internal/process/process.go` opens the per-service log file in `buildCmd()` and assigns it to `cmd.Stdout` and `cmd.Stderr`. Ownership and close timing are not explicit in the current code.
+### MED-5 — Confirmed: M3 timestamps are hidden from MCP; framing is slightly wrong
 
-At minimum, this needs explicit verification and likely cleanup. In a long-running daemon that restarts services repeatedly, this is a meaningful resource-management concern.
+**Severity: Medium**
+**Audit status: Confirmed with a caveat**
 
-**Assessment of current sprint docs:** hinted at, but too weakly.
+`toView()` drops `DeployedAt` and `UpdatedAt`. Adding them to `serviceView` is a valid one-commit improvement.
 
-### 16. Confirmed — secondary MCP UX issues M4, M5, M6, M7, M8, and M9 are directionally accurate
+However, `M3` and `F4` describe different timestamp semantics. The current `DeployedAt` is set at first `Register()` and is never updated on re-deploy (line 107–110 in `registry.go` preserves it). `UpdatedAt` is updated on every registry write including crashes.
 
-**Severity:** Low to Medium
+Neither of these is "when did the most recent successful deploy happen?" The sprint should define a distinct `LastDeployedAt` field that is written only after successful health-check + proxy swap — and this is precisely what the `M3` step-2 note describes, but it should not be deferred. It is the field callers actually need.
 
-The broader MCP analysis is mostly correct:
+**Proposed fix analysis:** Step 1 (expose existing fields) is low-risk and should ship. Step 2 (add `LastDeployedAt`) is the meaningful fix and does not require SQLite — it is a registry field and a single write in `Deploy()` and `Restart()`.
 
-- `anito_setup` is mixed into the same operational surface and needs clearer one-time-only guidance
-- `anito_reserve` does not tell the caller whether the reservation was new or pre-existing
-- `~daemon` is a magic value not surfaced in the MCP tool description
-- there is no live probe tool to complement registry-based status
-- the deploy-verify loop lacks a natural completion signal until binary-change detection exists
-- `stop` vs `remove` descriptions do not clearly communicate port-retention implications
+---
 
-These are real but secondary to the state-model and rollback issues.
+### MED-6 — New finding: log file descriptor is not explicitly closed after process exit
 
-## Contradictions or Gaps in the Sprint Docs
+**Severity: Medium**
+**Audit status: Missed**
 
-### 1. The prompt anchors too hard on current audit framing
+`buildCmd()` in `process.go` lines 218–223:
 
-The original review prompt pushes the reviewer toward confirming existing findings rather than disproving them or replacing them with stronger findings.
+```go
+logFile, err := os.OpenFile(outPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+// ...
+cmd.Stdout = logFile
+cmd.Stderr = logFile
+```
 
-### 2. The sprint docs are inconsistent on timestamp meaning
+The `logFile` handle is passed to `cmd.Stdout` and `cmd.Stderr`. `os/exec` does not close file descriptors assigned to `Stdout`/`Stderr` when the process exits — it only waits for the process to release them. The Go `*os.File` value is unreachable after `buildCmd` returns (only `cmd` holds a reference). When `cmd.Wait()` returns, `cmd.Stdout`/`cmd.Stderr` are still set, but nothing calls `logFile.Close()`.
 
-`M3` and `F4` describe different semantics for `deployed_at`. The plan should define one canonical meaning before implementation starts.
+On a daemon that redeploys 13 services repeatedly (watch mode, crash recovery, manual redeploys), this leaks one file descriptor per start. On macOS the default `ulimit -n` is 256; after ~200 service restarts the daemon will fail to open new log files.
 
-### 3. The sprint overstates fix-note coverage
+In practice, Go's finalizer on `*os.File` will close the handle when GC collects `cmd`, but this is not deterministic and should not be relied upon for correctness.
 
-`fixes/` is not a one-file-per-finding source of truth. Some important issues are undocumented there, and some proposed solutions only cover symptoms.
+**Proposed fix analysis:** After `cmd.Wait()` returns in the crash-monitor goroutine, explicitly close the log file:
 
-### 4. The current materials under-scope API parity
+```go
+_ = cmd.Wait()
+if f, ok := cmd.Stdout.(*os.File); ok {
+    _ = f.Close()
+}
+```
 
-The duration bug and restart-response problem are described as MCP concerns, but the HTTP management API has parallel issues.
+This also requires extracting the `*os.File` reference from `runningProc` at `buildCmd` time so it can be closed.
+
+---
+
+### MED-7 — New finding: `StopPID` races with the `cmd.Wait()` goroutine from `Start()`
+
+**Severity: Medium**
+**Audit status: Missed**
+
+`StopPID` (process.go lines 136–152) sends SIGTERM to an old PID and then starts a goroutine that calls `proc.Wait()`. But the goroutine started inside `Start()` is already calling `cmd.Wait()` on the same underlying process.
+
+On Unix, only one `wait()` syscall collects the exit status. When `cmd.Wait()` collects it first, `proc.Wait()` in `StopPID` blocks or returns `ECHILD`. If `cmd.Wait()` wins, the `done` channel in `StopPID` is never closed. The select in `StopPID` blocks for `drainTimeout` (5 seconds), then sends SIGKILL to a process that is already dead, then returns. The goroutine calling `proc.Wait()` is left blocked indefinitely.
+
+This means every hot-swap drain operation leaks a goroutine. On a service with watch mode active and frequent file saves, this accumulates.
+
+The correct approach for draining an old process is to keep the `*exec.Cmd` reference and call `cmd.Process.Signal(SIGTERM)` then `cmd.Wait()` directly — which is what `drainProc` (process.go lines 239–256) already does correctly. `StopPID` exists because the old process is deregistered from `m.procs` before the drain, so the `*exec.Cmd` reference is lost. The fix is to preserve the reference in `Deregister` instead of discarding it, so `StopPID` can be replaced with a proper drain call.
+
+---
+
+### LOW-1 — Confirmed: M6 `~daemon` magic string is not in the tool description
+
+**Severity: Low**
+**Audit status: Confirmed**
+
+The `anito_logs` description does not mention `~daemon`. An LLM without `docs/mcp.md` in context cannot discover this. Adding it to the description is a one-line change.
+
+**Proposed fix analysis:** Correct.
+
+---
+
+### LOW-2 — Confirmed: M4, M5, M9 tool description and semantic issues
+
+**Severity: Low**
+**Audit status: Confirmed**
+
+- `anito_setup` should say "one-time only" to prevent spurious calls on re-deploy
+- `anito_reserve` does not distinguish new reservation from pre-existing service lookup
+- `anito_stop` and `anito_remove` descriptions do not communicate port-retention implications
+
+All three are correct as described. Low risk to fix.
+
+---
+
+### LOW-3 — New finding: `freePort()` TOCTOU gap for internal ports
+
+**Severity: Low**
+**Audit status: Missed**
+
+`freePort()` in process.go binds a listener to get an ephemeral port, then closes the listener and returns the port number. The port number is then passed to `buildCmd()` and the process is started with `PORT=<number>`. Between `l.Close()` and the managed process binding that port, another process can claim it.
+
+This is a well-known TOCTOU pattern. In practice it is low probability in a local development environment, but it will produce a process that fails to bind and likely dies immediately, causing a spurious health-check failure.
+
+A more robust approach is to not close the listener, inherit it into the child process via a file descriptor, and have the child bind to the inherited fd. That requires service-side changes though — the service contract says "read PORT from env." Given the current contract, the simplest mitigation is to add explicit retry logic in `waitHealthy`: if a service fails health check within the first 500ms, check whether the port is in use by something else and log a diagnostic.
+
+**Proposed fix analysis:** Not addressed. Low probability, low severity, but the diagnostic improvement is worthwhile.
+
+---
+
+### LOW-4 — Confirmed: M7 no live probe tool; C2 `anito_ping` is a good addition
+
+**Severity: Low**
+**Audit status: Confirmed**
+
+After a deploy, the registry read is the only verification tool. A live HTTP probe is genuinely useful and the proposed design is correct. The note about keeping `anito_status` (registry read) and `anito_ping` (live probe) separate is the right call.
+
+This is Track C work. Do not implement before the state model is clean.
+
+---
+
+## Contradictions and Gaps in the Sprint Documents
+
+### 1. F2 fix is framed as the complete status-divergence solution; it is not
+
+The F2 fix note says: "write `status=running` after successful swap in all paths." That is necessary but does not prevent the premature `running` write that happens before the health check runs. The fix and the bug are at different points in the lifecycle. Both need to land together.
+
+### 2. M3 and F4 describe different `deployed_at` semantics without reconciling them
+
+`M3` correctly notes that `UpdatedAt` is not a clean deploy timestamp. `F4` proposes setting `deployed_at` on every successful deploy/restart. The plan says "A1 — expose timestamps already in the registry" as if the existing fields are sufficient, but `DeployedAt` means "first registration" and `UpdatedAt` means "last any registry write." Neither means "last successful process swap." The plan should introduce `LastDeployedAt` explicitly before either timestamp is surfaced to callers.
+
+### 3. The Track B SQLite locking story is internally inconsistent
+
+`fixes/F6-deploy-lock.md` says "Track B: Solved by BEGIN EXCLUSIVE TRANSACTION." `fixes/sqlite-foundation.md` also says `BEGIN EXCLUSIVE TRANSACTION`. But the premise is wrong: `BEGIN EXCLUSIVE` acquires an exclusive lock on the entire database, not just on the service being deployed. Two concurrent deploys for different services (e.g., deploying `sogs-api` while `gomanan-mcp` is being restarted by watch mode) would be fully serialized. This is unnecessary and wastes time. A per-service row lock or application-level mutex per service name is the correct model.
+
+### 4. The audit claims 13/13 services use wrapper scripts but does not cite evidence in the fix files
+
+F1 states this as a critical finding. The fix notes accept it as given. There is no documented method in the sprint materials to detect or test this. The `resolveBinarySHA()` function proposed in Track B handles it, but only correctly if the wrapper script follows the `exec /absolute/path` pattern. Wrapper scripts using `exec ./relative/path` or `exec $HOME/...` are mentioned as edge cases but the proposed `parseExecTarget()` function is described as "find a line matching `exec\s+(/\S+)`" — absolute paths only. Relative-path wrappers return the fallback hash, silently. This should be documented explicitly.
+
+### 5. The sprint does not discuss the UI's dependency on the current API contract
+
+`internal/server/ui/src/lib/api.ts` defines a `Service` interface that includes `deployed_at` and `updated_at`. These are already expected by the UI. The proposed Track A change to expose these in `toView()` would fix the MCP surface, but the HTTP API (`/services`, `/status/:name`) already returns the raw `registry.Service` struct — which already includes these fields. The UI works today because the HTTP API returns the full registry struct, not a filtered view. This is an asymmetry: MCP callers get less than the UI does. The sprint should acknowledge this.
+
+---
+
+## SQLite Plan Review
+
+### Schema: mostly complete, a few gaps
+
+The schema in `fixes/sqlite-foundation.md` is reasonable for the stated purpose. Issues found:
+
+1. **No retention policy or cleanup for `deploy_events` and `crash_events`.** The plan says these are append-only but does not specify when rows are removed. A service with watch mode and aggressive file changes can generate hundreds of deploy events per day. Over months this table grows without bound. The schema needs a retention strategy (e.g., keep last N rows per service, or row TTL).
+
+2. **`crash_events.recovered` and `recovered_at` cannot be reliably populated.** The plan marks a crash row as `recovered=1` after a subsequent successful restart. But the crash and restart are separate code paths. There is no transactional guarantee that the crash row will be found and updated when the restart succeeds. Under concurrent deploys or daemon restarts, these fields can be permanently wrong. Consider computing recovery state on read (join deploy_events after crash time) rather than trying to maintain it as mutable state.
+
+3. **`services.internal_port` is runtime state, not configuration.** Storing ephemeral runtime ports in a persistent table conflates configuration state with runtime state. A crash + restore cycle updates this column, but the value is meaningless across restarts (the port is reassigned). Consider separating the runtime-state fields (`internal_port`, `pid`, `status`) from the configuration fields, either in a separate table or by treating them as the current session's view.
+
+4. **Missing `build_command` column.** The `config.yaml` `build` field drives the CLI deploy workflow. If the goal is registry-as-source-of-truth, build commands should be stored and re-runnable without the original config file. Currently missing from the schema.
+
+5. **`services.version` is described as "user-supplied semver or empty."** With the F1 fix, `binary_sha` becomes the actual version signal. The `version` column retains the user-supplied label (e.g., `v1.2.3`). This is fine, but it should be clearly documented in the schema as "user label, not computed" to avoid confusion with `binary_sha`.
+
+### Locking model: needs redesign
+
+`BEGIN EXCLUSIVE TRANSACTION` acquires a write lock on the entire SQLite database. For Anito, which may be running watch-mode restart, MCP deploy, and crash recovery for different services concurrently, this means all database operations for all services serialize behind the most recently started deploy.
+
+SQLite does not support row-level locking. The options are:
+- **`BEGIN IMMEDIATE`** on writes: allows multiple readers, blocks other writers, but does not prevent reads during a write. This is the standard SQLite default behavior.
+- **Application-level per-service mutexes** for the deploy sequence (as the F6 Track A fix proposes), with SQLite using its default journal mode for atomic writes.
+- **`BEGIN EXCLUSIVE`** only for migration and startup, not for normal deploys.
+
+The sprint plan should choose one of these explicitly. The current description (`BEGIN EXCLUSIVE` for deploy) is wrong for a concurrent daemon.
+
+### Runtime settings: unspecified
+
+The plan does not specify any of the following, all of which are required to make SQLite behave correctly in a daemon:
+
+- `PRAGMA journal_mode = WAL` — required if any reads should not block writes. Without WAL, every write acquires a shared lock that blocks readers, and every read prevents writes. Given the polling UI and MCP tools both read frequently while deploys happen, WAL is not optional.
+- `PRAGMA busy_timeout = 5000` (or similar) — without this, any lock contention returns `SQLITE_BUSY` immediately. Since we are moving away from explicit `BEGIN EXCLUSIVE`, contention will occur and needs graceful handling.
+- `PRAGMA foreign_keys = ON` — the schema uses `REFERENCES services(name) ON DELETE CASCADE` for `watch_paths`, `watch_excludes`, and `service_args`. Without this pragma, SQLite ignores foreign key constraints entirely. The cascade deletes will silently fail.
+- `PRAGMA synchronous = NORMAL` — the default `FULL` mode is safer but slower. `NORMAL` is appropriate for a local daemon where a power loss does not need to be protected against at the expense of every write.
+
+### Migration crash safety
+
+The migration plan (step 2–4 in `sqlite-foundation.md`) is:
+1. Parse `registry.json`
+2. `INSERT OR IGNORE` each service
+3. Rename to `registry.json.migrated`
+
+If the daemon crashes between step 2 and step 3, both `registry.json` and a partially-populated `anito.db` exist. On next startup, the migration runs again (`registry.json` still exists), and `INSERT OR IGNORE` makes it idempotent. This is correct.
+
+However, if the daemon crashes between step 3 (rename successful) and the start of normal operations, the database may have incomplete data. The schema uses `CREATE TABLE IF NOT EXISTS`, which is idempotent. But there is no checkpointing to verify all services were successfully migrated. Consider adding a `migrated_at DATETIME` column to `services` during migration, or a `schema_meta` table with a `migration_complete` flag, so a partial migration can be detected and re-run.
+
+### `modernc.org/sqlite` dependency
+
+This is an appropriate choice for the stated constraints (no CGO, single binary). The binary size increase of ~10–15MB is acceptable for a local daemon. The library is mature, actively maintained, and compatible with standard SQLite behavior.
+
+One operational note: `modernc.org/sqlite` uses a global internal mutex for some operations on older versions. Verify the specific version being added does not serialize all database operations at the library level regardless of SQLite's own locking.
+
+---
 
 ## Track Recommendations
 
-### Track A — No-Go
+### Track A — No-Go as currently written
 
-Track A should not ship exactly as described.
+Track A needs two additional fixes before it can be safely shipped:
 
-Reasons:
+1. **CRIT-2 (Stop never writes stopped):** A one-line fix: add `s.reg.UpdateStatus(name, registry.StatusStopped, 0)` after `mgr.Stop()` succeeds in `service.Stop()`. This also enables the `handleCrash` guard on `StatusStopped` to actually work. No architectural change needed.
 
-- it does not yet address premature `running` state writes
-- it does not yet define rollback behavior after failed health checks or failed swaps
-- it misses intentional-stop state correctness
-- it treats some API-surface issues as MCP-only when they are system-wide
+2. **CRIT-1 (premature running write) + MED-1 (rollback on health-check failure):** These require moving the authoritative `running` write out of `process.Start()` and into the service layer, after both `waitHealthy()` and `prx.Swap()` succeed. The process layer should write `StatusFailed` on `cmd.Start()` failure (already done) and leave status unchanged on success — the service layer owns the transition to `running`.
 
-Track A becomes viable if it adds explicit lifecycle-state and rollback fixes alongside the current timestamp, restart-response, and watch-log improvements.
+With those two additions, Track A becomes:
+- A1: Expose `DeployedAt`, `UpdatedAt`, and add `LastDeployedAt` to `serviceView` (amends M3/F4)
+- A2: `anito_restart` returns `serviceView` (M2); same fix to HTTP `handleRestart`
+- A3: Move authoritative `running` write to post-swap in all paths; add rollback on failure (fixes CRIT-1, F2, MED-1)
+- A4: Write `stopped` status after successful `mgr.Stop()` (fixes CRIT-2)
+- A5: Restore path in `main.go` needs `waitHealthy()` gate (HIGH-4)
+- A6: Post-debounce watch logging (F3/F7)
+- A7: Tool description fixes (M4, M5, M6, M9)
+- A8: Add `HealthCheckTimeout` and `RestartPolicy` to MCP deploy input (HIGH-6)
+- A9: Fix `drain_window` type in MCP and HTTP API (M1)
 
-### Track B — No-Go
+That is more work than the current Track A scope. Items A3–A5 are the ones that materially change the daemon's correctness.
 
-Track B is directionally correct but not ready as written.
+### Track B — Conditional Go, with pre-conditions
 
-Reasons:
+Track B (SQLite foundation) is directionally correct. Pre-conditions before starting implementation:
 
-- `BEGIN EXCLUSIVE` is not yet justified as the right concurrency model
-- runtime SQLite decisions are unspecified: WAL, busy timeout, foreign keys
-- migration crash behavior is not fully designed
-- event retention and cleanup are not addressed
+1. Decide the locking model: `BEGIN IMMEDIATE` + per-service app-level mutex, not `BEGIN EXCLUSIVE` for deploys
+2. Specify the three required PRAGMAs: `journal_mode`, `busy_timeout`, `foreign_keys`
+3. Design event retention: row cap or TTL for `deploy_events` and `crash_events`
+4. Define the migration completeness check (prevent partial-migration silent failures)
 
-Track B becomes viable once the team defines the operational SQLite model, not just the schema.
+The schema itself is a solid starting point. The operational model is what needs to be designed.
 
-### Track C — Conditional No-Go
+### Track C — No-Go until Track A lifecycle fixes are complete
 
-Track C should wait until Track A and Track B correct the underlying state model.
+`anito_verify`, `anito_history`, and `anito_ping` are all valuable. They should not be built until:
+- `status=running` means "proxy is serving this process and health check passed"
+- `status=stopped` means "service was intentionally stopped"
+- `LastDeployedAt` means "most recent successful swap"
 
-The planned tools are reasonable, but they depend on trustworthy persisted state and clear contract semantics. Building verify/history/ping tools on top of the current lifecycle model would encode ambiguity rather than remove it.
-
-Once lifecycle correctness and external-contract parity are fixed, Track C looks like a good follow-on set of capabilities.
+Right now none of those invariants hold. Building verify/history tools on top of the current lifecycle model would give those tools confident-sounding output backed by unreliable state.
