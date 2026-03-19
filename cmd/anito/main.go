@@ -69,6 +69,13 @@ func main() {
 		}
 		runSetup(path)
 
+	case "doctor":
+		path := "."
+		if len(os.Args) >= 3 {
+			path = os.Args[2]
+		}
+		runDoctor(cli, path)
+
 	case "deploy":
 		configPath := defaultConfigPath()
 		if len(os.Args) >= 3 {
@@ -692,6 +699,7 @@ Usage:
   anito install [--bin-dir <path>]          first-time daemon setup: install binary, write plist, start daemon
   anito daemon [flags]                      start the anito daemon
   anito setup [path]                        inspect repo, check service contract, write .anito/config.yaml
+  anito doctor [path]                       validate .anito/config.yaml and check registry alignment
   anito deploy [config]                     build + deploy (default: .anito/config.yaml)
   anito promote <stable-config> [dev-name]  build stable binary and deploy it
   anito services                            list all running services
