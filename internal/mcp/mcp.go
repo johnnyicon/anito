@@ -15,6 +15,7 @@ import (
 
 	sdkmcp "github.com/modelcontextprotocol/go-sdk/mcp"
 
+	"github.com/johnnyicon/anito/internal/doctor"
 	"github.com/johnnyicon/anito/internal/registry"
 	"github.com/johnnyicon/anito/internal/service"
 	"github.com/johnnyicon/anito/internal/setup"
@@ -192,6 +193,33 @@ type logsOutput struct {
 type opResult struct {
 	Status string `json:"status"`
 	Name   string `json:"name"`
+}
+
+type doctorInput struct {
+	Path string `json:"path" jsonschema:"absolute path to the repo root containing .anito/"`
+}
+
+type doctorIssueView struct {
+	Severity string `json:"severity"`
+	Field    string `json:"field"`
+	Message  string `json:"message"`
+	Action   string `json:"action,omitempty"`
+}
+
+type doctorConfigResult struct {
+	ConfigFile string            `json:"config_file"`
+	Name       string            `json:"name,omitempty"`
+	ParseError string            `json:"parse_error,omitempty"`
+	Issues     []doctorIssueView `json:"issues,omitempty"`
+	Errors     int               `json:"errors"`
+	Warnings   int               `json:"warnings"`
+}
+
+type doctorResult struct {
+	Configs  []doctorConfigResult `json:"configs"`
+	Errors   int                  `json:"errors"`
+	Warnings int                  `json:"warnings"`
+	Healthy  bool                 `json:"healthy"`
 }
 
 // --- tool registration ---
@@ -432,6 +460,46 @@ func (s *Server) registerTools(srv *sdkmcp.Server) {
 				RelPath: ".anito/config.yaml",
 				Content: result.SuggestedConfig,
 			})
+		}
+		return nil, out, nil
+	})
+
+	sdkmcp.AddTool(srv, &sdkmcp.Tool{
+		Name: "anito_doctor",
+		Description: "Validate a repo's .anito/config.yaml and check registry alignment. " +
+			"Reports errors (blocking issues), warnings (hygiene problems), and info (advisory). " +
+			"Checks: required fields, output file existence, watch path hygiene (asset files that " +
+			"cause spurious restarts), drain_window sanity, and registry alignment (port mismatch, " +
+			"failed status). Call this before deploying a new repo or after a config change.",
+	}, func(ctx context.Context, req *sdkmcp.CallToolRequest, in doctorInput) (*sdkmcp.CallToolResult, doctorResult, error) {
+		log.Printf("[MCP] tool=anito_doctor path=%s", in.Path)
+		result, err := doctor.Check(in.Path, s.svc)
+		if err != nil {
+			log.Printf("[MCP] tool=anito_doctor path=%s error=%q", in.Path, err)
+			return nil, doctorResult{}, err
+		}
+		out := doctorResult{
+			Errors:   result.Errors,
+			Warnings: result.Warnings,
+			Healthy:  result.Healthy,
+		}
+		for _, cr := range result.Configs {
+			dcr := doctorConfigResult{
+				ConfigFile: cr.ConfigFile,
+				Name:       cr.Name,
+				ParseError: cr.ParseError,
+				Errors:     cr.Errors,
+				Warnings:   cr.Warnings,
+			}
+			for _, iss := range cr.Issues {
+				dcr.Issues = append(dcr.Issues, doctorIssueView{
+					Severity: iss.Severity,
+					Field:    iss.Field,
+					Message:  iss.Message,
+					Action:   iss.Action,
+				})
+			}
+			out.Configs = append(out.Configs, dcr)
 		}
 		return nil, out, nil
 	})
