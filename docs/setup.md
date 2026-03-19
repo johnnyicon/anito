@@ -61,8 +61,10 @@ make reload
 | Binary | `~/.local/bin/anito` |
 | Plist | `~/Library/LaunchAgents/com.anito.daemon.plist` |
 | Data + registry | `~/.anito/registry.json` |
+| Issue log | `~/.anito/issues.jsonl` |
 | Daemon log | `~/.anito/logs/anito.log` |
 | Service logs | `~/.anito/logs/<service-name>.log` |
+| Deployment receipt | `<your-repo>/.anito/deployed.json` (one per consuming repo) |
 
 The plist hardcodes the binary path. Do not move the binary without also updating the plist `ProgramArguments` and running `make reload`.
 
@@ -132,6 +134,49 @@ watch:
 **`watch:` paths** may be relative (resolved against the config file's directory) or absolute. Relative paths are portable across machines and safe to check into the repo. Example: `./src` in a config at `/Users/alice/myapp/.anito/config.yaml` watches `/Users/alice/myapp/.anito/src`.
 
 **Crash restart backoff:** when a service crashes, Anito waits before restarting: 1s → 2s → 4s → 8s → 30s. After 5 failed attempts it stops and logs `[CRASH_GIVE_UP]`. The counter resets on any successful start.
+
+---
+
+## Deployment receipt (`.anito/deployed.json`)
+
+After every successful `anito deploy`, Anito writes a receipt into the repo's `.anito/deployed.json`. This file is machine-written — do not edit it by hand.
+
+**What it contains:** every service this repo has registered with Anito, keyed by name, with stable port, address, binary path, config path, version, and deploy timestamp.
+
+**What it's for:**
+- Agent re-entry: a new agent session can read this file to know what's already deployed, on which ports, without querying `anito_services`
+- Worktree cleanup: before deleting a worktree, call `anito teardown` — it reads this file and removes all listed services
+- Disaster recovery: if Anito's registry is wiped, this file tells you what to redeploy
+
+**Schema:** `schemas/deployed.v1.json` — JSON Schema (draft 2020-12). All fields are defined; no additional fields are allowed. Add this to your editor's JSON schema association for validation.
+
+**Example:**
+```json
+{
+  "services": {
+    "sogs-api": {
+      "name": "sogs-api",
+      "stable_port": 8080,
+      "address": "http://localhost:8080",
+      "binary_path": "/Users/you/myapp/.anito/sogs-api-dev.sh",
+      "config_path": "/Users/you/myapp/.anito/sogs-api.yaml",
+      "version": "sha:916dc873",
+      "deployed_at": "2026-03-19T14:20:11-04:00"
+    }
+  }
+}
+```
+
+**Teardown:**
+```bash
+# From within the repo:
+anito teardown
+
+# From anywhere (pass the repo path):
+anito teardown /abs/path/to/repo
+```
+
+`anito_remove` also keeps the receipt accurate — it removes the service entry when a service is deregistered individually.
 
 ---
 
@@ -265,6 +310,10 @@ make start
 
 # Stop the daemon
 make stop
+
+# Deregister all services a repo has deployed (reads .anito/deployed.json)
+anito teardown                  # from within the repo
+anito teardown /abs/path/to/repo  # or by path
 ```
 
 ---

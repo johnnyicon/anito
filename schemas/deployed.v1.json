@@ -1,0 +1,60 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://anito.dev/schemas/deployed/v1.json",
+  "title": "AnitoDeployedReceipt",
+  "description": "Deployment receipt written by Anito into .anito/deployed.json in the consuming repo after every successful deploy. Records every service this repo has registered with Anito — the authoritative local source for teardown, cleanup, and agent re-entry. Machine-written; do not edit by hand.",
+  "type": "object",
+  "required": ["services"],
+  "additionalProperties": false,
+  "properties": {
+    "services": {
+      "type": "object",
+      "description": "Map of service name → deployment entry. Keyed by service name (matches the name field of each entry).",
+      "additionalProperties": {
+        "$ref": "#/$defs/Entry"
+      }
+    }
+  },
+  "$defs": {
+    "Entry": {
+      "type": "object",
+      "description": "One registered service entry.",
+      "required": ["name", "stable_port", "address", "binary_path", "config_path", "deployed_at"],
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "type": "string",
+          "description": "Unique service name as registered with Anito. Use this name with anito_remove or anito teardown."
+        },
+        "stable_port": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65535,
+          "description": "The stable port consumers connect to. Owned by the Anito proxy — does not change across deploys."
+        },
+        "address": {
+          "type": "string",
+          "format": "uri",
+          "description": "Full stable address: http://localhost:<stable_port>."
+        },
+        "binary_path": {
+          "type": "string",
+          "description": "Absolute path to the binary or shell script that was deployed."
+        },
+        "config_path": {
+          "type": "string",
+          "description": "Absolute path to the .anito/config.yaml that produced this deploy."
+        },
+        "version": {
+          "type": "string",
+          "description": "Optional version tag: semantic version (v1.2.3) or content hash (sha:abc123)."
+        },
+        "deployed_at": {
+          "type": "string",
+          "format": "date-time",
+          "description": "ISO 8601 timestamp of the most recent successful deploy."
+        }
+      }
+    }
+  }
+}

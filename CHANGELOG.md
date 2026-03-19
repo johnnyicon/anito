@@ -8,6 +8,26 @@ Format: `## [date] — description`, breaking changes marked **BREAKING**.
 
 ---
 
+## 2026-03-19 — Deployment receipt: deployed.json + anito_teardown
+
+Every successful `anito deploy` (CLI) or `anito_deploy` (MCP) now writes a receipt into the consuming repo's `.anito/deployed.json`. This is the repo's local record of what it has registered with Anito — the single source of truth for cleanup, teardown, and agent re-entry.
+
+**New file:** `.anito/deployed.json` — written by Anito, validated against `schemas/deployed.v1.json`. Do not edit by hand.
+
+**New MCP tool:** `anito_teardown(repo_path)` — reads the receipt, removes all listed services, deletes the receipt.
+
+**New CLI command:** `anito teardown [path]` — same as above from the terminal.
+
+**New HTTP endpoint:** `POST /teardown` — `{ "repo_path": "/abs/path/to/repo" }`.
+
+**`anito_remove` / `anito remove` now clears the receipt entry** for the removed service — the receipt stays accurate as services come and go.
+
+**Worktree workflow:** Before deleting a worktree, call `anito teardown` or `anito_teardown` from within it. Anito reads `deployed.json`, removes every registered service, and cleans the receipt. No orphaned registry entries.
+
+**Schema:** `schemas/deployed.v1.json` — JSON Schema (draft 2020-12) defining all allowed fields. Only known fields are permitted (`additionalProperties: false`).
+
+---
+
 ## 2026-03-19 — config_path tracking: port-to-source mapping, worktree detection
 
 New `config_path` field on every service registry entry. Records the absolute path to the `.anito/config.yaml` that produced the deploy.

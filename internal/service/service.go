@@ -24,6 +24,7 @@ import (
 	"github.com/johnnyicon/anito/internal/notify"
 	"github.com/johnnyicon/anito/internal/process"
 	"github.com/johnnyicon/anito/internal/proxy"
+	"github.com/johnnyicon/anito/internal/receipt"
 	"github.com/johnnyicon/anito/internal/registry"
 	"github.com/johnnyicon/anito/internal/watcher"
 	"gopkg.in/yaml.v3"
@@ -194,6 +195,7 @@ func (s *Service) Deploy(req DeployRequest) (*registry.Service, error) {
 		_ = s.reg.UpdateLastDeployed(req.Name, time.Now())
 		svc, _ = s.reg.Get(req.Name)
 		log.Printf("[DEPLOY] name=%s port=%d type=static path=%s", svc.Name, svc.StablePort, req.Path)
+		writeReceipt(svc)
 		return svc, nil
 	}
 
@@ -259,6 +261,7 @@ func (s *Service) Deploy(req DeployRequest) (*registry.Service, error) {
 	log.Printf("[DEPLOY] name=%s port=%d internal=%d pid=%d", svc.Name, svc.StablePort, internalPort, svc.PID)
 	notify.Send("Anito", fmt.Sprintf("✓ %s deployed on :%d", svc.Name, svc.StablePort))
 	s.startWatcher(svc)
+	writeReceipt(svc)
 	return svc, nil
 }
 
@@ -375,6 +378,9 @@ func (s *Service) Restart(name string) error {
 }
 
 func (s *Service) Remove(name string) error {
+	// Read config path before removing from registry.
+	svc, _ := s.reg.Get(name)
+
 	s.wtch.Stop(name)
 	_ = s.mgr.Stop(name)
 	s.prx.Remove(name)
@@ -383,8 +389,61 @@ func (s *Service) Remove(name string) error {
 		log.Printf("[REMOVE] name=%s error=%q", name, err)
 	} else {
 		log.Printf("[REMOVE] name=%s", name)
+		if svc != nil {
+			_ = receipt.Clear(name, svc.ConfigPath)
+		}
 	}
 	return err
+}
+
+// Teardown reads deployed.json from repoPath/.anito/ and removes every listed
+// service from Anito, then deletes the receipt file. Safe to call even if the
+// receipt file does not exist (no-op). Errors for individual removals are
+// collected and returned together.
+func (s *Service) Teardown(repoPath string) ([]string, error) {
+	f, err := receipt.Load(repoPath)
+	if err != nil {
+		return nil, fmt.Errorf("teardown: read receipt: %w", err)
+	}
+	if len(f.Services) == 0 {
+		return nil, nil
+	}
+
+	var removed []string
+	var errs []string
+	for name := range f.Services {
+		if rmErr := s.Remove(name); rmErr != nil {
+			errs = append(errs, fmt.Sprintf("%s: %v", name, rmErr))
+		} else {
+			removed = append(removed, name)
+		}
+	}
+
+	// Remove receipt file even on partial success.
+	_ = receipt.DeleteAll(repoPath)
+
+	if len(errs) > 0 {
+		return removed, fmt.Errorf("teardown partial failure: %s", strings.Join(errs, "; "))
+	}
+	return removed, nil
+}
+
+// writeReceipt writes a deployment receipt into the consuming repo's
+// .anito/deployed.json alongside config.yaml. Silently skips if ConfigPath
+// is not set (e.g. services deployed via MCP without a config file).
+func writeReceipt(svc *registry.Service) {
+	if svc == nil || svc.ConfigPath == "" {
+		return
+	}
+	_ = receipt.Write(receipt.Entry{
+		Name:       svc.Name,
+		StablePort: svc.StablePort,
+		Address:    fmt.Sprintf("http://localhost:%d", svc.StablePort),
+		BinaryPath: svc.BinaryPath,
+		ConfigPath: svc.ConfigPath,
+		Version:    svc.Version,
+		DeployedAt: svc.LastDeployedAt,
+	})
 }
 
 // startWatcher launches a file watcher for svc if it has WatchPaths configured.
@@ -512,6 +571,83 @@ func (s *Service) buildLogFilePath(name string) (string, error) {
 		return "", fmt.Errorf("service %q not found", name)
 	}
 	return filepath.Join(s.logDir, name+"-build.log"), nil
+}
+
+// BuildLogs returns the last n lines from the service's build log file.
+func (s *Service) BuildLogs(name string, n int) ([]string, error) {
+	path, err := s.buildLogFilePath(name)
+	if err != nil {
+		return nil, err
+	}
+	data, err := os.ReadFile(path)
+	if os.IsNotExist(err) {
+		return []string{}, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	lines := strings.Split(strings.TrimRight(string(data), "\n"), "\n")
+	if n > 0 && len(lines) > n {
+		lines = lines[len(lines)-n:]
+	}
+	return lines, nil
+}
+
+// BuildLogStream tails the service's build log file and sends new lines to the returned channel.
+// The channel is closed when ctx is done.
+func (s *Service) BuildLogStream(ctx context.Context, name string) (<-chan string, error) {
+	path, err := s.buildLogFilePath(name)
+	if err != nil {
+		return nil, err
+	}
+	ch := make(chan string, 64)
+	go func() {
+		defer close(ch)
+
+		var (
+			f       *os.File
+			scanner *bufio.Scanner
+		)
+		tryOpen := func() {
+			f2, err := os.Open(path)
+			if err != nil {
+				return
+			}
+			_, _ = f2.Seek(0, io.SeekEnd)
+			f = f2
+			scanner = bufio.NewScanner(f)
+		}
+		tryOpen()
+		defer func() {
+			if f != nil {
+				_ = f.Close()
+			}
+		}()
+
+		ticker := time.NewTicker(200 * time.Millisecond)
+		defer ticker.Stop()
+
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				if scanner == nil {
+					tryOpen()
+					continue
+				}
+				for scanner.Scan() {
+					line := scanner.Text()
+					select {
+					case ch <- line:
+					case <-ctx.Done():
+						return
+					}
+				}
+			}
+		}
+	}()
+	return ch, nil
 }
 
 // logFilePath resolves the log file path for name.

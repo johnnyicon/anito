@@ -14,6 +14,7 @@ import (
 	"github.com/labstack/echo/v4"
 	echomiddleware "github.com/labstack/echo/v4/middleware"
 
+	"github.com/johnnyicon/anito/internal/doctor"
 	"github.com/johnnyicon/anito/internal/issues"
 	"github.com/johnnyicon/anito/internal/registry"
 	"github.com/johnnyicon/anito/internal/service"
@@ -68,6 +69,8 @@ func (s *Server) Start() error {
 	e.GET("/logs/:name", s.handleLogs)
 	e.POST("/issues", s.handlePostIssue)
 	e.GET("/issues", s.handleGetIssues)
+	e.GET("/doctor", s.handleDoctor)
+	e.POST("/teardown", s.handleTeardown)
 
 	// Serve embedded SPA — must be registered last (catch-all)
 	sub, err := fs.Sub(distFiles, "ui/dist")
@@ -222,7 +225,14 @@ func (s *Server) handleLogs(c echo.Context) error {
 		}
 	}
 
-	if c.QueryParam("follow") == "true" {
+	streamType := c.QueryParam("stream") // "build" or ""
+	follow := c.QueryParam("follow") == "true"
+
+	if streamType == "build" {
+		return s.streamBuildLogs(c, name)
+	}
+
+	if follow {
 		return s.streamLogs(c, name, lines)
 	}
 
@@ -231,6 +241,37 @@ func (s *Server) handleLogs(c echo.Context) error {
 		return echo.NewHTTPError(http.StatusNotFound, err.Error())
 	}
 	return c.JSON(http.StatusOK, logLines)
+}
+
+func (s *Server) handleDoctor(c echo.Context) error {
+	path := c.QueryParam("path")
+	if path == "" {
+		return echo.NewHTTPError(http.StatusBadRequest, "path query parameter is required")
+	}
+	result, err := doctor.Check(path, s.svc)
+	if err != nil {
+		return echo.NewHTTPError(http.StatusBadRequest, err.Error())
+	}
+	return c.JSON(http.StatusOK, result)
+}
+
+func (s *Server) handleTeardown(c echo.Context) error {
+	var req struct {
+		RepoPath string `json:"repo_path"`
+	}
+	if err := json.NewDecoder(c.Request().Body).Decode(&req); err != nil {
+		return echo.NewHTTPError(http.StatusBadRequest, "invalid request body")
+	}
+	if req.RepoPath == "" {
+		return echo.NewHTTPError(http.StatusBadRequest, "repo_path is required")
+	}
+	removed, err := s.svc.Teardown(req.RepoPath)
+	if err != nil {
+		log.Printf("[ERROR] teardown repo=%s error=%q", req.RepoPath, err)
+		return echo.NewHTTPError(http.StatusInternalServerError, err.Error())
+	}
+	log.Printf("[TEARDOWN] repo=%s removed=%v", req.RepoPath, removed)
+	return c.JSON(http.StatusOK, map[string]any{"removed": removed, "count": len(removed)})
 }
 
 func (s *Server) handlePostIssue(c echo.Context) error {
@@ -267,6 +308,42 @@ func (s *Server) handleGetIssues(c echo.Context) error {
 		list = []issues.Issue{}
 	}
 	return c.JSON(http.StatusOK, map[string]any{"issues": list})
+}
+
+func (s *Server) streamBuildLogs(c echo.Context, name string) error {
+	w := c.Response()
+	flusher, ok := w.Writer.(http.Flusher)
+	if !ok {
+		return echo.NewHTTPError(http.StatusInternalServerError, "streaming not supported")
+	}
+
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	w.WriteHeader(http.StatusOK)
+
+	backlog, err := s.svc.BuildLogs(name, 500)
+	if err != nil {
+		fmt.Fprintf(w, "event: error\ndata: %s\n\n", err.Error())
+		flusher.Flush()
+		return nil
+	}
+	for _, line := range backlog {
+		fmt.Fprintf(w, "data: %s\n\n", line)
+	}
+	flusher.Flush()
+
+	ch, err := s.svc.BuildLogStream(c.Request().Context(), name)
+	if err != nil {
+		fmt.Fprintf(w, "event: error\ndata: %s\n\n", err.Error())
+		flusher.Flush()
+		return nil
+	}
+	for line := range ch {
+		fmt.Fprintf(w, "data: %s\n\n", line)
+		flusher.Flush()
+	}
+	return nil
 }
 
 func (s *Server) streamLogs(c echo.Context, name string, backlogLines int) error {

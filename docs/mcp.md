@@ -170,6 +170,17 @@ Returns:
 
 ---
 
+### `anito_teardown`
+Remove all services a consuming repo has registered with Anito, then clear its `deployed.json` receipt. Call this before deleting a worktree or when decommissioning a repo's services.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `repo_path` | string | yes | Absolute path to the repo root (must contain `.anito/deployed.json`) |
+
+Returns `{ removed: ["name1", "name2"], count: 2 }`. Safe to call when the receipt is missing — no-op.
+
+---
+
 ### `anito_issues`
 Retrieve recent issues logged by Anito — tool errors, deploy failures, and manual reports from consuming repos.
 

@@ -601,6 +601,30 @@ func (s *Server) registerTools(srv *sdkmcp.Server) {
 	})
 
 	sdkmcp.AddTool(srv, &sdkmcp.Tool{
+		Name: "anito_teardown",
+		Description: "Remove all services a repo has registered with Anito, then clear its deployed.json receipt. " +
+			"Call this before deleting a worktree or when decommissioning a repo's services entirely. " +
+			"Reads .anito/deployed.json in the repo to discover service names — safe to call even if the receipt is missing (no-op). " +
+			"Returns the list of services that were removed.",
+	}, func(ctx context.Context, req *sdkmcp.CallToolRequest, in struct {
+		RepoPath string `json:"repo_path" jsonschema:"required — absolute path to the repo root whose .anito/deployed.json should be used for cleanup"`
+	}) (*sdkmcp.CallToolResult, map[string]any, error) {
+		log.Printf("[MCP] tool=anito_teardown repo=%q", in.RepoPath)
+		if in.RepoPath == "" {
+			return nil, nil, fmt.Errorf("repo_path is required")
+		}
+		removed, err := s.svc.Teardown(in.RepoPath)
+		if err != nil {
+			s.logErr("anito_teardown", in, err)
+			return nil, nil, err
+		}
+		if removed == nil {
+			removed = []string{}
+		}
+		return nil, map[string]any{"removed": removed, "count": len(removed)}, nil
+	})
+
+	sdkmcp.AddTool(srv, &sdkmcp.Tool{
 		Name: "anito_report",
 		Description: "Report an issue to Anito from a consuming repo. Use this when you observe a problem related to an Anito tool or service — " +
 			"failed deploys, unexpected restarts, port conflicts, or anything the consuming repo's agent has context about that Anito itself cannot see. " +

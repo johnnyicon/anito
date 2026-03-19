@@ -169,6 +169,16 @@ func (c *Client) Report(iss issues.Issue) error {
 	return c.postJSON("/issues", iss, nil)
 }
 
+func (c *Client) Teardown(repoPath string) ([]string, error) {
+	var out struct {
+		Removed []string `json:"removed"`
+	}
+	if err := c.postJSON("/teardown", map[string]string{"repo_path": repoPath}, &out); err != nil {
+		return nil, err
+	}
+	return out.Removed, nil
+}
+
 func parseError(resp *http.Response) error {
 	var buf bytes.Buffer
 	_, _ = buf.ReadFrom(resp.Body)

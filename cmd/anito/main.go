@@ -203,6 +203,28 @@ func main() {
 		}
 		fmt.Println("reported")
 
+	case "teardown":
+		repoPath := "."
+		if len(os.Args) >= 3 {
+			repoPath = os.Args[2]
+		}
+		abs, err := filepath.Abs(repoPath)
+		if err != nil {
+			fatal(err)
+		}
+		removed, err := cli.Teardown(abs)
+		if err != nil {
+			fatal(err)
+		}
+		if len(removed) == 0 {
+			fmt.Println("no services found in .anito/deployed.json")
+		} else {
+			for _, name := range removed {
+				fmt.Printf("removed %s\n", name)
+			}
+			fmt.Printf("teardown complete (%d services removed)\n", len(removed))
+		}
+
 	case "mcp":
 		runMCPInfo(defaultMCPPort)
 
