@@ -8,6 +8,23 @@ Format: `## [date] — description`, breaking changes marked **BREAKING**.
 
 ---
 
+## 2026-03-19 — anito_doctor MCP tool + anito doctor CLI
+
+New tool on both surfaces: validate a repo's `.anito/config.yaml` and check
+registry alignment against the running daemon.
+
+**MCP:** `anito_doctor(path="/abs/path/to/repo")`
+**CLI:** `anito doctor [path]`
+
+Returns per-config results with severity-tagged issues (error/warning/info),
+total error and warning counts, and a `healthy` boolean. Checks: required
+fields, output file existence, watch path asset contamination, drain_window
+sanity, port mismatch vs registry, failed service status.
+
+No action required in consuming repos — additive new tool.
+
+---
+
 ## 2026-03-19 — Track A reliability sprint
 
 ### Breaking changes

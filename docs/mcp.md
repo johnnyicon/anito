@@ -122,6 +122,24 @@ Stop a service and remove it from the Anito registry. The stable port is release
 
 ---
 
+### `anito_doctor`
+Validate a repo's `.anito/config.yaml` and check registry alignment. Call this before deploying a new repo or after a config change.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `path` | string | yes | Absolute path to the repo root (must contain `.anito/`) |
+
+Returns:
+
+| Field | Description |
+|-------|-------------|
+| `healthy` | `true` if no errors found |
+| `errors` | total error count across all configs |
+| `warnings` | total warning count |
+| `configs[]` | per-config results with `issues[]` (severity, field, message, action) |
+
+---
+
 ### `anito_setup`
 Set up a repo for Anito. Works for both single-service repos and composite apps — one tool, one call.
 
