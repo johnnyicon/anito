@@ -24,6 +24,7 @@ type runningProc struct {
 	cmd          *exec.Cmd
 	internalPort int
 	logFile      *os.File
+	done         chan struct{} // closed by the Start goroutine when the process exits
 }
 
 // Manager supervises running processes.
@@ -87,23 +88,29 @@ func (m *Manager) Start(svc *registry.Service) (internalPort int, err error) {
 		return 0, fmt.Errorf("failed to start %q: %w", svc.Name, err)
 	}
 
-	m.procs[svc.Name] = &runningProc{cmd: cmd, internalPort: port, logFile: logFile}
+	done := make(chan struct{})
+	rp := &runningProc{cmd: cmd, internalPort: port, logFile: logFile, done: done}
+	m.procs[svc.Name] = rp
 	_ = m.reg.UpdateInternalPort(svc.Name, port)
 
-	// Watch for unexpected exit.
+	// Watch for unexpected exit. This is the sole goroutine that calls cmd.Wait().
 	pid := cmd.Process.Pid
 	go func() {
+		defer close(done)
 		_ = cmd.Wait()
 		m.mu.Lock()
-		rp, exists := m.procs[svc.Name]
-		delete(m.procs, svc.Name)
+		// Only delete our own entry — a re-deploy may have replaced it with a
+		// new process under the same name.
+		if current, ok := m.procs[svc.Name]; ok && current.cmd == cmd {
+			delete(m.procs, svc.Name)
+		}
 		isDraining := m.draining[pid]
 		delete(m.draining, pid)
 		m.mu.Unlock()
 
-		// Close the log file descriptor.
-		if exists && rp.logFile != nil {
-			_ = rp.logFile.Close()
+		// Close this process's log file descriptor.
+		if logFile != nil {
+			_ = logFile.Close()
 		}
 
 		if isDraining {
@@ -137,7 +144,7 @@ func (m *Manager) Stop(name string) error {
 		return fmt.Errorf("service %q is not running", name)
 	}
 
-	return drainProc(rp.cmd)
+	return drainProc(rp.cmd, rp.done)
 }
 
 // StopPID sends SIGTERM to an arbitrary PID (used when draining the old process
@@ -176,21 +183,23 @@ func (m *Manager) IsRunning(name string) bool {
 }
 
 // Deregister removes name from the tracked process table without sending any
-// signal, and returns the old PID and cmd. Use this before starting a replacement
-// process so the name slot is free; drain the returned cmd after the new
-// process passes its health check.
-func (m *Manager) Deregister(name string) (int, *exec.Cmd) {
+// signal, and returns the old PID, cmd, and done channel. Use this before
+// starting a replacement process so the name slot is free; drain the returned
+// cmd (via DrainProc) after the new process passes its health check.
+// The done channel is closed by the Start goroutine when the process exits —
+// pass it to DrainProc so it can wait without racing on cmd.Wait().
+func (m *Manager) Deregister(name string) (int, *exec.Cmd, <-chan struct{}) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	rp, ok := m.procs[name]
 	if !ok {
-		return 0, nil
+		return 0, nil, nil
 	}
 	delete(m.procs, name)
 	if rp.cmd.Process != nil {
-		return rp.cmd.Process.Pid, rp.cmd
+		return rp.cmd.Process.Pid, rp.cmd, rp.done
 	}
-	return 0, rp.cmd
+	return 0, rp.cmd, rp.done
 }
 
 // PID returns the PID of a running process, or 0.
@@ -203,10 +212,11 @@ func (m *Manager) PID(name string) int {
 	return 0
 }
 
-// DrainProc sends SIGTERM and waits up to drainTimeout before SIGKILL.
+// DrainProc sends SIGTERM to cmd and waits for it to exit via done (closed by
+// the Start goroutine). Falls back to SIGKILL after drainTimeout.
 // Exported so the service layer can drain a cmd returned by Deregister.
-func DrainProc(cmd *exec.Cmd) error {
-	return drainProc(cmd)
+func DrainProc(cmd *exec.Cmd, done <-chan struct{}) error {
+	return drainProc(cmd, done)
 }
 
 // InternalPort returns the ephemeral port for a running service, or 0.
@@ -261,21 +271,27 @@ func freePort() (int, error) {
 	return port, nil
 }
 
-// drainProc sends SIGTERM and waits up to drainTimeout before SIGKILL.
-func drainProc(cmd *exec.Cmd) error {
+// drainProc sends SIGTERM to cmd and waits for the process to exit via done.
+// done is the channel closed by the Start goroutine — this avoids calling
+// cmd.Wait() a second time, which would race on exec.Cmd's internal goroutineErr
+// channel and hang indefinitely.
+func drainProc(cmd *exec.Cmd, done <-chan struct{}) error {
 	if cmd.Process == nil {
 		return nil
 	}
-	if err := cmd.Process.Signal(syscall.SIGTERM); err != nil {
-		return err
+	_ = cmd.Process.Signal(syscall.SIGTERM)
+	if done == nil {
+		// No done channel (process was not started via our Start()); fall back
+		// to a timed SIGKILL with no wait.
+		time.Sleep(drainTimeout)
+		_ = cmd.Process.Signal(syscall.SIGKILL)
+		return nil
 	}
-	done := make(chan error, 1)
-	go func() { done <- cmd.Wait() }()
 	select {
 	case <-done:
 	case <-time.After(drainTimeout):
 		_ = cmd.Process.Signal(syscall.SIGKILL)
-		<-done
+		<-done // Start goroutine will handle the actual wait
 	}
 	return nil
 }

@@ -189,7 +189,7 @@ func (s *Service) Deploy(req DeployRequest) (*registry.Service, error) {
 	// If the manager is already tracking this service (e.g. after a daemon
 	// restart + restore), deregister it without killing it so the name slot is
 	// free. The old PID will be drained after the new process is healthy.
-	oldPID, oldCmd := s.mgr.Deregister(svc.Name)
+	oldPID, oldCmd, oldDone := s.mgr.Deregister(svc.Name)
 	if oldPID == 0 {
 		oldPID = svc.PID // fall back to registry PID if not tracked in-memory
 	}
@@ -232,11 +232,11 @@ func (s *Service) Deploy(req DeployRequest) (*registry.Service, error) {
 		if pid > 0 {
 			s.mgr.MarkDraining(pid)
 		}
-		go func(cmd *exec.Cmd, p int, window time.Duration) {
+		go func(cmd *exec.Cmd, done <-chan struct{}, p int, window time.Duration) {
 			log.Printf("[DRAIN] name=%s pid=%d waiting %s for in-flight requests", req.Name, p, window)
 			time.Sleep(window)
-			process.DrainProc(cmd)
-		}(oldCmd, pid, drainWindow)
+			process.DrainProc(cmd, done)
+		}(oldCmd, oldDone, pid, drainWindow)
 	}
 
 	svc, _ = s.reg.Get(req.Name)
@@ -292,7 +292,7 @@ func (s *Service) Restart(name string) error {
 	// Blue/green restart: deregister old process (don't kill it yet), start new
 	// one, health-check, swap proxy, then drain the old process.  This keeps the
 	// stable port live throughout and respects the configured drain window.
-	oldPID, oldCmd := s.mgr.Deregister(name)
+	oldPID, oldCmd, oldDone := s.mgr.Deregister(name)
 	if oldPID == 0 {
 		oldPID = svc.PID
 	}
@@ -342,11 +342,11 @@ func (s *Service) Restart(name string) error {
 		if pid > 0 {
 			s.mgr.MarkDraining(pid)
 		}
-		go func(cmd *exec.Cmd, p int, window time.Duration) {
+		go func(cmd *exec.Cmd, done <-chan struct{}, p int, window time.Duration) {
 			log.Printf("[DRAIN] name=%s pid=%d waiting %s for in-flight requests", name, p, window)
 			time.Sleep(window)
-			process.DrainProc(cmd)
-		}(oldCmd, pid, drainWindow)
+			process.DrainProc(cmd, done)
+		}(oldCmd, oldDone, pid, drainWindow)
 	}
 
 	log.Printf("[RESTART] name=%s port=%d internal=%d", name, svc.StablePort, internalPort)
