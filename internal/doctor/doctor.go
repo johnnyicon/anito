@@ -110,6 +110,16 @@ func checkConfig(cfgPath, relPath, repoRoot string, svc StatusFetcher) ConfigRes
 	}
 	cr.Name = cfg.Name
 
+	// Worktree check — warn when the config lives inside a git worktree.
+	// Worktrees don't inherit node_modules; Vite's module graph cache goes stale
+	// after cherry-picks that add new files.
+	if isWorktreePath(cfgPath) {
+		cr.add(Issue{Severity: "warning", Field: "config_path",
+			Message: "worktree detected — ensure node_modules is installed and use `vite --force` in your start script if serving a Vite frontend",
+			Action:  "run `npm install` in the worktree directory and add `--force` to your vite start command",
+		})
+	}
+
 	// Output file existence.
 	absOutput := cfg.Output
 	if !filepath.IsAbs(absOutput) {

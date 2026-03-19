@@ -5,25 +5,79 @@ import { queryOptions, useMutation, useQueryClient } from '@tanstack/react-query
 export type ServiceStatus = 'running' | 'stopped' | 'failed'
 export type ServiceType   = 'binary'  | 'static'
 
+export interface StartEvent {
+  started_at: string
+  exit_code:  number   // -1 if still running
+  duration:   number   // nanoseconds, 0 if still running
+}
+
 export interface Service {
-  name:          string
-  type:          ServiceType
-  version:       string
-  binary_path:   string
-  stable_port:   number
-  internal_port: number
-  env_file:      string
-  health_check:  string
-  watch_paths:   string[]
-  status:        ServiceStatus
-  pid:           number
-  deployed_at:   string
-  updated_at:    string
+  name:           string
+  type:           ServiceType
+  version:        string
+  config_path:    string
+  binary_path:    string
+  args:           string[]
+  stable_port:    number
+  internal_port:  number
+  env_file:       string
+  health_check:   string
+  watch_paths:    string[]
+  restart_policy: string
+  status:         ServiceStatus
+  pid:            number
+  deployed_at:    string
+  updated_at:     string
+  last_deployed_at: string
+  // Runtime observability
+  last_started_at: string
+  crash_attempts:  number
+  gave_up:         boolean
+  start_history:   StartEvent[]
 }
 
 export interface HealthResponse {
   status:  string
   version: string
+}
+
+export interface DoctorIssue {
+  severity: 'error' | 'warning' | 'info'
+  field:    string
+  message:  string
+  action:   string
+}
+
+export interface DoctorConfigResult {
+  config_file:  string
+  name:         string
+  parse_error:  string
+  issues:       DoctorIssue[]
+  errors:       number
+  warnings:     number
+}
+
+export interface DoctorResult {
+  repo_path: string
+  configs:   DoctorConfigResult[]
+  errors:    number
+  warnings:  number
+  healthy:   boolean
+}
+
+export interface Issue {
+  id:        string
+  timestamp: string
+  error:     string
+  source:    string
+  tool:      string
+  context:   string
+  repo_path: string
+  severity:  'error' | 'warning' | 'info'
+}
+
+export interface IssuesResponse {
+  issues: Issue[]
 }
 
 // ── Fetch helpers ──────────────────────────────────────────────────────────
@@ -37,40 +91,54 @@ async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> {
   return res.json() as Promise<T>
 }
 
-async function apiPost<T>(path: string): Promise<T> {
-  return apiFetch<T>(path, { method: 'POST' })
+async function apiPost<T>(path: string, body?: unknown): Promise<T> {
+  return apiFetch<T>(path, {
+    method: 'POST',
+    headers: body ? { 'Content-Type': 'application/json' } : undefined,
+    body:    body ? JSON.stringify(body) : undefined,
+  })
 }
 
 // ── Query options (TanStack Query v5) ─────────────────────────────────────
 
 export const healthQuery = queryOptions({
-  queryKey: ['health'],
-  queryFn:  () => apiFetch<HealthResponse>('/health'),
-  staleTime: 10_000,
-  refetchInterval: 15_000,
+  queryKey:        ['health'],
+  queryFn:         () => apiFetch<HealthResponse>('/health'),
+  staleTime:       0,
+  refetchInterval: 5_000,
+  retry:           false,
 })
 
 export const servicesQuery = queryOptions({
-  queryKey: ['services'],
-  queryFn:  () => apiFetch<Service[]>('/services'),
-  staleTime: 2_000,
+  queryKey:        ['services'],
+  queryFn:         () => apiFetch<Service[]>('/services'),
+  staleTime:       2_000,
   refetchInterval: 5_000,
 })
 
 export const serviceStatusQuery = (name: string) => queryOptions({
-  queryKey: ['status', name],
-  queryFn:  () => apiFetch<Service>(`/status/${name}`),
-  staleTime: 2_000,
-  refetchInterval: 5_000,
+  queryKey:        ['status', name],
+  queryFn:         () => apiFetch<Service>(`/status/${name}`),
+  staleTime:       2_000,
+  refetchInterval: 2_000,
+})
+
+export const issuesQuery = (lines = 50, source = '') => queryOptions({
+  queryKey:        ['issues', lines, source],
+  queryFn:         () => apiFetch<IssuesResponse>(`/issues?lines=${lines}${source ? `&source=${encodeURIComponent(source)}` : ''}`),
+  staleTime:       5_000,
+  refetchInterval: 10_000,
+})
+
+export const doctorQuery = (repoPath: string, enabled = true) => queryOptions({
+  queryKey:  ['doctor', repoPath],
+  queryFn:   () => apiFetch<DoctorResult>(`/doctor?path=${encodeURIComponent(repoPath)}`),
+  enabled:   enabled && !!repoPath,
+  staleTime: 30_000,
+  retry:     false,
 })
 
 // ── Mutations ──────────────────────────────────────────────────────────────
-
-type ActionFn = (name: string) => Promise<unknown>
-
-const restartFn: ActionFn = (name) => apiPost(`/restart/${name}`)
-const stopFn:    ActionFn = (name) => apiPost(`/stop/${name}`)
-const removeFn:  ActionFn = (name) => apiPost(`/remove/${name}`)
 
 export function useServiceAction() {
   const qc = useQueryClient()
@@ -80,19 +148,44 @@ export function useServiceAction() {
     qc.invalidateQueries({ queryKey: ['status'] })
   }
 
-  const restart = useMutation({ mutationFn: restartFn, onSettled: invalidate })
-  const stop    = useMutation({ mutationFn: stopFn,    onSettled: invalidate })
-  const remove  = useMutation({ mutationFn: removeFn,  onSettled: invalidate })
+  const restart = useMutation({
+    mutationFn: (name: string) => apiPost(`/restart/${name}`),
+    onSettled:  invalidate,
+  })
+
+  const stop = useMutation({
+    mutationFn: (name: string) => apiPost(`/stop/${name}`),
+    onSettled:  invalidate,
+  })
+
+  const remove = useMutation({
+    mutationFn: (name: string) => apiPost(`/remove/${name}`),
+    onSettled:  invalidate,
+  })
 
   return { restart, stop, remove }
 }
 
-// ── Relative time ──────────────────────────────────────────────────────────
-
-export function timeAgo(iso: string): string {
-  const s = Math.floor((Date.now() - new Date(iso).getTime()) / 1000)
-  if (s <    60) return `${s}s ago`
-  if (s <  3600) return `${Math.floor(s / 60)}m ago`
-  if (s < 86400) return `${Math.floor(s / 3600)}h ago`
-  return `${Math.floor(s / 86400)}d ago`
+export function usePostIssue() {
+  return useMutation({
+    mutationFn: (issue: Partial<Issue>) => apiPost<{ status: string }>('/issues', issue),
+  })
 }
+
+// ── Helpers ────────────────────────────────────────────────────────────────
+
+/** Derive the repo root from a config_path (parent of the .anito/ directory) */
+export function repoRootFromConfigPath(configPath: string): string {
+  if (!configPath) return ''
+  const parts = configPath.split('/')
+  const idx = parts.lastIndexOf('.anito')
+  if (idx > 0) return parts.slice(0, idx).join('/')
+  return parts.slice(0, -1).join('/')
+}
+
+/** Count ports used from the auto-allocation range 8100–8200 */
+export function countAllocatedPorts(services: Service[]): number {
+  return services.filter(s => s.stable_port >= 8100 && s.stable_port <= 8200).length
+}
+
+export const PORT_RANGE_TOTAL = 101 // 8100–8200 inclusive

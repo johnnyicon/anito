@@ -20,6 +20,8 @@ export default defineConfig({
       '/remove':   { target: 'http://localhost:7700', changeOrigin: true },
       '/status':   { target: 'http://localhost:7700', changeOrigin: true },
       '/logs':     { target: 'http://localhost:7700', changeOrigin: true, ws: true },
+      '/issues':   { target: 'http://localhost:7700', changeOrigin: true },
+      '/doctor':   { target: 'http://localhost:7700', changeOrigin: true },
     },
   },
   build: {

@@ -1,128 +1,170 @@
 import { useState } from 'react'
-import { RefreshCw, Square, Trash2, ScrollText, Eye, ExternalLink } from 'lucide-react'
-import { useQuery } from '@tanstack/react-query'
-import { type Service, serviceStatusQuery, useServiceAction, timeAgo } from '@/lib/api'
+import { useMutation, useQueryClient } from '@tanstack/react-query'
+import type { Service } from '@/lib/api'
+import { relativeTime } from '@/lib/format'
+import { FailedCard } from '@/components/FailedCard'
 import { Button } from '@/components/ui/button'
-import { Badge } from '@/components/ui/badge'
-import { cn } from '@/lib/utils'
 
-interface Props {
-  service:    Service
-  onViewLogs: (name: string) => void
-  logOpen:    boolean
+interface ServiceRowProps {
+  service:      Service
+  stale?:       boolean
+  onOpenLogs:   (name: string) => void
+  onOpenDetail: (name: string) => void
+  onRemove:     (name: string) => void
 }
 
-export function ServiceRow({ service: initial, onViewLogs, logOpen }: Props) {
-  const { data: svc = initial } = useQuery(serviceStatusQuery(initial.name))
-  const { restart, stop, remove } = useServiceAction()
-  const [confirming, setConfirming] = useState<'stop' | 'remove' | null>(null)
+export function ServiceRow({ service: svc, stale, onOpenLogs, onOpenDetail, onRemove }: ServiceRowProps) {
+  const qc = useQueryClient()
+  const [actionError, setActionError] = useState<string | null>(null)
 
-  const busy = restart.isPending || stop.isPending || remove.isPending
+  const restart = useMutation({
+    mutationFn: () => fetch(`/restart/${svc.name}`, { method: 'POST' }).then(r => {
+      if (!r.ok) throw new Error('restart failed')
+    }),
+    onSettled: () => {
+      qc.invalidateQueries({ queryKey: ['services'] })
+      qc.invalidateQueries({ queryKey: ['status'] })
+    },
+    onError: (err) => setActionError(err instanceof Error ? err.message : 'restart failed'),
+  })
 
-  const statusVariant =
-    svc.status === 'running' ? 'running' :
-    svc.status === 'failed'  ? 'failed'  : 'stopped'
-
-  function handleStop() {
-    if (confirming === 'stop') { stop.mutate(svc.name); setConfirming(null) }
-    else setConfirming('stop')
+  // ── Failed state → delegate to FailedCard (auto-expanded) ─────────────────
+  if (svc.status === 'failed') {
+    return (
+      <FailedCard
+        service={svc}
+        onOpenLogs={onOpenLogs}
+        onRemove={onRemove}
+      />
+    )
   }
 
-  function handleRemove() {
-    if (confirming === 'remove') { remove.mutate(svc.name); setConfirming(null) }
-    else setConfirming('remove')
+  // ── Stopped state ─────────────────────────────────────────────────────────
+  if (svc.status === 'stopped') {
+    return (
+      <div className="group flex items-center gap-3 px-4 h-10 border-b border-border/50 text-sm hover:bg-muted/30 transition-colors">
+        <span className="text-muted-foreground text-base leading-none">◌</span>
+        <span className="font-mono font-medium text-muted-foreground">{svc.name}</span>
+        <span className="font-mono text-xs text-muted-foreground">
+          :{svc.stable_port}{stale ? ' (stale)' : ''}
+        </span>
+        <span className="text-xs text-muted-foreground ml-1">stopped</span>
+
+        <div className="ml-auto flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
+          {actionError && <span className="text-xs text-destructive mr-2">{actionError}</span>}
+          <Button size="sm" variant="ghost" className="h-6 text-xs px-2"
+            onClick={() => { setActionError(null); restart.mutate() }} disabled={restart.isPending}>
+            {restart.isPending ? 'Starting…' : 'Start'}
+          </Button>
+          <ServiceContextMenu svc={svc} onOpenLogs={onOpenLogs} onOpenDetail={onOpenDetail} onRemove={onRemove} />
+        </div>
+      </div>
+    )
   }
 
-  function handleRestart() {
-    setConfirming(null)
-    restart.mutate(svc.name)
+  // ── Running / healthy state ───────────────────────────────────────────────
+  const healthySince = svc.last_started_at ? `healthy ${relativeTime(svc.last_started_at)}` : 'running'
+
+  return (
+    <div className="group flex items-center gap-3 px-4 h-10 border-b border-border/50 text-sm hover:bg-muted/30 transition-colors">
+      <span className="text-emerald-500 text-base leading-none shrink-0">●</span>
+      <button
+        className="font-mono font-medium shrink-0 hover:underline"
+        onClick={() => onOpenDetail(svc.name)}
+      >
+        {svc.name}
+      </button>
+      <span className="font-mono text-xs text-muted-foreground shrink-0">
+        :{svc.stable_port}{stale ? ' (stale)' : ''}
+      </span>
+      <span className="text-xs text-muted-foreground shrink-0">{healthySince}</span>
+      {svc.version && (
+        <span className="text-xs text-muted-foreground font-mono">{svc.version}</span>
+      )}
+
+      {/* Hover actions */}
+      <div className="ml-auto flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
+        {actionError && <span className="text-xs text-destructive mr-2">{actionError}</span>}
+
+        <Button size="sm" variant="ghost" className="h-6 w-6 p-0 text-base"
+          title="Open in browser"
+          onClick={() => window.open(`http://localhost:${svc.stable_port}`, '_blank')}>
+          ↗
+        </Button>
+
+        <Button size="sm" variant="ghost" className="h-6 w-6 p-0 text-base"
+          title="View logs"
+          onClick={() => onOpenLogs(svc.name)}>
+          ≡
+        </Button>
+
+        <ServiceContextMenu svc={svc} onOpenLogs={onOpenLogs} onOpenDetail={onOpenDetail} onRemove={onRemove} />
+      </div>
+    </div>
+  )
+}
+
+function ServiceContextMenu({ svc, onOpenLogs, onOpenDetail, onRemove }: {
+  svc:          Service
+  onOpenLogs:   (n: string) => void
+  onOpenDetail: (n: string) => void
+  onRemove:     (n: string) => void
+}) {
+  const qc = useQueryClient()
+  const [open, setOpen] = useState(false)
+  const [err,  setErr]  = useState<string | null>(null)
+
+  const restart = useMutation({
+    mutationFn: () => fetch(`/restart/${svc.name}`, { method: 'POST' }).then(r => { if (!r.ok) throw new Error('restart failed') }),
+    onSettled:  () => qc.invalidateQueries({ queryKey: ['services'] }),
+    onError:    (e) => setErr(e instanceof Error ? e.message : 'failed'),
+  })
+  const stop = useMutation({
+    mutationFn: () => fetch(`/stop/${svc.name}`, { method: 'POST' }).then(r => { if (!r.ok) throw new Error('stop failed') }),
+    onSettled:  () => qc.invalidateQueries({ queryKey: ['services'] }),
+    onError:    (e) => setErr(e instanceof Error ? e.message : 'failed'),
+  })
+
+  if (!open) {
+    return (
+      <Button size="sm" variant="ghost" className="h-6 w-6 p-0" onClick={() => setOpen(true)}>
+        ⋯
+      </Button>
+    )
   }
 
   return (
-    <div className={cn(
-      "flex items-center gap-4 rounded-md border px-4 py-2.5 transition-all",
-      logOpen && "ring-2 ring-primary/50",
-      busy && "opacity-70"
-    )}>
-      <span className="w-44 shrink-0 truncate font-mono text-sm font-medium">{svc.name}</span>
-
-      <Badge variant={statusVariant} className="shrink-0">
-        <span className={cn(
-          "size-1.5 rounded-full",
-          svc.status === 'running' ? "bg-emerald-500" :
-          svc.status === 'failed'  ? "bg-destructive" : "bg-muted-foreground"
-        )} />
-        {svc.status}
-      </Badge>
-
-      {svc.watch_paths?.length > 0 ? (
-        <Badge variant="outline" className="shrink-0 gap-1 border-amber-500/40 bg-amber-500/10 text-amber-600 dark:text-amber-400">
-          <Eye className="size-2.5" />
-          watch
-        </Badge>
-      ) : (
-        <span className="w-13 shrink-0" />
-      )}
-
-      <div className="flex w-24 shrink-0 items-center gap-1 font-mono text-xs text-muted-foreground">
-        :{svc.stable_port || '—'}
-        {svc.stable_port > 0 && (
-          <a href={`http://localhost:${svc.stable_port}`} target="_blank" rel="noreferrer">
-            <Button size="sm" variant="ghost" className="h-5 w-5 p-0 text-muted-foreground hover:text-foreground">
-              <ExternalLink className="size-3" />
-            </Button>
-          </a>
+    <div className="relative">
+      <Button size="sm" variant="secondary" className="h-6 w-6 p-0" onClick={() => setOpen(false)}>
+        ⋯
+      </Button>
+      {/* Simple inline menu — avoids needing dropdown-menu primitive */}
+      <div className="absolute right-0 top-7 z-50 min-w-32 rounded-md border border-border bg-popover shadow-md py-1 text-xs"
+        onMouseLeave={() => setOpen(false)}>
+        {err && <p className="px-3 py-1 text-destructive">{err}</p>}
+        <button className="w-full text-left px-3 py-1.5 hover:bg-muted transition-colors"
+          onClick={() => { setOpen(false); restart.mutate() }}>
+          {restart.isPending ? 'Restarting…' : 'Restart'}
+        </button>
+        {svc.status === 'running' && (
+          <button className="w-full text-left px-3 py-1.5 hover:bg-muted transition-colors"
+            onClick={() => { setOpen(false); stop.mutate() }}>
+            {stop.isPending ? 'Stopping…' : 'Stop'}
+          </button>
         )}
-      </div>
-
-      <span className="w-24 shrink-0 font-mono text-xs text-muted-foreground">
-        {svc.deployed_at ? timeAgo(svc.deployed_at) : '—'}
-      </span>
-
-      <div className="ml-auto flex items-center gap-1.5">
-        {svc.status === 'running' ? (
-          <>
-            <Button size="sm" variant="outline" className="h-7 text-xs" disabled={busy} onClick={handleRestart}>
-              <RefreshCw className="size-3" />restart
-            </Button>
-            <Button
-              size="sm"
-              variant={confirming === 'stop' ? 'destructive' : 'outline'}
-              className="h-7 text-xs"
-              disabled={busy}
-              onClick={handleStop}
-              onBlur={() => setConfirming(null)}
-            >
-              <Square className="size-3" />
-              {confirming === 'stop' ? 'confirm stop' : 'stop'}
-            </Button>
-          </>
-        ) : (
-          <Button size="sm" variant="outline" className="h-7 text-xs" disabled={busy} onClick={handleRestart}>
-            <RefreshCw className="size-3" />start
-          </Button>
-        )}
-
-        <Button
-          size="sm"
-          variant={confirming === 'remove' ? 'destructive' : 'outline'}
-          className="h-7 text-xs"
-          disabled={busy}
-          onClick={handleRemove}
-          onBlur={() => setConfirming(null)}
-        >
-          <Trash2 className="size-3" />
-          {confirming === 'remove' ? 'confirm remove' : 'remove'}
-        </Button>
-
-        <Button
-          size="sm"
-          variant={logOpen ? 'secondary' : 'ghost'}
-          className="h-7 text-xs"
-          onClick={() => onViewLogs(svc.name)}
-        >
-          <ScrollText className="size-3" />logs
-        </Button>
+        <button className="w-full text-left px-3 py-1.5 hover:bg-muted transition-colors"
+          onClick={() => { setOpen(false); onOpenLogs(svc.name) }}>
+          View Logs
+        </button>
+        <button className="w-full text-left px-3 py-1.5 hover:bg-muted transition-colors"
+          onClick={() => { setOpen(false); onOpenDetail(svc.name) }}>
+          View Detail
+        </button>
+        <hr className="my-1 border-border" />
+        <button className="w-full text-left px-3 py-1.5 hover:bg-muted text-destructive transition-colors"
+          onClick={() => { setOpen(false); onRemove(svc.name) }}>
+          Remove…
+        </button>
       </div>
     </div>
   )

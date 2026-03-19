@@ -1,128 +1,349 @@
-import { useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
-import { servicesQuery } from '@/lib/api'
-import { Header } from '@/components/Header'
-import { ServiceCard } from '@/components/ServiceCard'
-import { ServiceRow } from '@/components/ServiceRow'
-import { LogPanel } from '@/components/LogPanel'
-import { Loader2, LayoutGrid, List } from 'lucide-react'
-import { Button } from '@/components/ui/button'
+import { servicesQuery, healthQuery, issuesQuery, type Service } from '@/lib/api'
+import { CommandBar }         from '@/components/CommandBar'
+import { FilterBar }          from '@/components/FilterBar'
+import { ServiceList }        from '@/components/ServiceList'
+import { LogPane }            from '@/components/LogPane'
+import { CommandPalette }     from '@/components/CommandPalette'
+import { ServiceDetailPanel } from '@/components/ServiceDetailPanel'
+import { IssuesDrawer }       from '@/components/IssuesDrawer'
+import { RemoveModal }        from '@/components/RemoveModal'
+import type { CommandAction } from '@/lib/commands'
 
-const DAEMON_LOG = '~daemon'
+// ── Split-pane constants ────────────────────────────────────────────────────
+
+const SPLIT_KEY    = 'anito:split-ratio'
+const DEFAULT_SPLIT = 0.58
+const MIN_SPLIT     = 0.25
+const NARROW_VP     = 900
+
+function getSavedSplit(): number {
+  try {
+    const v = parseFloat(localStorage.getItem(SPLIT_KEY) ?? '')
+    return isNaN(v) ? DEFAULT_SPLIT : Math.min(Math.max(v, MIN_SPLIT), 1 - MIN_SPLIT)
+  } catch {
+    return DEFAULT_SPLIT
+  }
+}
+
+// ── Status group classification ─────────────────────────────────────────────
+
+type StatusGroup = 'failed-gave-up' | 'failed-crashing' | 'healthy' | 'stopped'
+
+function statusGroup(svc: Service): StatusGroup {
+  if (svc.status === 'failed') return svc.gave_up ? 'failed-gave-up' : 'failed-crashing'
+  if (svc.status === 'stopped') return 'stopped'
+  return 'healthy'
+}
+
+const GROUP_ORDER: Record<StatusGroup, number> = {
+  'failed-gave-up':  0,
+  'failed-crashing': 1,
+  'healthy':         2,
+  'stopped':         3,
+}
+
+function sortServices(services: Service[]): Service[] {
+  return [...services].sort((a, b) => {
+    const ga = GROUP_ORDER[statusGroup(a)]
+    const gb = GROUP_ORDER[statusGroup(b)]
+    if (ga !== gb) return ga - gb
+    return a.name.localeCompare(b.name)
+  })
+}
+
+// ── Filter helpers ──────────────────────────────────────────────────────────
+
+export type FilterStatus = 'all' | 'running' | 'warning' | 'failed' | 'stopped'
+
+function applyFilter(services: Service[], filter: FilterStatus, search: string): Service[] {
+  let list = services
+  if (filter === 'running')  list = list.filter(s => s.status === 'running')
+  if (filter === 'failed')   list = list.filter(s => s.status === 'failed')
+  if (filter === 'stopped')  list = list.filter(s => s.status === 'stopped')
+  if (search) {
+    const q = search.toLowerCase()
+    list = list.filter(s => s.name.toLowerCase().includes(q))
+  }
+  return list
+}
+
+// ── App ─────────────────────────────────────────────────────────────────────
 
 export default function App() {
-  const { data: services, isLoading } = useQuery(servicesQuery)
-  const [logService, setLogService]   = useState<string | null>(null)
-  const [viewMode, setViewMode]       = useState<'tile' | 'list'>(() =>
-    (localStorage.getItem('anito-view-mode') as 'tile' | 'list') ?? 'tile'
-  )
+  // ── Data ──────────────────────────────────────────────────────────────────
+  const { data: health,  isError: daemonDown } = useQuery(healthQuery)
+  const { data: rawServices = [] }             = useQuery(servicesQuery)
+  const { data: issuesData }                   = useQuery(issuesQuery(50))
 
-  function setView(mode: 'tile' | 'list') {
-    setViewMode(mode)
-    localStorage.setItem('anito-view-mode', mode)
+  // ── Stable sort: re-sort only when a service changes status group ──────────
+  const [sorted, setSorted] = useState<Service[]>([])
+  const sortKeyRef          = useRef<string>('')
+
+  useEffect(() => {
+    const key = rawServices.map(s => `${s.name}:${statusGroup(s)}`).sort().join(',')
+    if (key !== sortKeyRef.current) {
+      sortKeyRef.current = key
+      setSorted(sortServices(rawServices))
+    } else {
+      setSorted(prev => {
+        const byName = Object.fromEntries(rawServices.map(s => [s.name, s]))
+        const updated = prev
+          .map(s => byName[s.name] ?? s)
+          .filter(s => byName[s.name])
+        const newNames = rawServices.filter(s => !prev.find(p => p.name === s.name))
+        return [...updated, ...sortServices(newNames)]
+      })
+    }
+  }, [rawServices])
+
+  // ── Filter state ──────────────────────────────────────────────────────────
+  const [filterStatus, setFilterStatus] = useState<FilterStatus>('all')
+  const [search,       setSearch]       = useState('')
+  const filtered = applyFilter(sorted, filterStatus, search)
+
+  // ── Log pane tabs (max 4) ─────────────────────────────────────────────────
+  const [logTabs,      setLogTabs]      = useState<string[]>([])
+  const [activeLogTab, setActiveLogTab] = useState<string | null>(null)
+
+  const openLogTab = useCallback((name: string) => {
+    setLogTabs(prev => {
+      if (prev.includes(name)) {
+        setActiveLogTab(name)
+        return prev
+      }
+      const next = [...prev, name]
+      if (next.length > 4) next.shift() // oldest auto-closed
+      setActiveLogTab(name)
+      return next
+    })
+  }, [])
+
+  const closeLogTab = useCallback((name: string) => {
+    setLogTabs(prev => {
+      const next = prev.filter(t => t !== name)
+      setActiveLogTab(cur => {
+        if (cur !== name) return cur
+        return next[next.length - 1] ?? null
+      })
+      return next
+    })
+  }, [])
+
+  // ── Split pane ────────────────────────────────────────────────────────────
+  const [splitRatio, setSplitRatio] = useState(getSavedSplit)
+  const [isDragging, setIsDragging] = useState(false)
+  const [isNarrow,   setIsNarrow]   = useState(() => window.innerWidth < NARROW_VP)
+  const containerRef = useRef<HTMLDivElement>(null)
+
+  useEffect(() => {
+    const obs = new ResizeObserver(entries => {
+      setIsNarrow((entries[0]?.contentRect.width ?? window.innerWidth) < NARROW_VP)
+    })
+    if (containerRef.current) obs.observe(containerRef.current)
+    return () => obs.disconnect()
+  }, [])
+
+  const handleDividerMouseDown = useCallback((e: React.MouseEvent) => {
+    e.preventDefault()
+    setIsDragging(true)
+    const startX     = e.clientX
+    const startRatio = splitRatio
+
+    function onMove(ev: MouseEvent) {
+      const w = containerRef.current?.clientWidth ?? window.innerWidth
+      const next = Math.min(Math.max(startRatio + (ev.clientX - startX) / w, MIN_SPLIT), 1 - MIN_SPLIT)
+      setSplitRatio(next)
+    }
+    function onUp() {
+      setIsDragging(false)
+      setSplitRatio(prev => { localStorage.setItem(SPLIT_KEY, String(prev)); return prev })
+      window.removeEventListener('mousemove', onMove)
+      window.removeEventListener('mouseup',   onUp)
+    }
+    window.addEventListener('mousemove', onMove)
+    window.addEventListener('mouseup',   onUp)
+  }, [splitRatio])
+
+  // ── Command palette ───────────────────────────────────────────────────────
+  const [paletteOpen, setPaletteOpen] = useState(false)
+
+  useEffect(() => {
+    function onKey(e: KeyboardEvent) {
+      if (e.metaKey && e.key === 'k') { e.preventDefault(); setPaletteOpen(p => !p); return }
+      if (e.key === '/') {
+        const tag = (e.target as HTMLElement).tagName
+        if (tag === 'INPUT' || tag === 'TEXTAREA') return
+        e.preventDefault()
+        setPaletteOpen(p => !p)
+      }
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [])
+
+  // ── Detail panel + remove modal ───────────────────────────────────────────
+  const [detailService, setDetailService] = useState<string | null>(null)
+  const [removeService, setRemoveService] = useState<string | null>(null)
+
+  // ── Issues drawer ─────────────────────────────────────────────────────────
+  const issues      = issuesData?.issues ?? []
+  const [issuesOpen, setIssuesOpen] = useState(() => {
+    try { return localStorage.getItem('anito:issues-drawer-open') === 'true' } catch { return false }
+  })
+  const [lastSeen, setLastSeen] = useState(0)
+  const unread = Math.max(0, issues.length - lastSeen)
+
+  useEffect(() => {
+    if (issues.length > lastSeen && !issuesOpen) setIssuesOpen(true)
+  }, [issues.length]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  function toggleIssues() {
+    setIssuesOpen(prev => {
+      const next = !prev
+      if (next) setLastSeen(issues.length)
+      localStorage.setItem('anito:issues-drawer-open', String(next))
+      return next
+    })
   }
 
-  function handleViewLogs(name: string) {
-    setLogService(prev => prev === name ? null : name)
+  // ── Command handler ───────────────────────────────────────────────────────
+  function handleCommand(action: CommandAction) {
+    setPaletteOpen(false)
+    switch (action.type) {
+      case 'logs':   openLogTab(action.name);      break
+      case 'detail': setDetailService(action.name); break
+      case 'remove': setRemoveService(action.name); break
+      case 'filter': setFilterStatus(action.status as FilterStatus); break
+      case 'issues': setIssuesOpen(true); setLastSeen(issues.length); break
+    }
   }
 
-  function handleToggleDaemonLog() {
-    setLogService(prev => prev === DAEMON_LOG ? null : DAEMON_LOG)
-  }
+  // ── System state ──────────────────────────────────────────────────────────
+  const hasFailed = sorted.some(s => s.status === 'failed')
+  const systemState: 'ok' | 'warning' | 'error' =
+    daemonDown || hasFailed ? 'error' : 'ok'
 
-  const sorted    = [...(services ?? [])].sort((a, b) => a.name.localeCompare(b.name))
-  const running   = sorted.filter(s => s.status === 'running').length
-  const total     = sorted.length
-  const portsUsed = sorted.filter(s => s.stable_port >= 8100 && s.stable_port <= 8200).length
+  const showLogPane = !isNarrow && logTabs.length > 0
 
   return (
-    <div className="flex min-h-screen flex-col">
-      <Header
-        daemonLogOpen={logService === DAEMON_LOG}
-        onToggleDaemonLog={handleToggleDaemonLog}
+    <div className="flex h-screen flex-col overflow-hidden" ref={containerRef}>
+      <CommandBar
+        health={health}
+        daemonDown={daemonDown}
+        systemState={systemState}
+        services={sorted}
+        unreadIssues={unread}
+        onOpenPalette={() => setPaletteOpen(true)}
+        onOpenIssues={() => { setIssuesOpen(true); setLastSeen(issues.length) }}
       />
 
-      <main className="flex-1 pb-4">
-        {/* Section header */}
-        <div className="mx-auto max-w-7xl px-6 pt-6 pb-4">
-          <div className="flex items-center justify-between">
-            <h2 className="text-xs font-medium uppercase tracking-widest text-muted-foreground">
-              Services
-            </h2>
-            <div className="flex items-center gap-3">
-              {total > 0 && (
-                <div className="flex items-center gap-3 font-mono text-xs text-muted-foreground">
-                  <span>{running} / {total} running</span>
-                  <span>{portsUsed} / 101 ports</span>
-                </div>
-              )}
-              <div className="flex items-center gap-0.5">
-                <Button
-                  size="sm"
-                  variant={viewMode === 'tile' ? 'secondary' : 'ghost'}
-                  className="h-7 w-7 p-0"
-                  onClick={() => setView('tile')}
-                >
-                  <LayoutGrid className="size-3.5" />
-                </Button>
-                <Button
-                  size="sm"
-                  variant={viewMode === 'list' ? 'secondary' : 'ghost'}
-                  className="h-7 w-7 p-0"
-                  onClick={() => setView('list')}
-                >
-                  <List className="size-3.5" />
-                </Button>
-              </div>
-            </div>
-          </div>
-        </div>
-
-        {/* Grid */}
-        <div className="mx-auto max-w-7xl px-6">
-          {isLoading ? (
-            <div className="flex items-center justify-center py-20 text-muted-foreground">
-              <Loader2 className="mr-2 size-4 animate-spin" />
-              <span className="text-sm">Loading services…</span>
-            </div>
-          ) : !services?.length ? (
-            <div className="py-20 text-center">
-              <p className="text-sm font-medium">No services</p>
-              <p className="mt-1 text-xs text-muted-foreground">
-                Deploy one with <code className="rounded bg-muted px-1 py-0.5">anito deploy</code>
+      <div className="flex flex-1 min-h-0">
+        {/* Left pane */}
+        <div
+          className="flex flex-col min-h-0 border-r border-border"
+          style={{ width: showLogPane ? `${splitRatio * 100}%` : '100%' }}
+        >
+          {/* S13 — daemon unreachable banner */}
+          {daemonDown && (
+            <div className="shrink-0 bg-destructive/10 border-b border-destructive/20 px-4 py-3">
+              <p className="text-sm font-medium text-destructive">
+                ✕ Daemon unreachable — localhost:7700 is not responding
+              </p>
+              <p className="mt-1 text-xs text-destructive/80">
+                The Anito daemon may have crashed or been stopped.
+              </p>
+              <p className="mt-2 font-mono text-xs text-destructive/60">
+                launchctl load ~/Library/LaunchAgents/com.anito.daemon.plist
+              </p>
+              <p className="mt-0.5 font-mono text-xs text-destructive/60">make start</p>
+              <p className="mt-1 text-xs text-destructive/50">
+                Service data below is from the last successful poll.
               </p>
             </div>
-          ) : viewMode === 'tile' ? (
-            <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
-              {sorted.map(svc => (
-                <ServiceCard
-                  key={svc.name}
-                  service={svc}
-                  onViewLogs={handleViewLogs}
-                  logOpen={logService === svc.name}
-                />
-              ))}
-            </div>
-          ) : (
-            <div className="flex flex-col gap-1.5">
-              {sorted.map(svc => (
-                <ServiceRow
-                  key={svc.name}
-                  service={svc}
-                  onViewLogs={handleViewLogs}
-                  logOpen={logService === svc.name}
-                />
-              ))}
-            </div>
           )}
-        </div>
-      </main>
 
-      {/* Log panel — fixed to bottom */}
-      {logService && (
-        <div className="sticky bottom-0 z-40">
-          <LogPanel name={logService} onClose={() => setLogService(null)} />
+          <FilterBar
+            services={sorted}
+            filter={filterStatus}
+            search={search}
+            onFilter={setFilterStatus}
+            onSearch={setSearch}
+          />
+
+          <div className="flex-1 overflow-y-auto">
+            <ServiceList
+              services={filtered}
+              daemonDown={daemonDown}
+              onOpenLogs={openLogTab}
+              onOpenDetail={setDetailService}
+              onRemove={setRemoveService}
+            />
+          </div>
+
+          <IssuesDrawer
+            issues={issues}
+            unread={unread}
+            open={issuesOpen}
+            onToggle={toggleIssues}
+          />
         </div>
+
+        {/* Drag divider */}
+        {showLogPane && (
+          <div
+            className={`w-1 shrink-0 cursor-col-resize select-none transition-colors ${
+              isDragging ? 'bg-primary/40' : 'bg-border hover:bg-primary/20'
+            }`}
+            onMouseDown={handleDividerMouseDown}
+          />
+        )}
+
+        {/* Right pane — Log Pane */}
+        {showLogPane && (
+          <div
+            className="flex flex-col min-h-0"
+            style={{ width: `${(1 - splitRatio) * 100}%` }}
+          >
+            <LogPane
+              tabs={logTabs}
+              activeTab={activeLogTab}
+              onActivate={setActiveLogTab}
+              onClose={closeLogTab}
+              onAdd={openLogTab}
+              services={sorted}
+            />
+          </div>
+        )}
+      </div>
+
+      {/* Overlays */}
+      {paletteOpen && (
+        <CommandPalette
+          services={sorted}
+          onAction={handleCommand}
+          onClose={() => setPaletteOpen(false)}
+          onOpenLogs={openLogTab}
+        />
+      )}
+
+      {detailService && (
+        <ServiceDetailPanel
+          name={detailService}
+          services={sorted}
+          onClose={() => setDetailService(null)}
+          onOpenLogs={openLogTab}
+          onRemove={setRemoveService}
+        />
+      )}
+
+      {removeService && (
+        <RemoveModal
+          name={removeService}
+          services={sorted}
+          onClose={() => setRemoveService(null)}
+        />
       )}
     </div>
   )
