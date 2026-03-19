@@ -98,18 +98,22 @@ func runWatcher(name string, w *fsnotify.Watcher, done chan struct{}, onTrigger 
 	var (
 		debounce    *time.Timer
 		lastTrigger string
+		eventCount  int
 	)
 
 	resetDebounce := func(path string) {
 		lastTrigger = path
+		eventCount++
 		if debounce != nil {
 			debounce.Stop()
 		}
+		count := eventCount
 		debounce = time.AfterFunc(debounceDelay, func() {
 			select {
 			case <-done:
 				return
 			default:
+				log.Printf("[WATCH] name=%s coalesced=%d trigger=%s", name, count, lastTrigger)
 				onTrigger(lastTrigger)
 			}
 		})
@@ -132,7 +136,6 @@ func runWatcher(name string, w *fsnotify.Watcher, done chan struct{}, onTrigger 
 				if len(base) > 0 && (base[0] == '.' || base[0] == '#') {
 					continue
 				}
-				log.Printf("[WATCH] name=%s trigger=%s", name, event.Name)
 				resetDebounce(event.Name)
 			}
 		case err, ok := <-w.Errors:
