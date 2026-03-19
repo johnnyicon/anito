@@ -1,100 +1,202 @@
 # Code Review — Reliability Sprint
 
-You are a senior Go engineer conducting an independent code review of a reliability sprint for the Anito project. Your job is to challenge, validate, and complete the findings. Assume nothing. Read the code yourself.
+You are a senior Go engineer conducting an independent review of the Reliability Sprint for Anito. Your job is to validate the current audit, find what it missed, and challenge the proposed fixes before implementation starts.
+
+Do not trust the audit, plan, or fix notes. Prove each claim against the code.
 
 ---
 
-## Your mission
+## Mission
 
-A reliability audit and implementation plan have already been produced. Before any code is written, you are doing a full code review to:
+Before any code is written, complete a review that does all of the following:
 
-1. **Validate the findings** — are the bugs described real? Are the code references accurate?
-2. **Catch what was missed** — are there reliability or correctness issues in the codebase not covered by the audit?
-3. **Challenge the proposed solutions** — are the fixes correct? Do they introduce new problems? Are there simpler approaches?
-4. **Review the SQLite migration plan** — is the schema sound? Are there gaps? Is `modernc.org/sqlite` the right choice?
-5. **Validate the MCP tool surface analysis** — are the UX issues described accurately? Are the proposed tool changes safe and backwards-compatible?
+1. **Validate the current findings**
+	- Are the bugs real?
+	- Are the cited files and functions correct?
+	- Are any findings overstated or framed incorrectly?
 
----
+2. **Find what the sprint materials missed**
+	- Look for correctness, reliability, lifecycle, and API-contract issues that are not captured in the current audit.
 
-## Read these first (the sprint documents)
+3. **Challenge the proposed fixes**
+	- Are they correct?
+	- Are they sufficient?
+	- Do they introduce new risks, wider blast radius, or unnecessary complexity?
 
-All documents are in `/Users/kanekoa/Workspace/anito/work/reliability-sprint/`:
+4. **Review the SQLite plan as an operational design**
+	- schema correctness
+	- locking model
+	- migration safety
+	- runtime settings
+	- long-term maintenance implications
 
-- `README.md` — sprint overview and three-track structure
-- `audit.md` — 7 reliability findings (F1–F7) with code references
-- `mcp-ux-analysis.md` — 9 MCP tool surface issues (M1–M9)
-- `plan.md` — implementation plan: Track A (immediate), Track B (SQLite), Track C (features)
-- `fixes/` — one file per finding with proposed solution and files to touch
-
----
-
-## Then read the source code
-
-The full codebase is at `/Users/kanekoa/Workspace/anito/`. Key files:
-
-| File | What to look for |
-|------|-----------------|
-| `internal/registry/registry.go` | Registry struct, save(), Register(), UpdateStatus() — audit claimed non-atomic writes and status divergence |
-| `internal/service/service.go` | Deploy(), Restart(), handleCrash(), hashPath() — core of F1, F2, F4 findings |
-| `internal/process/process.go` | Start(), Stop(), StopPID(), crash goroutine — F2 status bug confirmed here |
-| `internal/mcp/mcp.go` | All 9 tool handlers, deployInput types, toView() — all M-series findings |
-| `internal/watcher/watcher.go` | Debounce logic, event logging — F3 (watch log flood) |
-| `internal/proxy/proxy.go` | Atomic handler swap — audit said this was sound, verify |
-| `cmd/anito/main.go` | Daemon startup, service restore path — relevant to F2 and migration |
-| `internal/config/config.go` | Config loading — relevant to F3b (watch_exclude) and drain_window parsing |
-| `go.mod` | Current dependencies — relevant to SQLite package choice |
+5. **Review the external surfaces, not just internals**
+	- MCP tool contracts
+	- HTTP management API contracts
+	- any UI assumptions that already depend on those contracts
 
 ---
 
-## Specific things to verify
+## Read First
 
-### On the audit findings
+All sprint documents are in `/Users/kanekoa/Workspace/anito/work/reliability-sprint/`:
 
-- **F1 (version tracking):** `hashPath()` in service.go — confirm it hashes the wrapper script, not the underlying binary. Trace `svc.Version` from deploy through to the MCP response.
-- **F2 (status divergence):** In `process.go`, the crash goroutine calls `UpdateStatus(Failed)`. In `service.go`, `Restart()` calls `mgr.Start()` which calls `UpdateStatus(Running)`. Is there a real race window where `Failed` can overwrite `Running` AFTER a successful proxy swap? Or does the flow prevent this?
-- **F3 (watch flood):** In `watcher.go`, where exactly does the `[WATCH]` log statement sit relative to the debounce? Is it pre- or post-debounce? Is the debounce logic correct?
-- **F5 (atomic writes):** `registry.go` save() — is `os.WriteFile` truly non-atomic on APFS, or is this theoretical? What's the actual blast radius?
-- **F6 (deploy lock):** Can you construct a real scenario where two concurrent deploys cause user-visible harm, not just wasted work?
+- `README.md` — sprint overview and track ordering
+- `audit.md` — current F-series findings
+- `mcp-ux-analysis.md` — current M-series tool-surface findings
+- `plan.md` — implementation plan
+- `fixes/` — proposed solutions for some, but not all, findings
 
-### On the MCP issues
-
-- **M1 (drain_window):** In `deployInput`, `DrainWindow time.Duration` — what actually happens if you pass `"3s"` as a JSON string? Does the SDK return a parse error, or does it silently zero it?
-- **M3 (timestamps hidden):** Confirm `DeployedAt` and `UpdatedAt` are in the registry struct AND populated. Confirm `toView()` drops them. This should be a 4-line fix — verify nothing else needs to change.
-- **M2 (restart response):** After `anito_restart` calls `s.svc.Restart()`, is it safe to immediately call `s.svc.Status()`? Could there be a timing window where the status hasn't been written yet?
-
-### On the SQLite plan
-
-Review `fixes/sqlite-foundation.md`:
-- Is the schema complete? Are there missing columns or indexes?
-- The `deploy_events` table is append-only — is there a cleanup/retention strategy needed?
-- `BEGIN EXCLUSIVE TRANSACTION` for deploy locking — is this correct for SQLite? What's the timeout behavior if the lock is held?
-- `modernc.org/sqlite` adds ~15MB to the binary. Is there a lighter alternative? Is this acceptable for a local daemon?
-- The migration plan (import registry.json → rename to .migrated) — is it idempotent? What if the daemon crashes mid-migration?
-
-### Things the audit might have missed
-
-Look for:
-- Any goroutine leaks in the watcher, process manager, or log streaming
-- Any file descriptor leaks in log file handling (`buildCmd` opens a log file — is it ever closed?)
-- The `LogStream` ticker in service.go — does it drain correctly when `ctx` is cancelled?
-- The `draining` map in process.go — can it grow unbounded? Is it ever cleaned up for PIDs that were never started?
-- The proxy `Register()` path — what happens if two services try to register the same stable port concurrently?
-- The `freePort()` TOCTOU race — is there a real scenario on macOS where this causes a startup failure?
+Do **not** assume `fixes/` is complete coverage. Treat it as a partial proposal set.
 
 ---
 
-## Output format
+## Read the Source
 
-Write your review as a markdown document. For each finding:
+The codebase is at `/Users/kanekoa/Workspace/anito/`.
 
-- **Confirmed** — the bug is real, code reference is accurate, proposed fix is sound
-- **Partially confirmed** — real bug, but fix needs adjustment (explain why)
-- **Challenged** — the finding is overstated, wrong, or the fix introduces a new problem
-- **New finding** — something the audit missed
+Start here:
 
-End with a **Go/No-Go recommendation** per track:
-- Track A (immediate fixes): safe to ship as described?
-- Track B (SQLite migration): schema sound? approach correct?
-- Track C (new tools): any concerns about the proposed tool designs?
+| File | Why it matters |
+|------|----------------|
+| `internal/service/service.go` | deploy, restart, crash recovery, log streaming, version computation |
+| `internal/process/process.go` | lifecycle state writes, stop/drain behavior, crash monitor, port allocation |
+| `internal/registry/registry.go` | persisted state model and write semantics |
+| `internal/mcp/mcp.go` | MCP request/response contracts and tool descriptions |
+| `internal/server/server.go` | HTTP management API contract parity with MCP |
+| `internal/watcher/watcher.go` | debounce behavior, event filtering, watch noise |
+| `internal/proxy/proxy.go` | stable-port ownership, swap behavior, concurrency edge cases |
+| `cmd/anito/main.go` | restore path after daemon start |
+| `internal/config/config.go` | config parsing, duration parsing, watch config shape |
+| `go.mod` | SQLite dependency choice |
 
-Write the output to `/Users/kanekoa/Workspace/anito/work/reliability-sprint/code-review.md`.
+---
+
+## Required Review Areas
+
+### 1. Audit Findings
+
+For each important claim in the audit, determine whether it is:
+
+- **Confirmed**
+- **Partially confirmed**
+- **Challenged**
+- **Superseded by a more important issue**
+
+At minimum, re-check these:
+
+- F1 version tracking
+- F2 status divergence
+- F3/F7 watch behavior and log flood
+- F4 deploy feedback / version-change visibility
+- F5 atomic registry writes
+- F6 concurrent deploy behavior
+
+### 2. Lifecycle Invariants and Rollback Semantics
+
+This is mandatory. Do not stop at the audit framing.
+
+Trace the actual lifecycle across these paths:
+
+- fresh deploy
+- redeploy
+- explicit restart
+- crash recovery
+- daemon restore on startup
+- intentional stop
+- remove
+
+For each path, answer:
+
+- When does Anito claim a service is `running`?
+- What state is written before health check passes?
+- What state is written before proxy swap succeeds?
+- What happens if `waitHealthy()` fails?
+- What happens if `Swap()` fails?
+- What happens to the old process if the replacement path fails halfway through?
+- Is registry state rolled back or left stale?
+
+### 3. Contract Parity Across MCP, HTTP API, and UI
+
+Do not treat MCP as the only external surface.
+
+Check:
+
+- whether MCP and HTTP deploy inputs expose the same operational controls
+- whether fields accepted by the external APIs are actually passed through to the service layer
+- whether any service-layer controls are missing from one external surface
+- whether response shapes are consistent where they should be
+- whether UI code already assumes fields that one external surface omits
+
+### 4. SQLite Plan Review
+
+Review `fixes/sqlite-foundation.md` as an operational foundation, not just a schema sketch.
+
+You must evaluate:
+
+- schema completeness
+- missing columns or indexes
+- migration idempotency
+- behavior if the daemon crashes during migration
+- event-table retention strategy
+- lock granularity: per-service vs whole-database
+- whether `BEGIN EXCLUSIVE` is appropriate
+- timeout behavior under lock contention
+- runtime settings that should be explicitly decided:
+  - WAL mode
+  - busy timeout
+  - foreign key enforcement
+
+Also evaluate whether `modernc.org/sqlite` is an appropriate dependency for a local single-binary daemon.
+
+### 5. Watchers, Logging, and Resource Ownership
+
+Look specifically for:
+
+- goroutine leaks
+- timer/ticker cleanup
+- file descriptor ownership for service log files
+- unbounded maps or retained process metadata
+- misleading or noisy daemon logs
+- watch-trigger behavior on non-source files
+
+### 6. Concurrency and Port Ownership
+
+Evaluate:
+
+- concurrent deploy/restart races for the same service
+- concurrent registration attempts on the same stable port
+- `freePort()` TOCTOU behavior for internal ports
+- whether proposed locking approaches are correct and cancellation-safe
+
+---
+
+## Important Prompts for Your Own Analysis
+
+- If a finding is wrong as framed, say so.
+- If a finding is technically true but not the most important problem, say so.
+- If a proposed fix solves the symptom but not the invariant, say so.
+- If two sprint documents contradict each other, call that out explicitly.
+
+---
+
+## Output Requirements
+
+Write the review as a markdown document at:
+
+`/Users/kanekoa/Workspace/anito/work/reliability-sprint/code-review.md`
+
+Structure it like this:
+
+1. **Executive Summary**
+2. **Findings**
+	- ordered by severity
+	- each finding labeled as `Confirmed`, `Partially confirmed`, `Challenged`, `Superseded`, or `New finding`
+	- explain whether the current proposed fix is sound, incomplete, or risky
+3. **Contradictions or Gaps in the Sprint Docs**
+4. **Track Recommendations**
+	- Track A: `Go` or `No-Go`, with reasons
+	- Track B: `Go` or `No-Go`, with reasons
+	- Track C: `Go` or `No-Go`, with reasons
+
+Focus on bugs, state-model mistakes, rollout risk, and missing tests. Summaries are secondary.
