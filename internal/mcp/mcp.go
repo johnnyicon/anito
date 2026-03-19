@@ -8,6 +8,7 @@ package mcp
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log"
 	"net/http"
@@ -16,6 +17,7 @@ import (
 	sdkmcp "github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/johnnyicon/anito/internal/doctor"
+	"github.com/johnnyicon/anito/internal/issues"
 	"github.com/johnnyicon/anito/internal/registry"
 	"github.com/johnnyicon/anito/internal/service"
 	"github.com/johnnyicon/anito/internal/setup"
@@ -24,11 +26,31 @@ import (
 // Server wraps the MCP SDK server and registers Anito tools.
 type Server struct {
 	svc  *service.Service
+	iss  *issues.Store
 	port int
 }
 
-func New(svc *service.Service, port int) *Server {
-	return &Server{svc: svc, port: port}
+func New(svc *service.Service, iss *issues.Store, port int) *Server {
+	return &Server{svc: svc, iss: iss, port: port}
+}
+
+// logErr auto-logs a tool error to the issue store. Called in each tool handler
+// when err != nil. input is the typed input struct — marshalled to JSON inline.
+func (s *Server) logErr(tool string, input any, err error) {
+	if err == nil || s.iss == nil {
+		return
+	}
+	inputJSON := ""
+	if b, merr := json.Marshal(input); merr == nil {
+		inputJSON = string(b)
+	}
+	_ = s.iss.Append(issues.Issue{
+		Source:   "mcp:" + tool,
+		Tool:     tool,
+		Input:    inputJSON,
+		Error:    err.Error(),
+		Severity: "error",
+	})
 }
 
 // Start begins serving the MCP StreamableHTTP endpoint. Blocks until error.
@@ -69,6 +91,7 @@ type deployInput struct {
 	DrainWindow        string   `json:"drain_window"          jsonschema:"grace period between proxy swap and SIGTERM to the old process (e.g. '3s', '500ms'). Use this for SSE services to let in-flight connections finish."`
 	HealthCheckTimeout string   `json:"health_check_timeout"  jsonschema:"how long to wait for /health to return 200 (e.g. '30s', '60s'). Default: '15s'. Increase for slow-starting services."`
 	RestartPolicy      string   `json:"restart_policy"        jsonschema:"crash restart behavior: 'on-watch' (default, restart only if watch paths set), 'always' (always restart on crash), 'never' (never auto-restart)"`
+	ConfigPath         string   `json:"config_path,omitempty" jsonschema:"absolute path to the .anito/config.yaml that defines this service. Doctor will flag services without a recorded config path."`
 }
 
 type serviceView struct {
@@ -81,6 +104,7 @@ type serviceView struct {
 	Status         string    `json:"status"`
 	PID            int       `json:"pid,omitempty"`
 	BinaryPath     string    `json:"binary_path"`
+	ConfigPath     string    `json:"config_path,omitempty"`
 	DeployedAt     time.Time `json:"deployed_at,omitempty"`
 	UpdatedAt      time.Time `json:"updated_at,omitempty"`
 	LastDeployedAt time.Time `json:"last_deployed_at,omitempty"`
@@ -222,6 +246,41 @@ type doctorResult struct {
 	Healthy  bool                 `json:"healthy"`
 }
 
+type issuesQueryInput struct {
+	Lines  int    `json:"lines"  jsonschema:"number of recent issues to return (default: 20)"`
+	Source string `json:"source" jsonschema:"filter by source prefix, e.g. 'mcp:', 'cli:', 'consumer:'. Omit for all sources."`
+}
+
+type issueView struct {
+	ID        string    `json:"id"`
+	Timestamp time.Time `json:"timestamp"`
+	Source    string    `json:"source"`
+	Tool      string    `json:"tool,omitempty"`
+	Input     string    `json:"input,omitempty"`
+	Error     string    `json:"error"`
+	Context   string    `json:"context,omitempty"`
+	RepoPath  string    `json:"repo_path,omitempty"`
+	Severity  string    `json:"severity"`
+}
+
+type issuesOutput struct {
+	Issues []issueView `json:"issues"`
+}
+
+type reportInput struct {
+	Error    string `json:"error"              jsonschema:"required — what went wrong"`
+	Source   string `json:"source"             jsonschema:"who is reporting: use 'consumer:<your-service-name>' to identify the calling repo"`
+	Tool     string `json:"tool,omitempty"     jsonschema:"which Anito tool or CLI command was being used when the error occurred"`
+	Context  string `json:"context,omitempty"  jsonschema:"free-text context: what you were doing, what you observed, any relevant state"`
+	RepoPath string `json:"repo_path,omitempty" jsonschema:"absolute path to the consuming repo root"`
+	Severity string `json:"severity,omitempty" jsonschema:"'error' (default), 'warning', or 'info'"`
+}
+
+type reportOutput struct {
+	ID     string `json:"id"`
+	Status string `json:"status"`
+}
+
 // --- tool registration ---
 
 func (s *Server) registerTools(srv *sdkmcp.Server) {
@@ -269,9 +328,11 @@ func (s *Server) registerTools(srv *sdkmcp.Server) {
 			DrainWindow:        drainWindow,
 			HealthCheckTimeout: hcTimeout,
 			RestartPolicy:      in.RestartPolicy,
+			ConfigPath:         in.ConfigPath,
 		})
 		if err != nil {
 			log.Printf("[MCP] tool=anito_deploy name=%s error=%q", in.Name, err)
+			s.logErr("anito_deploy", in, err)
 			return nil, serviceView{}, err
 		}
 		return nil, toView(svc), nil
@@ -325,6 +386,7 @@ func (s *Server) registerTools(srv *sdkmcp.Server) {
 		log.Printf("[MCP] tool=anito_restart name=%s", in.Name)
 		if err := s.svc.Restart(in.Name); err != nil {
 			log.Printf("[MCP] tool=anito_restart name=%s error=%q", in.Name, err)
+			s.logErr("anito_restart", in, err)
 			return nil, serviceView{}, err
 		}
 		svc, err := s.svc.Status(in.Name)
@@ -368,6 +430,7 @@ func (s *Server) registerTools(srv *sdkmcp.Server) {
 		port, err := s.svc.Reserve(in.Name, in.PreferredPort)
 		if err != nil {
 			log.Printf("[MCP] tool=anito_reserve name=%s error=%q", in.Name, err)
+			s.logErr("anito_reserve", in, err)
 			return nil, reserveOutput{}, err
 		}
 		return nil, reserveOutput{
@@ -476,6 +539,7 @@ func (s *Server) registerTools(srv *sdkmcp.Server) {
 		result, err := doctor.Check(in.Path, s.svc)
 		if err != nil {
 			log.Printf("[MCP] tool=anito_doctor path=%s error=%q", in.Path, err)
+			s.logErr("anito_doctor", in, err)
 			return nil, doctorResult{}, err
 		}
 		out := doctorResult{
@@ -503,6 +567,77 @@ func (s *Server) registerTools(srv *sdkmcp.Server) {
 		}
 		return nil, out, nil
 	})
+
+	sdkmcp.AddTool(srv, &sdkmcp.Tool{
+		Name: "anito_issues",
+		Description: "Retrieve recent issues logged by Anito — tool errors, deploy failures, and manual reports from consuming repos. " +
+			"Use this to investigate what went wrong after a failed deploy or restart. " +
+			"Filter by source prefix: 'mcp:' for MCP tool errors, 'cli:' for CLI errors, 'consumer:' for reports from consuming repos.",
+	}, func(ctx context.Context, req *sdkmcp.CallToolRequest, in issuesQueryInput) (*sdkmcp.CallToolResult, issuesOutput, error) {
+		log.Printf("[MCP] tool=anito_issues lines=%d source=%q", in.Lines, in.Source)
+		n := in.Lines
+		if n <= 0 {
+			n = 20
+		}
+		list, err := s.iss.Recent(n, in.Source)
+		if err != nil {
+			return nil, issuesOutput{}, err
+		}
+		out := issuesOutput{Issues: make([]issueView, len(list))}
+		for i, iss := range list {
+			out.Issues[i] = issueView{
+				ID:        iss.ID,
+				Timestamp: iss.Timestamp,
+				Source:    iss.Source,
+				Tool:      iss.Tool,
+				Input:     iss.Input,
+				Error:     iss.Error,
+				Context:   iss.Context,
+				RepoPath:  iss.RepoPath,
+				Severity:  iss.Severity,
+			}
+		}
+		return nil, out, nil
+	})
+
+	sdkmcp.AddTool(srv, &sdkmcp.Tool{
+		Name: "anito_report",
+		Description: "Report an issue to Anito from a consuming repo. Use this when you observe a problem related to an Anito tool or service — " +
+			"failed deploys, unexpected restarts, port conflicts, or anything the consuming repo's agent has context about that Anito itself cannot see. " +
+			"Set source to 'consumer:<your-service-name>' so the report is attributable. " +
+			"Include context: what you were doing, what you observed, what the service was doing at the time.",
+	}, func(ctx context.Context, req *sdkmcp.CallToolRequest, in reportInput) (*sdkmcp.CallToolResult, reportOutput, error) {
+		log.Printf("[MCP] tool=anito_report source=%q error=%q", in.Source, in.Error)
+		if in.Error == "" {
+			return nil, reportOutput{}, fmt.Errorf("error field is required")
+		}
+		source := in.Source
+		if source == "" {
+			source = "consumer:unknown"
+		}
+		sev := in.Severity
+		if sev == "" {
+			sev = "error"
+		}
+		iss := issues.Issue{
+			Source:   source,
+			Tool:     in.Tool,
+			Error:    in.Error,
+			Context:  in.Context,
+			RepoPath: in.RepoPath,
+			Severity: sev,
+		}
+		if err := s.iss.Append(iss); err != nil {
+			return nil, reportOutput{}, err
+		}
+		// Re-read to get the generated ID
+		recent, _ := s.iss.Recent(1, source)
+		id := ""
+		if len(recent) > 0 {
+			id = recent[len(recent)-1].ID
+		}
+		return nil, reportOutput{ID: id, Status: "logged"}, nil
+	})
 }
 
 func toView(svc *registry.Service) serviceView {
@@ -516,6 +651,7 @@ func toView(svc *registry.Service) serviceView {
 		Status:         string(svc.Status),
 		PID:            svc.PID,
 		BinaryPath:     svc.BinaryPath,
+		ConfigPath:     svc.ConfigPath,
 		DeployedAt:     svc.DeployedAt,
 		UpdatedAt:      svc.UpdatedAt,
 		LastDeployedAt: svc.LastDeployedAt,

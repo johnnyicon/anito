@@ -8,6 +8,42 @@ Format: `## [date] — description`, breaking changes marked **BREAKING**.
 
 ---
 
+## 2026-03-19 — config_path tracking: port-to-source mapping, worktree detection
+
+New `config_path` field on every service registry entry. Records the absolute path to the `.anito/config.yaml` that produced the deploy.
+
+**What's new:**
+- `config_path` stored in `~/.anito/registry.json` per service
+- `anito status <name>` shows the config path (or a remediation hint if missing)
+- `anito_status` / `anito_deploy` / `anito_services` MCP responses include `config_path`
+- `anito_deploy` accepts a `config_path` parameter
+
+**Doctor now errors on:**
+- Service registered with no `config_path` → error "no config path recorded"
+- `config_path` recorded but file no longer exists → error "config file no longer exists"
+- `config_path` differs from the config being checked → info, with worktree detection (path contains `/worktrees/`)
+
+**Migration:** Existing services will show `config_path` errors in `anito doctor` until redeployed with `anito deploy`. No other action required.
+
+---
+
+## 2026-03-19 — Issue logging: anito_issues, anito_report, anito issues, anito report
+
+New issue logging system. Errors are auto-logged when MCP tools fail; consuming repos can manually report issues with their own context.
+
+**New MCP tools:** `anito_issues`, `anito_report`
+**New CLI commands:** `anito issues`, `anito report`
+**New HTTP endpoints:** `POST /issues`, `GET /issues`
+**New file:** `~/.anito/issues.jsonl` (append-only JSONL log)
+
+**Auto-logging:** `anito_deploy`, `anito_restart`, `anito_reserve`, `anito_doctor` now auto-log errors to `issues.jsonl` with source, inputs, and error message.
+
+**Consuming repo participation:** Call `anito_report` (MCP) or `anito report` (CLI) from any repo to log an issue with context Anito cannot see — failed deploys observed from the outside, port conflicts, service misbehaviour after a restart.
+
+No action required in consuming repos — additive.
+
+---
+
 ## 2026-03-19 — anito_doctor MCP tool + anito doctor CLI
 
 New tool on both surfaces: validate a repo's `.anito/config.yaml` and check

@@ -127,6 +127,15 @@ func checkConfig(cfgPath, relPath, repoRoot string, svc StatusFetcher) ConfigRes
 		})
 	}
 
+	// env_file must be absolute — relative paths depend on CWD at deploy time,
+	// which varies by caller (CLI vs MCP) and can silently break on the daemon.
+	if cfg.EnvFile != "" && !filepath.IsAbs(cfg.EnvFile) {
+		cr.add(Issue{Severity: "error", Field: "env_file",
+			Message: fmt.Sprintf("relative path %q is not allowed", cfg.EnvFile),
+			Action:  "use an absolute path in env_file to avoid resolution issues across callers",
+		})
+	}
+
 	// Valid type.
 	if cfg.Type != "binary" && cfg.Type != "static" {
 		cr.add(Issue{Severity: "error", Field: "type",
@@ -219,6 +228,29 @@ func checkConfig(cfgPath, relPath, repoRoot string, svc StatusFetcher) ConfigRes
 					Action:  fmt.Sprintf("run `anito restart %s` or `anito deploy` to recover", cfg.Name),
 				})
 			}
+
+			// Config path checks.
+			if reg.ConfigPath == "" {
+				cr.add(Issue{Severity: "error", Field: "config_path",
+					Message: "no config path recorded for this service",
+					Action:  "redeploy with `anito deploy` or provide config_path in anito_deploy — config files are required",
+				})
+			} else if _, err := os.Stat(reg.ConfigPath); os.IsNotExist(err) {
+				cr.add(Issue{Severity: "error", Field: "config_path",
+					Message: fmt.Sprintf("config file no longer exists: %s", reg.ConfigPath),
+					Action:  "restore the config file or redeploy from its new location",
+				})
+			} else if reg.ConfigPath != cfgPath {
+				// Config path differs — could be a worktree deploy or a moved config.
+				label := "different location"
+				if isWorktreePath(reg.ConfigPath) {
+					label = "worktree"
+				}
+				cr.add(Issue{Severity: "info", Field: "config_path",
+					Message: fmt.Sprintf("service was deployed from a %s: %s", label, reg.ConfigPath),
+					Action:  "run `anito deploy` from this config to update the registered source",
+				})
+			}
 		}
 	}
 
@@ -265,6 +297,13 @@ func detectPortConflict(port int) string {
 		}
 	}
 	return ""
+}
+
+// isWorktreePath reports whether path looks like it came from a git worktree.
+// Matches both the Claude Code worktree convention (.claude/worktrees/) and
+// the common git worktree convention (../worktrees/).
+func isWorktreePath(path string) bool {
+	return strings.Contains(path, "/worktrees/")
 }
 
 // findAssets walks dir and returns unique asset extensions found and total count.

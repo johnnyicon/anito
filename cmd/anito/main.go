@@ -15,6 +15,7 @@ import (
 
 	"github.com/johnnyicon/anito/internal/client"
 	"github.com/johnnyicon/anito/internal/config"
+	"github.com/johnnyicon/anito/internal/issues"
 	mcpserver "github.com/johnnyicon/anito/internal/mcp"
 	"github.com/johnnyicon/anito/internal/process"
 	"github.com/johnnyicon/anito/internal/proxy"
@@ -150,6 +151,58 @@ func main() {
 			runLogs(cli, logName)
 		}
 
+	case "issues":
+		n := 20
+		src := ""
+		for i, arg := range os.Args[2:] {
+			if arg == "--lines" || arg == "-n" {
+				if i+1 < len(os.Args[2:]) {
+					fmt.Sscanf(os.Args[3+i], "%d", &n)
+				}
+			}
+			if arg == "--source" {
+				if i+1 < len(os.Args[2:]) {
+					src = os.Args[3+i]
+				}
+			}
+		}
+		runIssues(cli, n, src)
+
+	case "report":
+		if len(os.Args) < 3 {
+			fmt.Fprintf(os.Stderr, "usage: anito report <message> [--source <name>] [--context <text>] [--repo <path>]\n")
+			os.Exit(1)
+		}
+		msg := os.Args[2]
+		src := ""
+		ctx := ""
+		repo := ""
+		for i, arg := range os.Args[3:] {
+			if arg == "--source" && i+1 < len(os.Args[3:]) {
+				src = os.Args[4+i]
+			}
+			if arg == "--context" && i+1 < len(os.Args[3:]) {
+				ctx = os.Args[4+i]
+			}
+			if arg == "--repo" && i+1 < len(os.Args[3:]) {
+				repo = os.Args[4+i]
+			}
+		}
+		if src == "" {
+			src = "cli:report"
+		}
+		if err := cli.Report(issues.Issue{
+			Source:   src,
+			Tool:     "report",
+			Error:    msg,
+			Context:  ctx,
+			RepoPath: repo,
+			Severity: "info",
+		}); err != nil {
+			fatal(err)
+		}
+		fmt.Println("reported")
+
 	case "mcp":
 		runMCPInfo(defaultMCPPort)
 
@@ -252,9 +305,24 @@ func runDeploy(cli *client.Client, configPath string) {
 		fatal(err)
 	}
 
+	absConfig, err := filepath.Abs(configPath)
+	if err != nil {
+		fatal(err)
+	}
 	absOutput, err := filepath.Abs(cfg.Output)
 	if err != nil {
 		fatal(err)
+	}
+
+	// Resolve env_file to absolute so the daemon can open it regardless of
+	// its own working directory. Relative paths are resolved from the caller's
+	// CWD, consistent with how output and config_path are handled above.
+	absEnvFile := cfg.EnvFile
+	if absEnvFile != "" && !filepath.IsAbs(absEnvFile) {
+		absEnvFile, err = filepath.Abs(absEnvFile)
+		if err != nil {
+			fatal(err)
+		}
 	}
 
 	if cfg.Build != "" {
@@ -281,12 +349,13 @@ func runDeploy(cli *client.Client, configPath string) {
 		Path:               absOutput,
 		Args:               cfg.Args,
 		StablePort:         cfg.Port,
-		EnvFile:            cfg.EnvFile,
+		EnvFile:            absEnvFile,
 		HealthCheck:        cfg.HealthCheck,
 		WatchPaths:         cfg.Watch,
 		DrainWindow:        cfg.DrainWindow,
 		HealthCheckTimeout: cfg.HealthCheckTimeout,
 		RestartPolicy:      cfg.RestartPolicy,
+		ConfigPath:         absConfig,
 	})
 	if err != nil {
 		fatal(err)
@@ -353,8 +422,39 @@ func runStatus(cli *client.Client, name string) {
 		fmt.Printf("pid:           %d (internal :%d)\n", svc.PID, svc.InternalPort)
 	}
 	fmt.Printf("binary:        %s\n", svc.BinaryPath)
+	if svc.ConfigPath != "" {
+		fmt.Printf("config:        %s\n", svc.ConfigPath)
+	} else {
+		fmt.Printf("config:        (none recorded — redeploy to track)\n")
+	}
 	fmt.Printf("deployed:      %s\n", svc.DeployedAt.Format(time.DateTime))
 	fmt.Printf("updated:       %s\n", svc.UpdatedAt.Format(time.DateTime))
+}
+
+func runIssues(cli *client.Client, n int, source string) {
+	list, err := cli.Issues(n, source)
+	if err != nil {
+		fatal(err)
+	}
+	if len(list) == 0 {
+		fmt.Println("no issues logged")
+		return
+	}
+	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+	fmt.Fprintln(w, "TIME\tSEVERITY\tSOURCE\tERROR")
+	for _, iss := range list {
+		errMsg := iss.Error
+		if len(errMsg) > 60 {
+			errMsg = errMsg[:57] + "..."
+		}
+		fmt.Fprintf(w, "%s\t%s\t%s\t%s\n",
+			iss.Timestamp.Format("2006-01-02 15:04:05"),
+			iss.Severity,
+			iss.Source,
+			errMsg,
+		)
+	}
+	w.Flush()
 }
 
 func runLogs(cli *client.Client, name string) {
@@ -649,14 +749,16 @@ func runDaemon(apiPort, mcpPort int, dataDir string) {
 	svc := service.New(reg, mgr, prx, logDir, wtch)
 	svc.StartWatchers()
 
-	mcpSrv := mcpserver.New(svc, mcpPort)
+	iss := issues.New(dataDir)
+
+	mcpSrv := mcpserver.New(svc, iss, mcpPort)
 	go func() {
 		if err := mcpSrv.Start(); err != nil {
 			log.Printf("MCP server error: %v", err)
 		}
 	}()
 
-	srv := server.New(svc, apiPort, version)
+	srv := server.New(svc, iss, apiPort, version)
 	log.Fatal(srv.Start())
 }
 
@@ -708,6 +810,8 @@ Usage:
   anito stop <name>                         stop a service
   anito restart <name>                      restart a service
   anito remove <name>                       stop and remove a service
+  anito issues [--lines N] [--source pfx]  show recent logged issues (errors, failures, consumer reports)
+  anito report <message> [flags]            manually report an issue (--source name, --context text, --repo path)
   anito reload                              reload the daemon with the current binary (launchd)
   anito version                             print the daemon binary version
   anito mcp                                 show MCP server connection info

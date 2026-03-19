@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/johnnyicon/anito/internal/issues"
 	"github.com/johnnyicon/anito/internal/registry"
 )
 
@@ -36,6 +37,7 @@ type DeployRequest struct {
 	DrainWindow        time.Duration        `json:"drain_window,omitempty"`
 	HealthCheckTimeout time.Duration        `json:"health_check_timeout,omitempty"`
 	RestartPolicy      string               `json:"restart_policy,omitempty"`
+	ConfigPath         string               `json:"config_path,omitempty"`
 }
 
 func (c *Client) Deploy(req DeployRequest) (*registry.Service, error) {
@@ -147,6 +149,24 @@ func (c *Client) postJSON(path string, body any, out any) error {
 		return json.NewDecoder(resp.Body).Decode(out)
 	}
 	return nil
+}
+
+func (c *Client) Issues(n int, source string) ([]issues.Issue, error) {
+	path := fmt.Sprintf("/issues?lines=%d", n)
+	if source != "" {
+		path += "&source=" + source
+	}
+	var out struct {
+		Issues []issues.Issue `json:"issues"`
+	}
+	if err := c.getJSON(path, &out); err != nil {
+		return nil, err
+	}
+	return out.Issues, nil
+}
+
+func (c *Client) Report(iss issues.Issue) error {
+	return c.postJSON("/issues", iss, nil)
 }
 
 func parseError(resp *http.Response) error {

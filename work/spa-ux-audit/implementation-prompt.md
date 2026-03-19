@@ -306,9 +306,11 @@ A bug was filed (`2026-03-19T140134-worktree-frontend-stale-after-restart.md`) a
 1. Git worktrees don't inherit `node_modules` — the dev wrapper script for worktree services must check for and handle missing `node_modules`.
 2. Vite's module graph cache at `node_modules/.vite/` goes stale after cherry-picks that add new files. The dev wrapper script should pass `--force` to Vite when running from a worktree context.
 
-Add a doctor check: if a service's `config_path` is within a path containing `.claude/worktrees/` or `.git/worktrees/`, emit a warning: "worktree detected — ensure node_modules is installed and use `vite --force` in your start script if serving a Vite frontend."
+**Anito already has worktree detection.** `internal/doctor/doctor.go` has `isWorktreePath()` (checks for `/worktrees/` in the path) and already surfaces an `info` issue when a service's registered `config_path` is from a worktree. This is in the registry alignment section of `checkConfig()`.
 
-This doctor check belongs in `internal/doctor/doctor.go`. Wire it into the existing `Check()` function.
+What's missing is Node.js/frontend-specific checks. **Extend the existing worktree branch** (around line 246 in `doctor.go`) to also check:
+- If the service `type` is `binary` and the binary path or config path is under a worktree, look for a `package.json` adjacent to the config. If found, check whether `node_modules/` exists next to it. If missing: add an `error`-severity issue: "worktree frontend detected but node_modules is missing — run `npm install` in \<dir\> before deploying."
+- If `node_modules/` exists but `node_modules/.vite/` also exists (indicating a cached Vite build), add an `info` issue: "Vite cache present in worktree — if content appears stale after cherry-pick, use `vite --force` in your start script."
 
 ---
 

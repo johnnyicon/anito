@@ -25,3 +25,6 @@ example/hello-service/hello-service
 
 # Scratch / temp files
 tmp/
+
+# Claude Code worktrees (ephemeral agent workspaces)
+.claude/worktrees/

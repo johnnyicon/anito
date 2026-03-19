@@ -26,11 +26,19 @@ const (
 	StatusFailed  ServiceStatus = "failed"
 )
 
+// StartEvent records a single start attempt for a service.
+type StartEvent struct {
+	StartedAt time.Time     `json:"started_at"`
+	ExitCode  int           `json:"exit_code"`  // -1 if still running
+	Duration  time.Duration `json:"duration"`   // 0 if still running
+}
+
 // Service is a registered service entry.
 type Service struct {
 	Name         string        `json:"name"`
 	Type         ServiceType   `json:"type"`
 	Version      string        `json:"version,omitempty"`       // optional semantic version tag, e.g. "v1.2.3"
+	ConfigPath   string        `json:"config_path,omitempty"`   // absolute path to the .anito/config.yaml that produced this deploy
 	BinaryPath   string        `json:"binary_path"`             // binary path (TypeBinary) or static dir (TypeStatic)
 	Args         []string      `json:"args,omitempty"`          // optional arguments passed to the binary
 	StablePort   int           `json:"stable_port"`             // permanent port exposed to consumers via proxy
@@ -46,6 +54,12 @@ type Service struct {
 	DeployedAt   time.Time     `json:"deployed_at"`
 	UpdatedAt    time.Time     `json:"updated_at"`
 	LastDeployedAt time.Time   `json:"last_deployed_at,omitempty"`
+
+	// Runtime observability fields (set by service layer, persisted to registry).
+	LastStartedAt time.Time    `json:"last_started_at,omitempty"` // when the current (or last) process started
+	CrashAttempts int          `json:"crash_attempts,omitempty"`  // number of restart attempts in current crash loop
+	GaveUp        bool         `json:"gave_up,omitempty"`         // true if crash backoff hit max attempts
+	StartHistory  []StartEvent `json:"start_history,omitempty"`   // ring buffer, last 10 starts
 }
 
 // Registry manages the on-disk service registry.
@@ -174,6 +188,51 @@ func (r *Registry) UpdateInternalPort(name string, port int) error {
 		return fmt.Errorf("service %q not found", name)
 	}
 	s.InternalPort = port
+	s.UpdatedAt = time.Now()
+	return r.save()
+}
+
+// UpdateStartHistory records a new start event in the ring buffer (last 10 entries).
+// Call with exitCode=-1, duration=0 when the process is starting.
+// Call again with the actual exit code and duration when it exits.
+func (r *Registry) UpdateStartHistory(name string, event StartEvent) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	s, ok := r.services[name]
+	if !ok {
+		return fmt.Errorf("service %q not found", name)
+	}
+	s.StartHistory = append(s.StartHistory, event)
+	if len(s.StartHistory) > 10 {
+		s.StartHistory = s.StartHistory[len(s.StartHistory)-10:]
+	}
+	s.UpdatedAt = time.Now()
+	return r.save()
+}
+
+// UpdateLastStarted records when the current process started.
+func (r *Registry) UpdateLastStarted(name string, t time.Time) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	s, ok := r.services[name]
+	if !ok {
+		return fmt.Errorf("service %q not found", name)
+	}
+	s.LastStartedAt = t
+	s.UpdatedAt = time.Now()
+	return r.save()
+}
+
+// UpdateCrashState records the crash attempt counter and gave-up state.
+func (r *Registry) UpdateCrashState(name string, attempts int, gaveUp bool) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	s, ok := r.services[name]
+	if !ok {
+		return fmt.Errorf("service %q not found", name)
+	}
+	s.CrashAttempts = attempts
+	s.GaveUp = gaveUp
 	s.UpdatedAt = time.Now()
 	return r.save()
 }

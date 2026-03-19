@@ -170,6 +170,32 @@ Returns:
 
 ---
 
+### `anito_issues`
+Retrieve recent issues logged by Anito — tool errors, deploy failures, and manual reports from consuming repos.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `lines` | int | no | Number of recent issues to return (default: 20) |
+| `source` | string | no | Filter by source prefix: `mcp:` for MCP tool errors, `cli:` for CLI errors, `consumer:` for reports from consuming repos. Omit for all sources. |
+
+---
+
+### `anito_report`
+Report an issue to Anito from a consuming repo. Use when you observe a problem related to an Anito tool or service that Anito itself cannot see — failed deploys, unexpected restarts, port conflicts, or any state the consuming repo's agent has context about.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `error` | string | yes | What went wrong |
+| `source` | string | yes | Who is reporting — use `consumer:<your-service-name>` to identify the calling repo |
+| `tool` | string | no | Which Anito tool or CLI command was being used |
+| `context` | string | no | Free-text context: what you were doing, what you observed, relevant state |
+| `repo_path` | string | no | Absolute path to the consuming repo root |
+| `severity` | string | no | `"error"` (default), `"warning"`, or `"info"` |
+
+Returns `{ id, status: "logged" }`.
+
+---
+
 ### `anito_reserve`
 Reserve a stable port for a named service before its binary exists. Called by the LLM after `anito_setup` returns composite allocations — locks each port in the registry so nothing else can claim it before the binary is built and deployed.
 

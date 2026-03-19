@@ -105,6 +105,7 @@ type DeployRequest struct {
 	DrainWindow        time.Duration // grace period between proxy swap and SIGTERM to old process (0 = use defaultDrainWindow)
 	HealthCheckTimeout time.Duration // how long to poll /health (0 = use defaultHealthCheckTimeout)
 	RestartPolicy      string        // "always" | "on-watch" | "never" (default: "on-watch")
+	ConfigPath         string        // absolute path to the .anito/config.yaml that produced this deploy
 }
 
 // lockDeploy acquires a per-service deploy lock and returns an unlock function.
@@ -167,6 +168,7 @@ func (s *Service) Deploy(req DeployRequest) (*registry.Service, error) {
 		DrainWindow:        drainWindow,
 		HealthCheckTimeout: hcTimeout,
 		RestartPolicy:      restartPolicy,
+		ConfigPath:         req.ConfigPath,
 	}
 
 	if err := s.reg.Register(svc); err != nil {
@@ -194,10 +196,13 @@ func (s *Service) Deploy(req DeployRequest) (*registry.Service, error) {
 		oldPID = svc.PID // fall back to registry PID if not tracked in-memory
 	}
 
+	startedAt := time.Now()
 	internalPort, err := s.mgr.Start(svc)
 	if err != nil {
 		return nil, err
 	}
+	_ = s.reg.UpdateLastStarted(req.Name, startedAt)
+	_ = s.reg.UpdateStartHistory(req.Name, registry.StartEvent{StartedAt: startedAt, ExitCode: -1})
 
 	if err := waitHealthy(internalPort, req.HealthCheck, hcTimeout); err != nil {
 		_ = s.mgr.Stop(req.Name)
@@ -226,6 +231,7 @@ func (s *Service) Deploy(req DeployRequest) (*registry.Service, error) {
 	s.crashMu.Lock()
 	delete(s.crashAttempts, req.Name)
 	s.crashMu.Unlock()
+	_ = s.reg.UpdateCrashState(req.Name, 0, false)
 
 	if oldCmd != nil {
 		pid := oldPID
@@ -297,11 +303,14 @@ func (s *Service) Restart(name string) error {
 		oldPID = svc.PID
 	}
 
+	startedAt := time.Now()
 	internalPort, err := s.mgr.Start(svc)
 	if err != nil {
 		log.Printf("[RESTART] name=%s error=%q", name, err)
 		return err
 	}
+	_ = s.reg.UpdateLastStarted(name, startedAt)
+	_ = s.reg.UpdateStartHistory(name, registry.StartEvent{StartedAt: startedAt, ExitCode: -1})
 
 	hcTimeout := svc.HealthCheckTimeout
 	if hcTimeout == 0 {
@@ -332,6 +341,7 @@ func (s *Service) Restart(name string) error {
 	s.crashMu.Lock()
 	delete(s.crashAttempts, name)
 	s.crashMu.Unlock()
+	_ = s.reg.UpdateCrashState(name, 0, false)
 
 	drainWindow := svc.DrainWindow
 	if drainWindow == 0 {
@@ -430,10 +440,12 @@ func (s *Service) handleCrash(name string) {
 	if attempt >= len(crashBackoffDurations) {
 		s.crashMu.Unlock()
 		log.Printf("[CRASH_GIVE_UP] name=%s attempts=%d", name, attempt)
+		_ = s.reg.UpdateCrashState(name, attempt, true)
 		return
 	}
 	s.crashAttempts[name] = attempt + 1
 	s.crashMu.Unlock()
+	_ = s.reg.UpdateCrashState(name, attempt+1, false)
 
 	wait := crashBackoffDurations[attempt]
 	log.Printf("[RESTART] name=%s reason=crash attempt=%d waiting=%s", name, attempt+1, wait)

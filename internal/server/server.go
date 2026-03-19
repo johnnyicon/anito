@@ -14,6 +14,7 @@ import (
 	"github.com/labstack/echo/v4"
 	echomiddleware "github.com/labstack/echo/v4/middleware"
 
+	"github.com/johnnyicon/anito/internal/issues"
 	"github.com/johnnyicon/anito/internal/registry"
 	"github.com/johnnyicon/anito/internal/service"
 )
@@ -24,12 +25,13 @@ var distFiles embed.FS
 // Server is the Anito HTTP management API (default port 7700).
 type Server struct {
 	svc     *service.Service
+	iss     *issues.Store
 	port    int
 	version string
 }
 
-func New(svc *service.Service, port int, version string) *Server {
-	return &Server{svc: svc, port: port, version: version}
+func New(svc *service.Service, iss *issues.Store, port int, version string) *Server {
+	return &Server{svc: svc, iss: iss, port: port, version: version}
 }
 
 func (s *Server) Start() error {
@@ -64,6 +66,8 @@ func (s *Server) Start() error {
 	e.GET("/status/:name", s.handleStatus)
 	e.POST("/remove/:name", s.handleRemove)
 	e.GET("/logs/:name", s.handleLogs)
+	e.POST("/issues", s.handlePostIssue)
+	e.GET("/issues", s.handleGetIssues)
 
 	// Serve embedded SPA — must be registered last (catch-all)
 	sub, err := fs.Sub(distFiles, "ui/dist")
@@ -106,6 +110,7 @@ type DeployRequest struct {
 	DrainWindow        string               `json:"drain_window,omitempty"`
 	HealthCheckTimeout string               `json:"health_check_timeout,omitempty"`
 	RestartPolicy      string               `json:"restart_policy,omitempty"`
+	ConfigPath         string               `json:"config_path,omitempty"`
 }
 
 func (s *Server) handleHealth(c echo.Context) error {
@@ -155,6 +160,7 @@ func (s *Server) handleDeploy(c echo.Context) error {
 		DrainWindow:        drainWindow,
 		HealthCheckTimeout: hcTimeout,
 		RestartPolicy:      req.RestartPolicy,
+		ConfigPath:         req.ConfigPath,
 	})
 	if err != nil {
 		log.Printf("[ERROR] deploy name=%s error=%q", req.Name, err)
@@ -225,6 +231,42 @@ func (s *Server) handleLogs(c echo.Context) error {
 		return echo.NewHTTPError(http.StatusNotFound, err.Error())
 	}
 	return c.JSON(http.StatusOK, logLines)
+}
+
+func (s *Server) handlePostIssue(c echo.Context) error {
+	var iss issues.Issue
+	if err := json.NewDecoder(c.Request().Body).Decode(&iss); err != nil {
+		return echo.NewHTTPError(http.StatusBadRequest, "invalid request body")
+	}
+	if iss.Error == "" {
+		return echo.NewHTTPError(http.StatusBadRequest, "error field is required")
+	}
+	if iss.Source == "" {
+		iss.Source = "external"
+	}
+	if err := s.iss.Append(iss); err != nil {
+		log.Printf("[ERROR] issues append: %v", err)
+		return echo.NewHTTPError(http.StatusInternalServerError, err.Error())
+	}
+	return c.JSON(http.StatusCreated, map[string]string{"status": "logged"})
+}
+
+func (s *Server) handleGetIssues(c echo.Context) error {
+	n := 50
+	if v := c.QueryParam("lines"); v != "" {
+		if parsed, err := strconv.Atoi(v); err == nil && parsed > 0 {
+			n = parsed
+		}
+	}
+	src := c.QueryParam("source")
+	list, err := s.iss.Recent(n, src)
+	if err != nil {
+		return echo.NewHTTPError(http.StatusInternalServerError, err.Error())
+	}
+	if list == nil {
+		list = []issues.Issue{}
+	}
+	return c.JSON(http.StatusOK, map[string]any{"issues": list})
 }
 
 func (s *Server) streamLogs(c echo.Context, name string, backlogLines int) error {
