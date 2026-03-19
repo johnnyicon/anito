@@ -354,10 +354,17 @@ After all groups are complete:
 cd .worktrees/reliability-sprint
 go build ./...
 go test ./...
-make reload   # if testing on this machine
 ```
 
+Do **not** run `make reload`. That command hot-swaps the running launchd daemon on the local machine — it is not applicable here. `go build ./...` and `go test ./...` are the only required checks.
+
 All tests must pass before opening a PR. Do not merge to main without a passing build and test suite.
+
+---
+
+## Remote execution note
+
+This prompt is designed to run on a remote machine (e.g. the 2019 build node). The test suite is fully self-contained — tests use `t.TempDir()` for registry storage and spin up their own subprocess helpers as fake services. There is no dependency on a running Anito daemon, `~/.anito/`, or ports 7700/7701. `go build ./...` and `go test ./...` are the only verification steps needed.
 
 ---
 
