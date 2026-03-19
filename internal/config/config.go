@@ -60,9 +60,14 @@ func Load(path string) (*Config, error) {
 		return nil, fmt.Errorf("%s: restart_policy must be \"always\", \"on-watch\", or \"never\"", path)
 	}
 
-	// Resolve relative Watch paths against the config file's directory so that
+	// Resolve relative paths against the config file's directory so that
 	// configs checked into a repo work on any machine without absolute paths.
+	// Relative paths stored in the daemon registry would otherwise be resolved
+	// against the daemon's working directory, not the repo root.
 	configDir := filepath.Dir(path)
+	if cfg.EnvFile != "" && !filepath.IsAbs(cfg.EnvFile) {
+		cfg.EnvFile = filepath.Join(configDir, cfg.EnvFile)
+	}
 	for i, w := range cfg.Watch {
 		if !filepath.IsAbs(w) {
 			cfg.Watch[i] = filepath.Join(configDir, w)

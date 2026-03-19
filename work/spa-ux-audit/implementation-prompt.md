@@ -75,71 +75,50 @@ POST /issues                      — log an issue
 
 ---
 
-## Backend changes required before building frontend features
+## Backend — what's already built vs. what still needs work
 
-Several design features require daemon changes that do not exist yet. **Do the backend work first for each phase.** Do not build a frontend feature that depends on a missing backend field — you will be building against air.
+Check the current state before writing any backend code.
 
-### Phase 1 backend (required for the core redesign)
+### Already done — do not rebuild
 
-These fields must be added to make the new frontend meaningful:
+**Phase 1 — Core data model:** All of these fields are already in `internal/registry/registry.go` on the `Service` struct:
+- `ConfigPath string` — absolute path to `.anito/config.yaml`
+- `LastStartedAt time.Time` — when the current/last process started
+- `CrashAttempts int` — restart attempts in current crash loop
+- `GaveUp bool` — true if crash backoff exhausted
+- `StartHistory []StartEvent` — ring buffer, last 10 starts
 
-**`internal/registry/registry.go` — Service struct additions:**
-```go
-ConfigPath    string        // absolute path to .anito/config.yaml
-LastStartedAt time.Time     // when the current (or last) process started
-CrashAttempts int           // number of restart attempts in current crash loop
-GaveUp        bool          // true if crash backoff hit max attempts
-StartHistory  []StartEvent  // ring buffer, last 10 starts
+They flow through to `/status/:name` already. Verify with:
+```bash
+curl -s http://localhost:7700/status/<any-service> | jq .
 ```
 
-```go
-type StartEvent struct {
-    StartedAt time.Time
-    ExitCode  int           // -1 if still running
-    Duration  time.Duration // 0 if still running
-}
-```
+**Phase 1 — `GET /doctor` endpoint:** Already at `GET /doctor?path=/abs/path/to/repo`. Calls `doctor.Check()` and returns JSON.
 
-**`internal/server/server.go` — `/status/:name` response additions:**
-```json
-{
-  "config_path": "/abs/path/.anito/config.yaml",
-  "last_started_at": "2026-03-20T10:09:00Z",
-  "crash_attempts": 0,
-  "gave_up": false,
-  "start_history": [
-    { "started_at": "...", "exit_code": -1, "duration": 0 },
-    { "started_at": "...", "exit_code": 1,  "duration": 3200000000 }
-  ],
-  "deploying": false
-}
-```
+**Phase 2 — Build log streaming:** Already implemented.
+- Build output goes to `~/.anito/logs/<name>-build.log`
+- Served via `/logs/<name>?stream=build` SSE endpoint
 
-**`GET /doctor` HTTP endpoint** (new):
-```
-GET /doctor?path=/abs/path/to/repo
-```
-Calls `doctor.Check(path, svc)` and returns the JSON result. This makes doctor accessible from the browser — the service detail panel needs it.
+**Worktree doctor checks:** Already in `internal/doctor/doctor.go`:
+- Missing `node_modules` in worktree frontend → error
+- Stale Vite cache (`node_modules/.vite/`) in worktree → info
+- Relative `env_file` in registry → error
+- Config path from worktree vs. current config path → info
 
-### Phase 2 backend (build output streaming)
+### Still needed — build this first
 
-**Build log capture in `internal/service/service.go`:**
-When `cfg.Build != ""`, pipe the build command's stdout/stderr to `~/.anito/logs/<name>-build.log` in addition to running the build. The existing `buildBinary()` function or equivalent needs to write to this file.
+**`deploying: bool` on `/status/:name`:**
+The frontend needs to show a "deploying…" indicator during a hot-swap without the service going red. Add a `Deploying bool` field to the service layer's status response. Set it `true` from the moment the new process starts until the proxy swap completes. Return it on `GET /status/:name`.
 
-**`/logs/:name?stream=build` SSE extension:**
-The existing `/logs/:name` endpoint takes an optional `?stream=build` query param. When set, it tails `~/.anito/logs/<name>-build.log` instead of `~/.anito/logs/<name>.log`. All existing SSE infrastructure (`LogsFollow`, etc.) applies unchanged.
-
-### Phase 3 backend (watch metadata — can be done in parallel with frontend)
-
-**`[WATCH]` log entry parsing in `/status/:name`:**
-When the status endpoint is called, parse the last `[WATCH]` log entry for this service from `~/.anito/logs/anito.log`. Extract the triggered file path and timestamp. Return as:
+**Phase 3 — Watch metadata on `/status/:name`:**
+Parse the last `[WATCH]` log entry for this service from `~/.anito/logs/anito.log`. Return:
 ```json
 {
   "watch_last_triggered": "2026-03-20T14:22:01Z",
   "watch_last_file": "/Users/.../src/handlers/api.go"
 }
 ```
-This is a best-effort parse — if the log file is large, only read the last N KB (e.g. 64KB) to avoid slow reads on every status call.
+Best-effort: only scan the last 64KB of the daemon log to stay fast on every status call. Return empty strings if no `[WATCH]` entry is found.
 
 ---
 
@@ -299,18 +278,16 @@ src/components/ServiceRow.tsx          — you will recreate this from scratch
 
 ---
 
-## Worktree bug note (from a consumer bug report)
+## Worktree bug note (from a consumer bug report — already fixed)
 
-A bug was filed (`2026-03-19T140134-worktree-frontend-stale-after-restart.md`) about a Vite-based frontend service running from a git worktree showing stale content after `anito_restart`. Root causes:
+A bug was filed (`2026-03-19T140134-worktree-frontend-stale-after-restart.md`) about a Vite-based frontend service running from a git worktree showing stale content after `anito_restart`.
 
-1. Git worktrees don't inherit `node_modules` — the dev wrapper script for worktree services must check for and handle missing `node_modules`.
-2. Vite's module graph cache at `node_modules/.vite/` goes stale after cherry-picks that add new files. The dev wrapper script should pass `--force` to Vite when running from a worktree context.
+**Both doctor checks are already in `internal/doctor/doctor.go`:**
+- Missing/empty `node_modules` in a worktree frontend → **error** with `npm install` action
+- `node_modules/.vite/` present in a worktree → **info** suggesting `--force` in start script
+- Relative `env_file` stored in the registry → **error** with redeploy action
 
-**Anito already has worktree detection.** `internal/doctor/doctor.go` has `isWorktreePath()` (checks for `/worktrees/` in the path) and already surfaces an `info` issue when a service's registered `config_path` is from a worktree. This is in the registry alignment section of `checkConfig()`.
-
-What's missing is Node.js/frontend-specific checks. **Extend the existing worktree branch** (around line 246 in `doctor.go`) to also check:
-- If the service `type` is `binary` and the binary path or config path is under a worktree, look for a `package.json` adjacent to the config. If found, check whether `node_modules/` exists next to it. If missing: add an `error`-severity issue: "worktree frontend detected but node_modules is missing — run `npm install` in \<dir\> before deploying."
-- If `node_modules/` exists but `node_modules/.vite/` also exists (indicating a cached Vite build), add an `info` issue: "Vite cache present in worktree — if content appears stale after cherry-pick, use `vite --force` in your start script."
+The fix for consumers: update the dev wrapper script (e.g. `sogs-launch-frontend-dev.sh`) to add `--force` to the `vite` invocation. Anito cannot do this automatically — the wrapper script is consumer-owned. Doctor will catch it and tell them.
 
 ---
 

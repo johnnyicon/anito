@@ -112,6 +112,22 @@ func (m *Manager) SwapStatic(name string, dir string) error {
 	return nil
 }
 
+// Unswap restores the 503 placeholder handler for name.
+// Call this when a service stops or crashes so the stable port returns a clean
+// "service unavailable" instead of a 502 pointing at a dead backend.
+// A subsequent Swap call (after a successful restart or deploy) re-enables proxying.
+func (m *Manager) Unswap(name string) {
+	m.mu.Lock()
+	e, ok := m.entries[name]
+	m.mu.Unlock()
+	if !ok {
+		return
+	}
+	e.handler.Store(handlerWrapper{h: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "service unavailable", http.StatusServiceUnavailable)
+	})})
+}
+
 // Remove shuts down the listener for name and removes it from the manager.
 func (m *Manager) Remove(name string) {
 	m.mu.Lock()

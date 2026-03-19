@@ -110,14 +110,37 @@ func checkConfig(cfgPath, relPath, repoRoot string, svc StatusFetcher) ConfigRes
 	}
 	cr.Name = cfg.Name
 
-	// Worktree check — warn when the config lives inside a git worktree.
-	// Worktrees don't inherit node_modules; Vite's module graph cache goes stale
-	// after cherry-picks that add new files.
+	// Worktree check — when the config lives inside a git worktree, check for
+	// Node.js frontend issues. Worktrees don't inherit node_modules, and Vite's
+	// module graph cache goes stale after cherry-picks that add new files.
 	if isWorktreePath(cfgPath) {
-		cr.add(Issue{Severity: "warning", Field: "config_path",
-			Message: "worktree detected — ensure node_modules is installed and use `vite --force` in your start script if serving a Vite frontend",
-			Action:  "run `npm install` in the worktree directory and add `--force` to your vite start command",
-		})
+		// Look for package.json in the config's directory or its parent (the service root).
+		dirs := []string{filepath.Dir(cfgPath), filepath.Dir(filepath.Dir(cfgPath))}
+		for _, dir := range dirs {
+			pkgPath := filepath.Join(dir, "package.json")
+			if _, err := os.Stat(pkgPath); err != nil {
+				continue
+			}
+			// Found a package.json — check node_modules.
+			nmPath := filepath.Join(dir, "node_modules")
+			entries, err := os.ReadDir(nmPath)
+			if os.IsNotExist(err) || (err == nil && len(entries) < 5) {
+				cr.add(Issue{Severity: "error", Field: "worktree",
+					Message: fmt.Sprintf("worktree frontend detected but node_modules is missing or empty at %s", nmPath),
+					Action:  fmt.Sprintf("run `npm install` in %s before deploying", dir),
+				})
+			} else if err == nil {
+				// node_modules exists — check for stale Vite cache.
+				viteCachePath := filepath.Join(nmPath, ".vite")
+				if _, err := os.Stat(viteCachePath); err == nil {
+					cr.add(Issue{Severity: "info", Field: "worktree",
+						Message: "Vite cache present in worktree — content may be stale after cherry-picks that add new files",
+						Action:  "add `--force` to your vite start command in the dev wrapper script to clear the module graph cache on each restart",
+					})
+				}
+			}
+			break
+		}
 	}
 
 	// Output file existence.
@@ -242,6 +265,15 @@ func checkConfig(cfgPath, relPath, repoRoot string, svc StatusFetcher) ConfigRes
 				cr.add(Issue{Severity: "warning", Field: "status",
 					Message: "service is in failed state",
 					Action:  fmt.Sprintf("run `anito restart %s` or `anito deploy` to recover", cfg.Name),
+				})
+			}
+
+			// Registry env_file must be absolute — relative paths are resolved
+			// against the daemon's CWD, not the repo root, causing 500 errors at start.
+			if reg.EnvFile != "" && !filepath.IsAbs(reg.EnvFile) {
+				cr.add(Issue{Severity: "error", Field: "env_file",
+					Message: fmt.Sprintf("env_file in registry is a relative path (%q) — the daemon cannot resolve this at runtime", reg.EnvFile),
+					Action:  "redeploy with `anito deploy` — relative env_file paths are now resolved automatically",
 				})
 			}
 

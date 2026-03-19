@@ -292,6 +292,8 @@ func (s *Service) Stop(name string) error {
 		_ = s.reg.UpdateStatus(name, registry.StatusStopped, 0)
 		log.Printf("[STOP] name=%s", name)
 	}
+	// Always unswap so the stable port returns 503 instead of 502 from the dead backend.
+	s.prx.Unswap(name)
 	return err
 }
 
@@ -489,6 +491,10 @@ func (s *Service) handleCrash(name string) {
 		return // intentionally stopped — do not restart
 	}
 
+	// Unswap immediately so the stable port returns 503 instead of 502 from the
+	// now-dead backend. A successful Restart() below will re-swap the proxy.
+	s.prx.Unswap(name)
+
 	policy := svc.RestartPolicy
 	if policy == "" {
 		policy = "on-watch"
@@ -510,6 +516,7 @@ func (s *Service) handleCrash(name string) {
 		s.crashMu.Unlock()
 		log.Printf("[CRASH_GIVE_UP] name=%s attempts=%d", name, attempt)
 		_ = s.reg.UpdateCrashState(name, attempt, true)
+		_ = s.reg.UpdateStatus(name, registry.StatusFailed, 0)
 		return
 	}
 	s.crashAttempts[name] = attempt + 1
