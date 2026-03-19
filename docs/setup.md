@@ -1,88 +1,74 @@
 # Setting up Anito locally (macOS)
 
-Anito manages your local services. But first, Anito itself needs to run as a stable local daemon — a launchd agent that starts on login and restarts if it crashes. This is the "eat your own dog food" step.
+Anito manages your local services. But first, Anito itself needs to run as a stable local daemon — a launchd agent that starts on login and restarts if it crashes.
 
 ---
 
-## 1. Build and install the binary
+## First-time install on a new machine
 
-Clone the repo and build:
+If you are setting up Anito for the first time, use `anito install`. It does everything in one step: copies the binary to `~/.local/bin/anito`, creates `~/.anito/logs/`, writes the launchd plist, and loads the daemon.
 
 ```bash
+# Build the binary first
 git clone https://github.com/johnnyicon/anito
 cd anito
 go build -o ./anito ./cmd/anito/
+
+# Bootstrap the daemon
+./anito install
+# ✓ binary installed to ~/.local/bin/anito
+# ✓ daemon running on localhost:7700 and localhost:7701
+# → connect Claude: claude mcp add --transport http anito http://localhost:7701
 ```
 
-Install to a directory on your `$PATH`. Two common options:
+`anito install` targets `~/.local/bin/anito` by default (no sudo required). If you prefer a different path, pass `--bin-dir`:
 
-**Option A — system-wide** (requires sudo):
 ```bash
-sudo cp ./anito /usr/local/bin/anito
+./anito install --bin-dir /usr/local/bin    # requires sudo
 ```
 
-**Option B — user-local** (no sudo, works with Homebrew-style setups):
+**Note:** `anito install` is for first-time setup on a clean machine. If you already have Anito running (existing plist, daemon healthy on :7700), use `make reload` instead to update the binary — do not run `anito install` again.
+
+---
+
+## Day-to-day developer workflow
+
+The Makefile handles everything after the initial install:
+
 ```bash
-cp ./anito ~/.local/bin/anito
-# or
-cp ./anito ~/bin/anito
+make build     # compile SPA + Go binary to ~/.local/bin/anito
+make install   # alias for make build
+make reload    # build + hot-swap the running daemon (launchctl unload → load)
+make start     # load the launchd agent (start daemon without rebuilding)
+make stop      # unload the launchd agent (stop daemon without removing plist)
+make ui-dev    # run the Vite dev server with proxy to localhost:7700
 ```
 
-Verify:
+**Typical rebuild cycle:**
 ```bash
-which anito
-anito       # should print usage
+# Make a code change, then:
+make reload
+# → builds SPA, builds Go binary, unloads daemon, loads daemon, polls /health
+# → daemon running version v0.x.x
 ```
 
 ---
 
-## 2. Create the log directory
+## Installation layout (this machine)
 
-launchd needs the log directory to exist before it can write to it:
+| What | Path |
+|------|------|
+| Binary | `~/.local/bin/anito` |
+| Plist | `~/Library/LaunchAgents/com.anito.daemon.plist` |
+| Data + registry | `~/.anito/registry.json` |
+| Daemon log | `~/.anito/logs/anito.log` |
+| Service logs | `~/.anito/logs/<service-name>.log` |
 
-```bash
-mkdir -p ~/.anito/logs
-```
-
----
-
-## 3. Install the launchd agent
-
-Copy the plist from this repo to your LaunchAgents directory and substitute your username:
-
-```bash
-sed "s/YOUR_USERNAME/$(whoami)/g" com.anito.daemon.plist \
-  > ~/Library/LaunchAgents/com.anito.daemon.plist
-```
-
-If you installed the binary somewhere other than `/usr/local/bin/anito`, edit the plist `ProgramArguments` path to match — e.g. `/Users/kanekoa/.local/bin/anito`.
-
-Load it:
-```bash
-launchctl load ~/Library/LaunchAgents/com.anito.daemon.plist
-```
-
-launchd starts Anito immediately and will restart it on every login and if it ever crashes.
+The plist hardcodes the binary path. Do not move the binary without also updating the plist `ProgramArguments` and running `make reload`.
 
 ---
 
-## 4. Verify the daemon is running
-
-**HTTP management API** (port 7700):
-```bash
-curl -s http://localhost:7700/health
-# {"status":"ok"}
-```
-
-**MCP server** (port 7701):
-```bash
-curl -s -o /dev/null -w "%{http_code}" http://localhost:7701
-# 400  (correct — StreamableHTTP rejects plain GETs)
-```
-
----
-
-## 5. Connect Claude Code to the MCP server
+## Connect Claude Code to the MCP server
 
 ```bash
 claude mcp add --transport http anito http://localhost:7701
@@ -105,7 +91,7 @@ Run `anito mcp` at any time to see this connection info again.
 
 ---
 
-## 6. Deploy your first service
+## Deploy your first service
 
 From any repo that has a `.anito/config.yaml`:
 
@@ -119,28 +105,47 @@ anito deploy
 
 ---
 
-## 7. Watch mode — automatic restart on file changes
-
-Add a `watch` field to `.anito/config.yaml` to have Anito automatically restart the service whenever a file changes in the listed directories:
+## Service config reference (`.anito/config.yaml`)
 
 ```yaml
-name: my-service
-port: 3000
-type: binary
-output: ./dist/my-service
-health_check: /health
+name: my-service          # required — unique service name
+port: 3000                # stable port (0 = auto-allocate from 8100–8200)
+type: binary              # "binary" (default) or "static"
+build: go build -o ./dist/my-service ./cmd/my-service
+output: ./dist/my-service # path to binary or static dir (required)
+args: []                  # optional arguments passed to the binary
+env_file: .env            # optional KEY=VALUE env file
+health_check: /health     # health check path (default: /health)
+health_check_timeout: 30s # how long to poll /health before giving up (default: 15s)
+restart_policy: on-watch  # "always" | "on-watch" | "never" (default: on-watch)
+drain_window: 2s          # grace period before killing the old process after a swap (default: 2s)
 watch:
-  - /abs/path/to/src/
+  - ./src                 # relative paths — resolved against this config file's directory
+  - ./cmd
 ```
 
-When any file under a watched directory is written or created, Anito:
+**`restart_policy` values:**
+- `on-watch` (default) — auto-restart on crash only if `watch:` paths are configured
+- `always` — auto-restart on crash even without watch paths
+- `never` — never auto-restart; service stays `failed` until you intervene
+
+**`watch:` paths** may be relative (resolved against the config file's directory) or absolute. Relative paths are portable across machines and safe to check into the repo. Example: `./src` in a config at `/Users/alice/myapp/.anito/config.yaml` watches `/Users/alice/myapp/.anito/src`.
+
+**Crash restart backoff:** when a service crashes, Anito waits before restarting: 1s → 2s → 4s → 8s → 30s. After 5 failed attempts it stops and logs `[CRASH_GIVE_UP]`. The counter resets on any successful start.
+
+---
+
+## Watch mode — automatic restart on file changes
+
+When `watch:` is set, Anito restarts the service whenever a file changes under those directories:
+
 1. Debounces events for 500ms (rapid saves collapse into one restart)
-2. Calls `Restart` — starts a new process, health-checks it, swaps the proxy
-3. Drains the old process gracefully
+2. Starts a new process, health-checks it, swaps the proxy
+3. Drains the old process after `drain_window` (default 2s)
 
-The stable port never disconnects. Consumers (browsers, MCP hosts) reconnect automatically after the brief swap.
+The stable port never disconnects. Consumers reconnect automatically.
 
-**Typical use case — `go run` dev tier:**
+**Typical dev-tier config:**
 
 ```yaml
 name: my-daemon-dev
@@ -149,24 +154,8 @@ type: binary
 output: .anito/my-daemon-dev-server   # shell script: exec go run ./cmd/my-daemon/
 health_check: /health
 watch:
-  - /abs/path/to/src/
+  - ./src
 ```
-
-Every source file save triggers a fresh `go run` compile (~3–5s) and a zero-downtime proxy swap. No manual restart needed.
-
-**Deploying with watch mode:**
-
-```bash
-anito deploy .anito/config.yaml
-# ✓ my-service running on localhost:3000
-# watcher active on /abs/path/to/src/
-```
-
-Watch paths are stored in the registry and survive daemon restarts — the watcher is restored automatically the next time Anito starts.
-
-**Crash auto-restart:**
-
-Services with `watch` paths also restart automatically if the process exits unexpectedly (after a 2s cooldown). Services without `watch` paths are not auto-restarted on crash — they stay `failed` until you intervene.
 
 ---
 
@@ -176,8 +165,7 @@ Services with `watch` paths also restart automatically if the process exits unex
 |------|------|
 | HTTP management API | `7700` |
 | MCP server | `7701` |
-
-Both are configurable via `--port` and `--mcp-port` on `anito daemon`.
+| Auto-allocated services | `8100–8200` |
 
 ---
 
@@ -192,17 +180,18 @@ All daemon activity goes to a single log file:
 Tail it in real time:
 ```bash
 tail -f ~/.anito/logs/anito.log
+# or:
+anito logs daemon --follow
 ```
 
-The log uses a structured `[TAG] key=value` format designed for grepping:
+The log uses a structured `[TAG] key=value` format:
 
 ```
 2026/03/16 11:51:34 [STARTUP] data=/Users/you/.anito api=:7700 mcp=:7701
-2026/03/16 11:51:34 [STARTUP] management API listening on localhost:7700
-2026/03/16 11:51:34 [STARTUP] MCP server listening on http://localhost:7701
-2026/03/16 11:51:44 [API] GET /health → 200 (0s)
 2026/03/16 11:51:45 [DEPLOY] name=hello-service port=3000 internal=58162 pid=89490
-2026/03/16 11:51:45 [API] POST /deploy → 200 (210ms)
+2026/03/16 11:52:10 [CRASH] name=hello-service pid=89490
+2026/03/16 11:52:11 [RESTART] name=hello-service reason=crash attempt=1 waiting=1s
+2026/03/16 11:52:15 [CRASH_GIVE_UP] name=hello-service attempts=5
 ```
 
 **Log tags:**
@@ -214,11 +203,13 @@ The log uses a structured `[TAG] key=value` format designed for grepping:
 | `[MCP]` | Every MCP tool call — tool name and key parameters |
 | `[DEPLOY]` | Successful deploy — service name, stable port, internal port, PID |
 | `[WATCH]` | File change detected — service name, triggering file path |
-| `[RESTART]` | Service restarted — with `port=` and `internal=` on success, `reason=crash` on crash recovery |
+| `[RESTART]` | Service restarted — with `attempt=` and `waiting=` on crash recovery |
 | `[DRAIN]` | Old process intentionally killed after a hot-swap — not a crash |
 | `[STOP]` | Service stopped |
 | `[REMOVE]` | Service removed from registry |
 | `[CRASH]` | Unexpected process exit — service name and PID |
+| `[CRASH_GIVE_UP]` | Crash restart abandoned after max attempts — service left as failed |
+| `[RESTORE_FAILED]` | Service could not be restored on daemon startup (binary missing or start failed) |
 | `[ERROR]` | Operation failed — includes the error message |
 
 **Useful grep patterns:**
@@ -238,12 +229,13 @@ grep '\[MCP\]' ~/.anito/logs/anito.log
 
 **Daemon log in the dashboard:**
 
-Open [http://localhost:7700](http://localhost:7700) and click **"daemon log"** in the header to see `anito.log` streaming live with colour-coded tags — no terminal required.
+Open [http://localhost:7700](http://localhost:7700) and click **"daemon log"** in the header to see `anito.log` streaming live with colour-coded tags.
 
 Per-service logs (the service's own stdout/stderr) live separately:
 ```bash
-~/.anito/logs/<service-name>.log
-anito logs <service-name>          # last 100 lines via CLI
+anito logs <service-name>             # last 100 lines
+anito logs <service-name> --follow    # stream live (-f also works)
+anito logs daemon --follow            # stream the Anito daemon log live
 curl http://localhost:7700/logs/<service-name>?lines=50   # via API
 ```
 
@@ -255,11 +247,12 @@ curl http://localhost:7700/logs/<service-name>?lines=50   # via API
 # Check daemon health
 curl -s http://localhost:7700/health
 
-# List everything Anito is managing
+# List everything Anito is managing (includes port pressure summary)
 anito services
 
 # View service logs
 anito logs <name>
+anito logs <name> --follow
 
 # Redeploy after a code change (zero downtime)
 anito deploy
@@ -287,8 +280,15 @@ Stop whatever is holding the port, or change `--port` / `--mcp-port` in the plis
 **Daemon not appearing in `launchctl list`:**
 Check for plist syntax errors: `plutil ~/Library/LaunchAgents/com.anito.daemon.plist`
 
-**Services not restored after reboot:**
-Anito reads `~/.anito/registry.json` on startup and restores services that were `running`. If the binary path has changed or been deleted, the restore will fail — check `~/.anito/logs/anito.log` for `[ERROR]` or missing `[DEPLOY]` entries.
+**Service shows `failed` after daemon restart:**
+The binary path recorded in the registry no longer exists or could not be started. Check `~/.anito/logs/anito.log` for `[RESTORE_FAILED]` entries. Re-deploy the service with `anito deploy`.
+
+**Service in infinite crash loop:**
+Anito uses exponential backoff (1s→2s→4s→8s→30s, max 5 attempts) before giving up. Check the service log for the actual crash reason:
+```bash
+anito logs <name>
+```
+After fixing the issue, redeploy with `anito deploy`.
 
 **Redeployment fails with "already running":**
-This means the daemon was restarted between your last deploy and now, and the process is tracked internally. Run `anito deploy` again — the `Deregister` mechanism in the service layer handles this automatically on subsequent attempts.
+Run `anito deploy` again — the `Deregister` mechanism handles this automatically on subsequent attempts.

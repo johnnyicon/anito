@@ -30,9 +30,10 @@ export default function App() {
     setLogService(prev => prev === DAEMON_LOG ? null : DAEMON_LOG)
   }
 
-  const sorted  = [...(services ?? [])].sort((a, b) => a.name.localeCompare(b.name))
-  const running = sorted.filter(s => s.status === 'running').length
-  const total   = sorted.length
+  const sorted    = [...(services ?? [])].sort((a, b) => a.name.localeCompare(b.name))
+  const running   = sorted.filter(s => s.status === 'running').length
+  const total     = sorted.length
+  const portsUsed = sorted.filter(s => s.stable_port >= 8100 && s.stable_port <= 8200).length
 
   return (
     <div className="flex min-h-screen flex-col">
@@ -50,9 +51,10 @@ export default function App() {
             </h2>
             <div className="flex items-center gap-3">
               {total > 0 && (
-                <span className="font-mono text-xs text-muted-foreground">
-                  {running} / {total} running
-                </span>
+                <div className="flex items-center gap-3 font-mono text-xs text-muted-foreground">
+                  <span>{running} / {total} running</span>
+                  <span>{portsUsed} / 101 ports</span>
+                </div>
               )}
               <div className="flex items-center gap-0.5">
                 <Button

@@ -3,6 +3,7 @@ package main
 import (
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"os"
@@ -48,6 +49,15 @@ func main() {
 	cli := client.New(defaultDaemonPort)
 
 	switch os.Args[1] {
+	case "install":
+		binDir := ""
+		for i, arg := range os.Args[2:] {
+			if arg == "--bin-dir" && i+1 < len(os.Args[2:]) {
+				binDir = os.Args[3+i]
+			}
+		}
+		runInstall(binDir)
+
 	case "daemon":
 		_ = daemonCmd.Parse(os.Args[2:])
 		runDaemon(*daemonPort, *daemonMCPPort, *dataDir)
@@ -119,7 +129,19 @@ func main() {
 		if logName == "daemon" {
 			logName = service.DaemonLogName
 		}
-		runLogs(cli, logName)
+		follow := false
+		for _, arg := range os.Args[3:] {
+			if arg == "-f" || arg == "--follow" {
+				follow = true
+			}
+		}
+		if follow {
+			if err := cli.LogsFollow(logName, 100, os.Stdout); err != nil {
+				fatal(err)
+			}
+		} else {
+			runLogs(cli, logName)
+		}
 
 	case "mcp":
 		runMCPInfo(defaultMCPPort)
@@ -246,16 +268,18 @@ func runDeploy(cli *client.Client, configPath string) {
 	fmt.Printf("deploying %s → %s...\n", cfg.Name, portDesc)
 
 	svc, err := cli.Deploy(client.DeployRequest{
-		Name:        cfg.Name,
-		Version:     cfg.Version,
-		Type:        registry.ServiceType(cfg.Type),
-		Path:        absOutput,
-		Args:        cfg.Args,
-		StablePort:  cfg.Port,
-		EnvFile:     cfg.EnvFile,
-		HealthCheck: cfg.HealthCheck,
-		WatchPaths:  cfg.Watch,
-		DrainWindow: cfg.DrainWindow,
+		Name:               cfg.Name,
+		Version:            cfg.Version,
+		Type:               registry.ServiceType(cfg.Type),
+		Path:               absOutput,
+		Args:               cfg.Args,
+		StablePort:         cfg.Port,
+		EnvFile:            cfg.EnvFile,
+		HealthCheck:        cfg.HealthCheck,
+		WatchPaths:         cfg.Watch,
+		DrainWindow:        cfg.DrainWindow,
+		HealthCheckTimeout: cfg.HealthCheckTimeout,
+		RestartPolicy:      cfg.RestartPolicy,
 	})
 	if err != nil {
 		fatal(err)
@@ -295,6 +319,16 @@ func runServices(cli *client.Client) {
 		)
 	}
 	w.Flush()
+
+	// Port pressure summary — show how many auto-allocation slots are in use.
+	const rangeStart, rangeEnd = 8100, 8200
+	inRange := 0
+	for _, s := range svcs {
+		if s.StablePort >= rangeStart && s.StablePort <= rangeEnd {
+			inRange++
+		}
+	}
+	fmt.Printf("\nPorts: %d/%d in use (%d–%d)\n", inRange, rangeEnd-rangeStart+1, rangeStart, rangeEnd)
 }
 
 func runStatus(cli *client.Client, name string) {
@@ -381,6 +415,156 @@ func runReload() {
 	fatal(fmt.Errorf("daemon did not become healthy within 10s — check ~/.anito/logs/anito.log"))
 }
 
+// plistTemplate is the launchd plist for Anito.
+// Placeholders (in order): binary path, home dir (×4).
+const plistTemplate = `<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.anito.daemon</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>%s</string>
+    <string>daemon</string>
+    <string>--port</string>
+    <string>7700</string>
+    <string>--mcp-port</string>
+    <string>7701</string>
+  </array>
+
+  <key>RunAtLoad</key>
+  <true/>
+
+  <key>KeepAlive</key>
+  <true/>
+
+  <key>StandardOutPath</key>
+  <string>%s/.anito/logs/anito.log</string>
+
+  <key>StandardErrorPath</key>
+  <string>%s/.anito/logs/anito.error.log</string>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>HOME</key>
+    <string>%s</string>
+    <key>PATH</key>
+    <string>%s/.local/bin:/usr/local/bin:/usr/bin:/bin</string>
+  </dict>
+</dict>
+</plist>
+`
+
+// runInstall performs first-time daemon setup on a clean machine:
+// copies the binary, creates ~/.anito/logs/, writes the launchd plist, and
+// loads the daemon.  It is NOT needed on machines where Anito is already
+// running — use `make reload` there.
+func runInstall(binDir string) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		fatal(fmt.Errorf("could not determine home directory: %w", err))
+	}
+
+	// Bail out if the daemon is already healthy — nothing to do.
+	resp, err := http.Get(fmt.Sprintf("http://localhost:%d/health", defaultDaemonPort)) //nolint:noctx
+	if err == nil {
+		resp.Body.Close()
+		if resp.StatusCode == http.StatusOK {
+			fmt.Println("Anito is already installed and running.")
+			fmt.Println("Use 'make reload' to update the binary.")
+			return
+		}
+	}
+
+	if binDir == "" {
+		binDir = filepath.Join(home, ".local", "bin")
+	}
+	targetBin := filepath.Join(binDir, "anito")
+
+	self, err := os.Executable()
+	if err != nil {
+		fatal(fmt.Errorf("could not locate current executable: %w", err))
+	}
+
+	// Install binary.
+	if err := os.MkdirAll(binDir, 0755); err != nil {
+		fatal(fmt.Errorf("creating %s: %w", binDir, err))
+	}
+	fmt.Printf("installing binary → %s\n", targetBin)
+	if err := copyFile(self, targetBin, 0755); err != nil {
+		fatal(fmt.Errorf("copying binary: %w", err))
+	}
+
+	// Create data + log directories.
+	logDir := filepath.Join(home, ".anito", "logs")
+	if err := os.MkdirAll(logDir, 0755); err != nil {
+		fatal(fmt.Errorf("creating %s: %w", logDir, err))
+	}
+
+	// Write launchd plist.
+	plistPath := filepath.Join(home, "Library", "LaunchAgents", "com.anito.daemon.plist")
+	if err := os.MkdirAll(filepath.Dir(plistPath), 0755); err != nil {
+		fatal(fmt.Errorf("creating LaunchAgents dir: %w", err))
+	}
+	plist := fmt.Sprintf(plistTemplate, targetBin, home, home, home, home)
+	if err := os.WriteFile(plistPath, []byte(plist), 0644); err != nil {
+		fatal(fmt.Errorf("writing plist: %w", err))
+	}
+	fmt.Printf("wrote %s\n", plistPath)
+
+	// Load the agent.
+	fmt.Println("loading daemon...")
+	if out, err := exec.Command("launchctl", "load", plistPath).CombinedOutput(); err != nil {
+		fatal(fmt.Errorf("launchctl load: %s", strings.TrimSpace(string(out))))
+	}
+
+	// Wait for the daemon to become healthy.
+	fmt.Print("waiting for daemon")
+	deadline := time.Now().Add(10 * time.Second)
+	healthy := false
+	for time.Now().Before(deadline) {
+		time.Sleep(300 * time.Millisecond)
+		r, err := http.Get(fmt.Sprintf("http://localhost:%d/health", defaultDaemonPort)) //nolint:noctx
+		if err == nil {
+			r.Body.Close()
+			if r.StatusCode == http.StatusOK {
+				healthy = true
+				break
+			}
+		}
+		fmt.Print(".")
+	}
+	fmt.Println()
+	if !healthy {
+		fatal(fmt.Errorf("daemon did not become healthy within 10s — check %s/anito.log", logDir))
+	}
+
+	fmt.Printf("✓ anito installed and running\n\n")
+	fmt.Printf("Connect Claude Code:\n")
+	fmt.Printf("  claude mcp add --transport http anito http://localhost:%d\n", defaultMCPPort)
+}
+
+// copyFile copies src to dst with the given file permissions.
+func copyFile(src, dst string, perm os.FileMode) error {
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+	out, err := os.OpenFile(dst, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, perm)
+	if err != nil {
+		return err
+	}
+	if _, err := io.Copy(out, in); err != nil {
+		out.Close()
+		return err
+	}
+	return out.Close()
+}
+
 func runDaemon(apiPort, mcpPort int, dataDir string) {
 	log.SetOutput(os.Stdout)
 	log.SetFlags(log.Ldate | log.Ltime)
@@ -413,13 +597,21 @@ func runDaemon(apiPort, mcpPort int, dataDir string) {
 			log.Printf("restoring %s on localhost:%d", svc.Name, svc.StablePort)
 			if svc.Type == registry.TypeStatic {
 				if err := prx.SwapStatic(svc.Name, svc.BinaryPath); err != nil {
-					log.Printf("warn: static swap failed for %s: %v", svc.Name, err)
+					log.Printf("[RESTORE_FAILED] name=%s reason=%v", svc.Name, err)
+					_ = reg.UpdateStatus(svc.Name, registry.StatusFailed, 0)
 				}
+				continue
+			}
+			// Verify binary exists before attempting to start.
+			if _, err := os.Stat(svc.BinaryPath); err != nil {
+				log.Printf("[RESTORE_FAILED] name=%s reason=binary not found: %s", svc.Name, svc.BinaryPath)
+				_ = reg.UpdateStatus(svc.Name, registry.StatusFailed, 0)
 				continue
 			}
 			internalPort, err := mgr.Start(svc)
 			if err != nil {
-				log.Printf("warn: could not restore %s: %v", svc.Name, err)
+				log.Printf("[RESTORE_FAILED] name=%s reason=%v", svc.Name, err)
+				_ = reg.UpdateStatus(svc.Name, registry.StatusFailed, 0)
 				continue
 			}
 			if err := prx.Swap(svc.Name, internalPort); err != nil {
@@ -480,13 +672,14 @@ func printUsage() {
 	fmt.Println(`anito — local production service manager
 
 Usage:
+  anito install [--bin-dir <path>]          first-time daemon setup: install binary, write plist, start daemon
   anito daemon [flags]                      start the anito daemon
   anito setup [path]                        inspect repo, check service contract, write .anito/config.yaml
   anito deploy [config]                     build + deploy (default: .anito/config.yaml)
   anito promote <stable-config> [dev-name]  build stable binary and deploy it
   anito services                            list all running services
   anito status <name>                       show status and port for a service
-  anito logs <name>                         print recent log output (use "daemon" for the Anito daemon log)
+  anito logs <name> [-f|--follow]           print recent log output; -f streams live (use "daemon" for the Anito daemon log)
   anito stop <name>                         stop a service
   anito restart <name>                      restart a service
   anito remove <name>                       stop and remove a service

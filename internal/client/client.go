@@ -1,10 +1,13 @@
 package client
 
 import (
+	"bufio"
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/johnnyicon/anito/internal/registry"
@@ -21,16 +24,18 @@ func New(port int) *Client {
 
 // DeployRequest mirrors server.DeployRequest.
 type DeployRequest struct {
-	Name        string               `json:"name"`
-	Version     string               `json:"version,omitempty"`
-	Type        registry.ServiceType `json:"type"`
-	Path        string               `json:"path"`
-	Args        []string             `json:"args,omitempty"`
-	StablePort  int                  `json:"stable_port"`
-	EnvFile     string               `json:"env_file,omitempty"`
-	HealthCheck string               `json:"health_check,omitempty"`
-	WatchPaths  []string             `json:"watch_paths,omitempty"`
-	DrainWindow time.Duration        `json:"drain_window,omitempty"`
+	Name               string               `json:"name"`
+	Version            string               `json:"version,omitempty"`
+	Type               registry.ServiceType `json:"type"`
+	Path               string               `json:"path"`
+	Args               []string             `json:"args,omitempty"`
+	StablePort         int                  `json:"stable_port"`
+	EnvFile            string               `json:"env_file,omitempty"`
+	HealthCheck        string               `json:"health_check,omitempty"`
+	WatchPaths         []string             `json:"watch_paths,omitempty"`
+	DrainWindow        time.Duration        `json:"drain_window,omitempty"`
+	HealthCheckTimeout time.Duration        `json:"health_check_timeout,omitempty"`
+	RestartPolicy      string               `json:"restart_policy,omitempty"`
 }
 
 func (c *Client) Deploy(req DeployRequest) (*registry.Service, error) {
@@ -84,6 +89,28 @@ func (c *Client) Logs(name string, lines int) ([]string, error) {
 		return nil, err
 	}
 	return out, nil
+}
+
+// LogsFollow streams log lines from the daemon via SSE, writing each line to w.
+// It blocks until the connection is closed or an error occurs.
+func (c *Client) LogsFollow(name string, backlog int, w io.Writer) error {
+	url := fmt.Sprintf("%s/logs/%s?lines=%d&follow=true", c.base, name, backlog)
+	resp, err := http.Get(url) //nolint:noctx
+	if err != nil {
+		return fmt.Errorf("daemon unreachable — is anito running? (try: anito daemon): %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 400 {
+		return parseError(resp)
+	}
+	scanner := bufio.NewScanner(resp.Body)
+	for scanner.Scan() {
+		line := scanner.Text()
+		if after, ok := strings.CutPrefix(line, "data: "); ok {
+			fmt.Fprintln(w, after)
+		}
+	}
+	return scanner.Err()
 }
 
 func (c *Client) getJSON(path string, out any) error {

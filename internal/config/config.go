@@ -3,6 +3,7 @@ package config
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"time"
 
 	"gopkg.in/yaml.v3"
@@ -19,8 +20,10 @@ type Config struct {
 	Args        []string      `yaml:"args"`         // optional arguments passed to the binary at startup
 	EnvFile     string        `yaml:"env_file"`     // optional .env file
 	HealthCheck string        `yaml:"health_check"` // health check path (default: /health)
-	Watch       []string      `yaml:"watch"`        // directories to watch for file changes (triggers restart)
-	DrainWindow time.Duration `yaml:"drain_window"` // grace period between proxy swap and SIGTERM to old process (e.g. 3s)
+	Watch              []string      `yaml:"watch"`               // directories to watch for file changes (triggers restart)
+	DrainWindow        time.Duration `yaml:"drain_window"`        // grace period between proxy swap and SIGTERM to old process (e.g. 3s)
+	HealthCheckTimeout time.Duration `yaml:"health_check_timeout"` // how long to poll /health before giving up (0 = default 15s)
+	RestartPolicy      string        `yaml:"restart_policy"`      // "always" | "on-watch" | "never" (default: "on-watch")
 }
 
 // Load reads and parses a .anito/config.yaml file.
@@ -47,6 +50,23 @@ func Load(path string) (*Config, error) {
 	}
 	if cfg.HealthCheck == "" {
 		cfg.HealthCheck = "/health"
+	}
+	if cfg.RestartPolicy == "" {
+		cfg.RestartPolicy = "on-watch"
+	}
+	switch cfg.RestartPolicy {
+	case "always", "on-watch", "never":
+	default:
+		return nil, fmt.Errorf("%s: restart_policy must be \"always\", \"on-watch\", or \"never\"", path)
+	}
+
+	// Resolve relative Watch paths against the config file's directory so that
+	// configs checked into a repo work on any machine without absolute paths.
+	configDir := filepath.Dir(path)
+	for i, w := range cfg.Watch {
+		if !filepath.IsAbs(w) {
+			cfg.Watch[i] = filepath.Join(configDir, w)
+		}
 	}
 
 	return &cfg, nil

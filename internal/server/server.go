@@ -94,16 +94,18 @@ func (s *Server) Start() error {
 
 // DeployRequest is the payload for POST /deploy.
 type DeployRequest struct {
-	Name        string               `json:"name"`
-	Version     string               `json:"version,omitempty"`
-	Type        registry.ServiceType `json:"type"`
-	Path        string               `json:"path"`
-	Args        []string             `json:"args,omitempty"`
-	StablePort  int                  `json:"stable_port,omitempty"`
-	EnvFile     string               `json:"env_file,omitempty"`
-	HealthCheck string               `json:"health_check,omitempty"`
-	WatchPaths  []string             `json:"watch_paths,omitempty"`
-	DrainWindow time.Duration        `json:"drain_window,omitempty"`
+	Name               string               `json:"name"`
+	Version            string               `json:"version,omitempty"`
+	Type               registry.ServiceType `json:"type"`
+	Path               string               `json:"path"`
+	Args               []string             `json:"args,omitempty"`
+	StablePort         int                  `json:"stable_port,omitempty"`
+	EnvFile            string               `json:"env_file,omitempty"`
+	HealthCheck        string               `json:"health_check,omitempty"`
+	WatchPaths         []string             `json:"watch_paths,omitempty"`
+	DrainWindow        time.Duration        `json:"drain_window,omitempty"`
+	HealthCheckTimeout time.Duration        `json:"health_check_timeout,omitempty"`
+	RestartPolicy      string               `json:"restart_policy,omitempty"`
 }
 
 func (s *Server) handleHealth(c echo.Context) error {
@@ -123,16 +125,18 @@ func (s *Server) handleDeploy(c echo.Context) error {
 		return echo.NewHTTPError(http.StatusBadRequest, "name and path are required")
 	}
 	svc, err := s.svc.Deploy(service.DeployRequest{
-		Name:        req.Name,
-		Version:     req.Version,
-		Type:        req.Type,
-		Path:        req.Path,
-		Args:        req.Args,
-		StablePort:  req.StablePort,
-		EnvFile:     req.EnvFile,
-		HealthCheck: req.HealthCheck,
-		WatchPaths:  req.WatchPaths,
-		DrainWindow: req.DrainWindow,
+		Name:               req.Name,
+		Version:            req.Version,
+		Type:               req.Type,
+		Path:               req.Path,
+		Args:               req.Args,
+		StablePort:         req.StablePort,
+		EnvFile:            req.EnvFile,
+		HealthCheck:        req.HealthCheck,
+		WatchPaths:         req.WatchPaths,
+		DrainWindow:        req.DrainWindow,
+		HealthCheckTimeout: req.HealthCheckTimeout,
+		RestartPolicy:      req.RestartPolicy,
 	})
 	if err != nil {
 		log.Printf("[ERROR] deploy name=%s error=%q", req.Name, err)

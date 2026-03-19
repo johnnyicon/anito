@@ -37,9 +37,11 @@ type Service struct {
 	InternalPort int           `json:"internal_port,omitempty"` // ephemeral port the process is actually on
 	EnvFile      string        `json:"env_file,omitempty"`
 	HealthCheck  string        `json:"health_check"` // path, e.g. "/health"
-	WatchPaths   []string      `json:"watch_paths,omitempty"`  // directories to watch for file changes
-	DrainWindow  time.Duration `json:"drain_window,omitempty"` // grace period between proxy swap and SIGTERM to old process
-	Status       ServiceStatus `json:"status"`
+	WatchPaths          []string      `json:"watch_paths,omitempty"`           // directories to watch for file changes
+	DrainWindow         time.Duration `json:"drain_window,omitempty"`          // grace period between proxy swap and SIGTERM to old process
+	HealthCheckTimeout  time.Duration `json:"health_check_timeout,omitempty"`  // how long to wait for /health → 200 (0 = use default 15s)
+	RestartPolicy       string        `json:"restart_policy,omitempty"`        // "always" | "on-watch" | "never" (default: "on-watch")
+	Status              ServiceStatus `json:"status"`
 	PID          int           `json:"pid,omitempty"`
 	DeployedAt   time.Time     `json:"deployed_at"`
 	UpdatedAt    time.Time     `json:"updated_at"`

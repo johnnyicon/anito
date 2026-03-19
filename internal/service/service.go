@@ -16,8 +16,10 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
+	"github.com/johnnyicon/anito/internal/notify"
 	"github.com/johnnyicon/anito/internal/process"
 	"github.com/johnnyicon/anito/internal/proxy"
 	"github.com/johnnyicon/anito/internal/registry"
@@ -34,15 +36,26 @@ var sseHealthCheckPaths = map[string]bool{
 }
 
 const (
-	portRangeStart      = 8100
-	portRangeEnd        = 8200
-	healthCheckInterval = 200 * time.Millisecond
-	healthCheckTimeout  = 15 * time.Second
+	portRangeStart         = 8100
+	portRangeEnd           = 8200
+	healthCheckInterval    = 200 * time.Millisecond
+	defaultHealthCheckTimeout = 15 * time.Second
+	defaultDrainWindow     = 2 * time.Second
 
 	// DaemonLogName is the reserved name for streaming Anito's own daemon log.
 	// Use it with Logs() / LogStream() — no service registry entry is required.
 	DaemonLogName = "~daemon"
 )
+
+// crashBackoffDurations is the wait before each successive crash-restart attempt.
+// After all attempts are exhausted the service is left failed and [CRASH_GIVE_UP] is logged.
+var crashBackoffDurations = []time.Duration{
+	1 * time.Second,
+	2 * time.Second,
+	4 * time.Second,
+	8 * time.Second,
+	30 * time.Second,
+}
 
 // reservedPorts are Anito's own ports — never allocate these to user services.
 var reservedPorts = map[int]bool{
@@ -57,26 +70,38 @@ type Service struct {
 	prx    *proxy.Manager
 	logDir string
 	wtch   *watcher.Manager
+
+	crashMu      sync.Mutex
+	crashAttempts map[string]int // per-service crash attempt counter; reset on successful start
 }
 
 func New(reg *registry.Registry, mgr *process.Manager, prx *proxy.Manager, logDir string, wtch *watcher.Manager) *Service {
-	svc := &Service{reg: reg, mgr: mgr, prx: prx, logDir: logDir, wtch: wtch}
+	svc := &Service{
+		reg:           reg,
+		mgr:           mgr,
+		prx:           prx,
+		logDir:        logDir,
+		wtch:          wtch,
+		crashAttempts: make(map[string]int),
+	}
 	mgr.OnCrash = svc.handleCrash
 	return svc
 }
 
 // DeployRequest describes a service to deploy.
 type DeployRequest struct {
-	Name        string
-	Version     string // optional semver tag, e.g. "v1.2.3"
-	Type        registry.ServiceType
-	Path        string   // binary path or static dir
-	Args        []string // optional arguments passed to the binary at startup
-	StablePort  int      // 0 = auto-allocate from [portRangeStart, portRangeEnd]
-	EnvFile     string
-	HealthCheck string
-	WatchPaths  []string      // directories to watch for file changes (triggers restart)
-	DrainWindow time.Duration // grace period between proxy swap and SIGTERM to old process (0 = immediate)
+	Name               string
+	Version            string // optional semver tag, e.g. "v1.2.3"
+	Type               registry.ServiceType
+	Path               string   // binary path or static dir
+	Args               []string // optional arguments passed to the binary at startup
+	StablePort         int      // 0 = auto-allocate from [portRangeStart, portRangeEnd]
+	EnvFile            string
+	HealthCheck        string
+	WatchPaths         []string      // directories to watch for file changes (triggers restart)
+	DrainWindow        time.Duration // grace period between proxy swap and SIGTERM to old process (0 = use defaultDrainWindow)
+	HealthCheckTimeout time.Duration // how long to poll /health (0 = use defaultHealthCheckTimeout)
+	RestartPolicy      string        // "always" | "on-watch" | "never" (default: "on-watch")
 }
 
 // Deploy registers, starts, and health-checks a service.
@@ -102,17 +127,32 @@ func (s *Service) Deploy(req DeployRequest) (*registry.Service, error) {
 		version = hashPath(req.Path)
 	}
 
+	drainWindow := req.DrainWindow
+	if drainWindow == 0 {
+		drainWindow = defaultDrainWindow
+	}
+	hcTimeout := req.HealthCheckTimeout
+	if hcTimeout == 0 {
+		hcTimeout = defaultHealthCheckTimeout
+	}
+	restartPolicy := req.RestartPolicy
+	if restartPolicy == "" {
+		restartPolicy = "on-watch"
+	}
+
 	svc := &registry.Service{
-		Name:        req.Name,
-		Version:     version,
-		Type:        req.Type,
-		BinaryPath:  req.Path,
-		Args:        req.Args,
-		StablePort:  stablePort,
-		EnvFile:     req.EnvFile,
-		HealthCheck: req.HealthCheck,
-		WatchPaths:  req.WatchPaths,
-		DrainWindow: req.DrainWindow,
+		Name:               req.Name,
+		Version:            version,
+		Type:               req.Type,
+		BinaryPath:         req.Path,
+		Args:               req.Args,
+		StablePort:         stablePort,
+		EnvFile:            req.EnvFile,
+		HealthCheck:        req.HealthCheck,
+		WatchPaths:         req.WatchPaths,
+		DrainWindow:        drainWindow,
+		HealthCheckTimeout: hcTimeout,
+		RestartPolicy:      restartPolicy,
 	}
 
 	if err := s.reg.Register(svc); err != nil {
@@ -144,29 +184,32 @@ func (s *Service) Deploy(req DeployRequest) (*registry.Service, error) {
 		return nil, err
 	}
 
-	if err := waitHealthy(internalPort, req.HealthCheck); err != nil {
+	if err := waitHealthy(internalPort, req.HealthCheck, hcTimeout); err != nil {
 		_ = s.mgr.Stop(req.Name)
-		return nil, fmt.Errorf("health check failed: %w", err)
+		return nil, err
 	}
 
 	if err := s.prx.Swap(req.Name, internalPort); err != nil {
 		return nil, err
 	}
 
+	// Successful deploy — reset crash backoff counter.
+	s.crashMu.Lock()
+	delete(s.crashAttempts, req.Name)
+	s.crashMu.Unlock()
+
 	if oldPID > 0 {
 		s.mgr.MarkDraining(oldPID)
-		drainWindow := req.DrainWindow
 		go func(pid int, window time.Duration) {
-			if window > 0 {
-				log.Printf("[DRAIN] name=%s pid=%d waiting %s for in-flight requests", req.Name, pid, window)
-				time.Sleep(window)
-			}
+			log.Printf("[DRAIN] name=%s pid=%d waiting %s for in-flight requests", req.Name, pid, window)
+			time.Sleep(window)
 			process.StopPID(pid)
 		}(oldPID, drainWindow)
 	}
 
 	svc, _ = s.reg.Get(req.Name)
 	log.Printf("[DEPLOY] name=%s port=%d internal=%d pid=%d", svc.Name, svc.StablePort, internalPort, svc.PID)
+	notify.Send("Anito", fmt.Sprintf("✓ %s deployed on :%d", svc.Name, svc.StablePort))
 	s.startWatcher(svc)
 	return svc, nil
 }
@@ -226,8 +269,11 @@ func (s *Service) Restart(name string) error {
 		return err
 	}
 
-	if err := waitHealthy(internalPort, svc.HealthCheck); err != nil {
-		err = fmt.Errorf("health check failed after restart: %w", err)
+	hcTimeout := svc.HealthCheckTimeout
+	if hcTimeout == 0 {
+		hcTimeout = defaultHealthCheckTimeout
+	}
+	if err := waitHealthy(internalPort, svc.HealthCheck, hcTimeout); err != nil {
 		log.Printf("[RESTART] name=%s error=%q", name, err)
 		_ = s.mgr.Stop(name)
 		return err
@@ -237,19 +283,26 @@ func (s *Service) Restart(name string) error {
 		return err
 	}
 
+	// Successful restart — reset crash backoff counter.
+	s.crashMu.Lock()
+	delete(s.crashAttempts, name)
+	s.crashMu.Unlock()
+
+	drainWindow := svc.DrainWindow
+	if drainWindow == 0 {
+		drainWindow = defaultDrainWindow
+	}
 	if oldPID > 0 {
 		s.mgr.MarkDraining(oldPID)
-		drainWindow := svc.DrainWindow
 		go func(pid int, window time.Duration) {
-			if window > 0 {
-				log.Printf("[DRAIN] name=%s pid=%d waiting %s for in-flight requests", name, pid, window)
-				time.Sleep(window)
-			}
+			log.Printf("[DRAIN] name=%s pid=%d waiting %s for in-flight requests", name, pid, window)
+			time.Sleep(window)
 			process.StopPID(pid)
 		}(oldPID, drainWindow)
 	}
 
 	log.Printf("[RESTART] name=%s port=%d internal=%d", name, svc.StablePort, internalPort)
+	notify.Send("Anito", fmt.Sprintf("↺ %s restarted on :%d", name, svc.StablePort))
 	return nil
 }
 
@@ -293,18 +346,52 @@ func (s *Service) StartWatchers() {
 }
 
 // handleCrash is called by the process manager when a service exits unexpectedly.
-// Services with WatchPaths are automatically restarted (with a brief cooldown).
-// Services that were intentionally stopped are not restarted.
+// Restart behaviour is governed by restart_policy:
+//   - "never":    never restart automatically
+//   - "on-watch": restart only if the service has WatchPaths configured (default)
+//   - "always":   always restart regardless of WatchPaths
+//
+// Restarts use exponential backoff (1s→2s→4s→8s→30s). After all attempts are
+// exhausted the service is left in the failed state and [CRASH_GIVE_UP] is logged.
 func (s *Service) handleCrash(name string) {
+	notify.Send("Anito", fmt.Sprintf("⚠ %s crashed", name))
 	svc, ok := s.reg.Get(name)
-	if !ok || len(svc.WatchPaths) == 0 {
+	if !ok {
 		return
 	}
 	if svc.Status == registry.StatusStopped {
 		return // intentionally stopped — do not restart
 	}
-	time.Sleep(2 * time.Second) // brief cooldown to avoid tight restart loops
-	log.Printf("[RESTART] name=%s reason=crash", name)
+
+	policy := svc.RestartPolicy
+	if policy == "" {
+		policy = "on-watch"
+	}
+	switch policy {
+	case "never":
+		return
+	case "on-watch":
+		if len(svc.WatchPaths) == 0 {
+			return
+		}
+	case "always":
+		// fall through — restart unconditionally
+	}
+
+	s.crashMu.Lock()
+	attempt := s.crashAttempts[name]
+	if attempt >= len(crashBackoffDurations) {
+		s.crashMu.Unlock()
+		log.Printf("[CRASH_GIVE_UP] name=%s attempts=%d", name, attempt)
+		return
+	}
+	s.crashAttempts[name] = attempt + 1
+	s.crashMu.Unlock()
+
+	wait := crashBackoffDurations[attempt]
+	log.Printf("[RESTART] name=%s reason=crash attempt=%d waiting=%s", name, attempt+1, wait)
+	time.Sleep(wait)
+
 	if err := s.Restart(name); err != nil {
 		log.Printf("[ERROR] name=%s crash restart failed: %v", name, err)
 	}
@@ -494,20 +581,22 @@ func hashPath(path string) string {
 // is reached.  For SSE endpoints (e.g. /sse), a plain HTTP 200 is not
 // sufficient — we read the first event line to confirm the MCP transport is
 // fully ready to serve tool calls.
-func waitHealthy(internalPort int, path string) error {
+func waitHealthy(internalPort int, path string, timeout time.Duration) error {
 	if sseHealthCheckPaths[path] {
-		return waitSSEReady(internalPort, path)
+		return waitSSEReady(internalPort, path, timeout)
 	}
-	return waitHTTPReady(internalPort, path)
+	return waitHTTPReady(internalPort, path, timeout)
 }
 
 // waitHTTPReady polls path until it returns HTTP 200.
-func waitHTTPReady(internalPort int, path string) error {
+func waitHTTPReady(internalPort int, path string, timeout time.Duration) error {
 	url := fmt.Sprintf("http://localhost:%d%s", internalPort, path)
-	deadline := time.Now().Add(healthCheckTimeout)
+	deadline := time.Now().Add(timeout)
+	var lastStatus int
 	for time.Now().Before(deadline) {
 		resp, err := http.Get(url) //nolint:noctx
 		if err == nil {
+			lastStatus = resp.StatusCode
 			resp.Body.Close()
 			if resp.StatusCode == http.StatusOK {
 				return nil
@@ -515,7 +604,12 @@ func waitHTTPReady(internalPort int, path string) error {
 		}
 		time.Sleep(healthCheckInterval)
 	}
-	return fmt.Errorf("timed out after %s waiting for %s", healthCheckTimeout, url)
+	msg := fmt.Sprintf("health check timed out after %s: GET %s did not return 200", timeout, url)
+	if lastStatus > 0 {
+		msg += fmt.Sprintf(" (last status: %d)", lastStatus)
+	}
+	msg += "\nAnito requires your service to expose GET " + path + " → 200 OK and read PORT from the environment."
+	return fmt.Errorf("%s", msg)
 }
 
 // waitSSEReady connects to an SSE endpoint and waits for the first event line
@@ -523,9 +617,9 @@ func waitHTTPReady(internalPort int, path string) error {
 // advertisement, which is only sent once the server is ready to accept
 // initialize handshakes.  We treat any non-empty "event:" or "data:" line as
 // proof of readiness — the exact event type is not important.
-func waitSSEReady(internalPort int, path string) error {
+func waitSSEReady(internalPort int, path string, timeout time.Duration) error {
 	rawURL := fmt.Sprintf("http://localhost:%d%s", internalPort, path)
-	deadline := time.Now().Add(healthCheckTimeout)
+	deadline := time.Now().Add(timeout)
 
 	for time.Now().Before(deadline) {
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
@@ -536,7 +630,7 @@ func waitSSEReady(internalPort int, path string) error {
 		}
 		time.Sleep(healthCheckInterval)
 	}
-	return fmt.Errorf("timed out after %s waiting for SSE readiness on %s", healthCheckTimeout, rawURL)
+	return fmt.Errorf("health check timed out after %s waiting for SSE readiness on %s\nAnito requires your service to expose GET %s → 200 OK and read PORT from the environment.", timeout, rawURL, path)
 }
 
 // probeSSE opens an SSE connection to url and returns (true, nil) as soon as
