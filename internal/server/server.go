@@ -103,8 +103,8 @@ type DeployRequest struct {
 	EnvFile            string               `json:"env_file,omitempty"`
 	HealthCheck        string               `json:"health_check,omitempty"`
 	WatchPaths         []string             `json:"watch_paths,omitempty"`
-	DrainWindow        time.Duration        `json:"drain_window,omitempty"`
-	HealthCheckTimeout time.Duration        `json:"health_check_timeout,omitempty"`
+	DrainWindow        string               `json:"drain_window,omitempty"`
+	HealthCheckTimeout string               `json:"health_check_timeout,omitempty"`
 	RestartPolicy      string               `json:"restart_policy,omitempty"`
 }
 
@@ -124,6 +124,24 @@ func (s *Server) handleDeploy(c echo.Context) error {
 	if req.Name == "" || req.Path == "" {
 		return echo.NewHTTPError(http.StatusBadRequest, "name and path are required")
 	}
+
+	var drainWindow time.Duration
+	if req.DrainWindow != "" {
+		d, err := time.ParseDuration(req.DrainWindow)
+		if err != nil {
+			return echo.NewHTTPError(http.StatusBadRequest, fmt.Sprintf("invalid drain_window %q: use a duration string like '3s' or '500ms'", req.DrainWindow))
+		}
+		drainWindow = d
+	}
+	var hcTimeout time.Duration
+	if req.HealthCheckTimeout != "" {
+		d, err := time.ParseDuration(req.HealthCheckTimeout)
+		if err != nil {
+			return echo.NewHTTPError(http.StatusBadRequest, fmt.Sprintf("invalid health_check_timeout %q: use a duration string like '30s'", req.HealthCheckTimeout))
+		}
+		hcTimeout = d
+	}
+
 	svc, err := s.svc.Deploy(service.DeployRequest{
 		Name:               req.Name,
 		Version:            req.Version,
@@ -134,8 +152,8 @@ func (s *Server) handleDeploy(c echo.Context) error {
 		EnvFile:            req.EnvFile,
 		HealthCheck:        req.HealthCheck,
 		WatchPaths:         req.WatchPaths,
-		DrainWindow:        req.DrainWindow,
-		HealthCheckTimeout: req.HealthCheckTimeout,
+		DrainWindow:        drainWindow,
+		HealthCheckTimeout: hcTimeout,
 		RestartPolicy:      req.RestartPolicy,
 	})
 	if err != nil {
@@ -160,7 +178,11 @@ func (s *Server) handleRestart(c echo.Context) error {
 		log.Printf("[ERROR] restart name=%s error=%q", name, err)
 		return echo.NewHTTPError(http.StatusInternalServerError, err.Error())
 	}
-	return c.JSON(http.StatusOK, map[string]string{"status": "restarted", "name": name})
+	svc, err := s.svc.Status(name)
+	if err != nil {
+		return echo.NewHTTPError(http.StatusInternalServerError, err.Error())
+	}
+	return c.JSON(http.StatusOK, svc)
 }
 
 func (s *Server) handleStatus(c echo.Context) error {
