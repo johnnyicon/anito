@@ -8,6 +8,28 @@ Format: `## [date] — description`, breaking changes marked **BREAKING**.
 
 ---
 
+## 2026-03-20 — env_file paths are now always absolute in config
+
+**Bug fix — breaking for workarounds only.**
+
+Relative `env_file` paths in `.anito/config.yaml` are now resolved to absolute paths at config load time, relative to the config file's directory. Previously, the daemon received the literal relative string and resolved it against its own working directory (`~/.anito`), causing 500 errors.
+
+Before (broken):
+```yaml
+env_file: .anito/ports.env   # daemon tried to open ~/.anito/.anito/ports.env
+```
+
+After (fixed — no config change needed):
+```yaml
+env_file: .anito/ports.env   # now resolved to /abs/path/to/repo/.anito/ports.env
+```
+
+If you were using absolute paths as a workaround (as shown in the sogs-api trace), those continue to work — absolute paths are passed through unchanged. No action required.
+
+**Doctor:** `anito_doctor` now flags services whose registry `env_file` is still a relative string (deployed before this fix). Fix: `anito deploy`.
+
+---
+
 ## 2026-03-19 — Deployment receipt: deployed.json + anito_teardown
 
 Every successful `anito deploy` (CLI) or `anito_deploy` (MCP) now writes a receipt into the consuming repo's `.anito/deployed.json`. This is the repo's local record of what it has registered with Anito — the single source of truth for cleanup, teardown, and agent re-entry.
