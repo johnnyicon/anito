@@ -14,6 +14,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -71,8 +72,10 @@ type Service struct {
 	logDir string
 	wtch   *watcher.Manager
 
-	crashMu      sync.Mutex
+	crashMu       sync.Mutex
 	crashAttempts map[string]int // per-service crash attempt counter; reset on successful start
+
+	deployLocks sync.Map // map[string]*sync.Mutex — per-service deploy serialization
 }
 
 func New(reg *registry.Registry, mgr *process.Manager, prx *proxy.Manager, logDir string, wtch *watcher.Manager) *Service {
@@ -104,12 +107,23 @@ type DeployRequest struct {
 	RestartPolicy      string        // "always" | "on-watch" | "never" (default: "on-watch")
 }
 
+// lockDeploy acquires a per-service deploy lock and returns an unlock function.
+// This serializes concurrent Deploy/Restart calls for the same service name.
+func (s *Service) lockDeploy(name string) func() {
+	v, _ := s.deployLocks.LoadOrStore(name, &sync.Mutex{})
+	mu := v.(*sync.Mutex)
+	mu.Lock()
+	return mu.Unlock
+}
+
 // Deploy registers, starts, and health-checks a service.
 //
 //   - If StablePort == 0, a port is auto-allocated from the configured range.
 //   - If StablePort is non-zero but unavailable, auto-allocation is used as fallback.
 //   - Re-deploying an existing service always preserves its stable port.
 func (s *Service) Deploy(req DeployRequest) (*registry.Service, error) {
+	defer s.lockDeploy(req.Name)()
+
 	if req.HealthCheck == "" {
 		req.HealthCheck = "/health"
 	}
@@ -165,6 +179,7 @@ func (s *Service) Deploy(req DeployRequest) (*registry.Service, error) {
 			return nil, err
 		}
 		_ = s.reg.UpdateStatus(req.Name, registry.StatusRunning, 0)
+		_ = s.reg.UpdateLastDeployed(req.Name, time.Now())
 		svc, _ = s.reg.Get(req.Name)
 		log.Printf("[DEPLOY] name=%s port=%d type=static path=%s", svc.Name, svc.StablePort, req.Path)
 		return svc, nil
@@ -174,7 +189,7 @@ func (s *Service) Deploy(req DeployRequest) (*registry.Service, error) {
 	// If the manager is already tracking this service (e.g. after a daemon
 	// restart + restore), deregister it without killing it so the name slot is
 	// free. The old PID will be drained after the new process is healthy.
-	oldPID := s.mgr.Deregister(svc.Name)
+	oldPID, oldCmd := s.mgr.Deregister(svc.Name)
 	if oldPID == 0 {
 		oldPID = svc.PID // fall back to registry PID if not tracked in-memory
 	}
@@ -186,25 +201,42 @@ func (s *Service) Deploy(req DeployRequest) (*registry.Service, error) {
 
 	if err := waitHealthy(internalPort, req.HealthCheck, hcTimeout); err != nil {
 		_ = s.mgr.Stop(req.Name)
+		// Preserve old process: mark its PID as draining to suppress false OnCrash
+		// when it eventually exits (it is still serving traffic via the proxy).
+		if oldPID > 0 {
+			s.mgr.MarkDraining(oldPID)
+		}
 		return nil, err
 	}
 
 	if err := s.prx.Swap(req.Name, internalPort); err != nil {
+		_ = s.mgr.Stop(req.Name)
+		if oldPID > 0 {
+			s.mgr.MarkDraining(oldPID)
+		}
 		return nil, err
 	}
+
+	// Authoritative running write — only after both health check AND proxy swap succeed.
+	newPID := s.mgr.PID(req.Name)
+	_ = s.reg.UpdateStatus(req.Name, registry.StatusRunning, newPID)
+	_ = s.reg.UpdateLastDeployed(req.Name, time.Now())
 
 	// Successful deploy — reset crash backoff counter.
 	s.crashMu.Lock()
 	delete(s.crashAttempts, req.Name)
 	s.crashMu.Unlock()
 
-	if oldPID > 0 {
-		s.mgr.MarkDraining(oldPID)
-		go func(pid int, window time.Duration) {
-			log.Printf("[DRAIN] name=%s pid=%d waiting %s for in-flight requests", req.Name, pid, window)
+	if oldCmd != nil {
+		pid := oldPID
+		if pid > 0 {
+			s.mgr.MarkDraining(pid)
+		}
+		go func(cmd *exec.Cmd, p int, window time.Duration) {
+			log.Printf("[DRAIN] name=%s pid=%d waiting %s for in-flight requests", req.Name, p, window)
 			time.Sleep(window)
-			process.StopPID(pid)
-		}(oldPID, drainWindow)
+			process.DrainProc(cmd)
+		}(oldCmd, pid, drainWindow)
 	}
 
 	svc, _ = s.reg.Get(req.Name)
@@ -238,12 +270,15 @@ func (s *Service) Stop(name string) error {
 	if err != nil {
 		log.Printf("[STOP] name=%s error=%q", name, err)
 	} else {
+		_ = s.reg.UpdateStatus(name, registry.StatusStopped, 0)
 		log.Printf("[STOP] name=%s", name)
 	}
 	return err
 }
 
 func (s *Service) Restart(name string) error {
+	defer s.lockDeploy(name)()
+
 	svc, ok := s.reg.Get(name)
 	if !ok {
 		return fmt.Errorf("service %q not found", name)
@@ -257,7 +292,7 @@ func (s *Service) Restart(name string) error {
 	// Blue/green restart: deregister old process (don't kill it yet), start new
 	// one, health-check, swap proxy, then drain the old process.  This keeps the
 	// stable port live throughout and respects the configured drain window.
-	oldPID := s.mgr.Deregister(name)
+	oldPID, oldCmd := s.mgr.Deregister(name)
 	if oldPID == 0 {
 		oldPID = svc.PID
 	}
@@ -265,7 +300,6 @@ func (s *Service) Restart(name string) error {
 	internalPort, err := s.mgr.Start(svc)
 	if err != nil {
 		log.Printf("[RESTART] name=%s error=%q", name, err)
-		// Restore old process tracking if start fails — best-effort.
 		return err
 	}
 
@@ -276,12 +310,23 @@ func (s *Service) Restart(name string) error {
 	if err := waitHealthy(internalPort, svc.HealthCheck, hcTimeout); err != nil {
 		log.Printf("[RESTART] name=%s error=%q", name, err)
 		_ = s.mgr.Stop(name)
+		if oldPID > 0 {
+			s.mgr.MarkDraining(oldPID)
+		}
 		return err
 	}
 
 	if err := s.prx.Swap(name, internalPort); err != nil {
+		_ = s.mgr.Stop(name)
+		if oldPID > 0 {
+			s.mgr.MarkDraining(oldPID)
+		}
 		return err
 	}
+
+	// Authoritative running write — after both health check AND proxy swap.
+	newPID := s.mgr.PID(name)
+	_ = s.reg.UpdateStatus(name, registry.StatusRunning, newPID)
 
 	// Successful restart — reset crash backoff counter.
 	s.crashMu.Lock()
@@ -292,13 +337,16 @@ func (s *Service) Restart(name string) error {
 	if drainWindow == 0 {
 		drainWindow = defaultDrainWindow
 	}
-	if oldPID > 0 {
-		s.mgr.MarkDraining(oldPID)
-		go func(pid int, window time.Duration) {
-			log.Printf("[DRAIN] name=%s pid=%d waiting %s for in-flight requests", name, pid, window)
+	if oldCmd != nil {
+		pid := oldPID
+		if pid > 0 {
+			s.mgr.MarkDraining(pid)
+		}
+		go func(cmd *exec.Cmd, p int, window time.Duration) {
+			log.Printf("[DRAIN] name=%s pid=%d waiting %s for in-flight requests", name, p, window)
 			time.Sleep(window)
-			process.StopPID(pid)
-		}(oldPID, drainWindow)
+			process.DrainProc(cmd)
+		}(oldCmd, pid, drainWindow)
 	}
 
 	log.Printf("[RESTART] name=%s port=%d internal=%d", name, svc.StablePort, internalPort)
@@ -325,7 +373,6 @@ func (s *Service) startWatcher(svc *registry.Service) {
 		return
 	}
 	err := s.wtch.Start(svc.Name, svc.WatchPaths, func(trigger string) {
-		log.Printf("[WATCH] name=%s restarting due to change in %s", svc.Name, trigger)
 		if err := s.Restart(svc.Name); err != nil {
 			log.Printf("[ERROR] name=%s watch restart failed: %v", svc.Name, err)
 		}
@@ -575,6 +622,12 @@ func hashPath(path string) string {
 		_, _ = io.Copy(h, f)
 	}
 	return "sha:" + hex.EncodeToString(h.Sum(nil))[:8]
+}
+
+// WaitHealthy polls the health check endpoint until it passes or the deadline is reached.
+// Exported for use by main.go's service restore loop.
+func WaitHealthy(internalPort int, path string, timeout time.Duration) error {
+	return waitHealthy(internalPort, path, timeout)
 }
 
 // waitHealthy polls the health check endpoint until it passes or the deadline

@@ -23,6 +23,7 @@ const (
 type runningProc struct {
 	cmd          *exec.Cmd
 	internalPort int
+	logFile      *os.File
 }
 
 // Manager supervises running processes.
@@ -73,18 +74,20 @@ func (m *Manager) Start(svc *registry.Service) (internalPort int, err error) {
 		return 0, fmt.Errorf("could not find free port for %q: %w", svc.Name, err)
 	}
 
-	cmd, err := m.buildCmd(svc, port)
+	cmd, logFile, err := m.buildCmd(svc, port)
 	if err != nil {
 		return 0, err
 	}
 
 	if err := cmd.Start(); err != nil {
+		if logFile != nil {
+			_ = logFile.Close()
+		}
 		_ = m.reg.UpdateStatus(svc.Name, registry.StatusFailed, 0)
 		return 0, fmt.Errorf("failed to start %q: %w", svc.Name, err)
 	}
 
-	m.procs[svc.Name] = &runningProc{cmd: cmd, internalPort: port}
-	_ = m.reg.UpdateStatus(svc.Name, registry.StatusRunning, cmd.Process.Pid)
+	m.procs[svc.Name] = &runningProc{cmd: cmd, internalPort: port, logFile: logFile}
 	_ = m.reg.UpdateInternalPort(svc.Name, port)
 
 	// Watch for unexpected exit.
@@ -92,10 +95,16 @@ func (m *Manager) Start(svc *registry.Service) (internalPort int, err error) {
 	go func() {
 		_ = cmd.Wait()
 		m.mu.Lock()
+		rp, exists := m.procs[svc.Name]
 		delete(m.procs, svc.Name)
 		isDraining := m.draining[pid]
 		delete(m.draining, pid)
 		m.mu.Unlock()
+
+		// Close the log file descriptor.
+		if exists && rp.logFile != nil {
+			_ = rp.logFile.Close()
+		}
 
 		if isDraining {
 			log.Printf("[DRAIN] name=%s pid=%d", svc.Name, pid)
@@ -167,21 +176,37 @@ func (m *Manager) IsRunning(name string) bool {
 }
 
 // Deregister removes name from the tracked process table without sending any
-// signal, and returns the old PID. Use this before starting a replacement
-// process so the name slot is free; drain the returned PID after the new
+// signal, and returns the old PID and cmd. Use this before starting a replacement
+// process so the name slot is free; drain the returned cmd after the new
 // process passes its health check.
-func (m *Manager) Deregister(name string) int {
+func (m *Manager) Deregister(name string) (int, *exec.Cmd) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	rp, ok := m.procs[name]
 	if !ok {
-		return 0
+		return 0, nil
 	}
 	delete(m.procs, name)
 	if rp.cmd.Process != nil {
+		return rp.cmd.Process.Pid, rp.cmd
+	}
+	return 0, rp.cmd
+}
+
+// PID returns the PID of a running process, or 0.
+func (m *Manager) PID(name string) int {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	if rp, ok := m.procs[name]; ok && rp.cmd.Process != nil {
 		return rp.cmd.Process.Pid
 	}
 	return 0
+}
+
+// DrainProc sends SIGTERM and waits up to drainTimeout before SIGKILL.
+// Exported so the service layer can drain a cmd returned by Deregister.
+func DrainProc(cmd *exec.Cmd) error {
+	return drainProc(cmd)
 }
 
 // InternalPort returns the ephemeral port for a running service, or 0.
@@ -196,9 +221,9 @@ func (m *Manager) InternalPort(name string) int {
 
 // --- helpers ---
 
-func (m *Manager) buildCmd(svc *registry.Service, port int) (*exec.Cmd, error) {
+func (m *Manager) buildCmd(svc *registry.Service, port int) (*exec.Cmd, *os.File, error) {
 	if svc.Type != registry.TypeBinary {
-		return nil, fmt.Errorf("buildCmd: static services do not run a process")
+		return nil, nil, fmt.Errorf("buildCmd: static services do not run a process")
 	}
 
 	cmd := exec.Command(svc.BinaryPath, svc.Args...)
@@ -209,7 +234,7 @@ func (m *Manager) buildCmd(svc *registry.Service, port int) (*exec.Cmd, error) {
 	if svc.EnvFile != "" {
 		envVars, err := loadEnvFile(svc.EnvFile)
 		if err != nil {
-			return nil, fmt.Errorf("loading env file: %w", err)
+			return nil, nil, fmt.Errorf("loading env file: %w", err)
 		}
 		cmd.Env = append(cmd.Env, envVars...)
 	}
@@ -217,12 +242,12 @@ func (m *Manager) buildCmd(svc *registry.Service, port int) (*exec.Cmd, error) {
 	outPath := filepath.Join(m.logDir, svc.Name+".log")
 	logFile, err := os.OpenFile(outPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	cmd.Stdout = logFile
 	cmd.Stderr = logFile
 
-	return cmd, nil
+	return cmd, logFile, nil
 }
 
 // freePort asks the OS for an available TCP port.

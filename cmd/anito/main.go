@@ -610,13 +610,30 @@ func runDaemon(apiPort, mcpPort int, dataDir string) {
 			}
 			internalPort, err := mgr.Start(svc)
 			if err != nil {
-				log.Printf("[RESTORE_FAILED] name=%s reason=%v", svc.Name, err)
+				log.Printf("[RESTORE_FAILED] name=%s error=%v", svc.Name, err)
 				_ = reg.UpdateStatus(svc.Name, registry.StatusFailed, 0)
 				continue
 			}
-			if err := prx.Swap(svc.Name, internalPort); err != nil {
-				log.Printf("warn: proxy swap failed for %s: %v", svc.Name, err)
+
+			hcTimeout := svc.HealthCheckTimeout
+			if hcTimeout == 0 {
+				hcTimeout = 15 * time.Second
 			}
+			if err := service.WaitHealthy(internalPort, svc.HealthCheck, hcTimeout); err != nil {
+				log.Printf("[RESTORE_FAILED] name=%s health_check=%v", svc.Name, err)
+				_ = mgr.Stop(svc.Name)
+				_ = reg.UpdateStatus(svc.Name, registry.StatusFailed, 0)
+				continue
+			}
+
+			if err := prx.Swap(svc.Name, internalPort); err != nil {
+				log.Printf("[RESTORE_FAILED] name=%s proxy_swap=%v", svc.Name, err)
+				_ = mgr.Stop(svc.Name)
+				_ = reg.UpdateStatus(svc.Name, registry.StatusFailed, 0)
+				continue
+			}
+			newPID := mgr.PID(svc.Name)
+			_ = reg.UpdateStatus(svc.Name, registry.StatusRunning, newPID)
 		}
 	}
 
