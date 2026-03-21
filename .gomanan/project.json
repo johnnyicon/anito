@@ -1,0 +1,13 @@
+{
+  "$schema": "https://maykapal.dev/schemas/gomanan/project/v1.json",
+  "version": 1,
+  "project_id": "019cf98a-a430-7bf3-aa4c-24bc45c7efa2",
+  "slug": "anito",
+  "remote": "git@github.com:johnnyicon/anito.git",
+  "tolus": {
+    "enabled": true,
+    "languages": [
+      "go"
+    ]
+  }
+}
