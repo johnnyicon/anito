@@ -1,8 +1,8 @@
 {
   "mcpServers": {
     "gomanan": {
-      "type": "sse",
-      "url": "http://localhost:8100/sse"
+      "type": "http",
+      "url": "http://localhost:8100"
     }
   }
 }
