@@ -72,3 +72,9 @@ The pre-commit hook in `scripts/pre-commit` (installed via `make install-hooks`)
 - `GET /logs/:name` streaming endpoint — prerequisite for MCP
 - Port auto-allocation fallback — required before MCP `anito_deploy` tool
 - `anito init` / `anito_setup` — repo scaffolding and introspection
+
+## Gomanan Toolbox
+
+project_path: "/Users/kanekoa/Workspace/anito"
+
+Always pass `project_path` to: `gomanan.adr_create`, `gomanan.dj_create`, `gomanan.blog_write`
