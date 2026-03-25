@@ -341,6 +341,7 @@ func (s *Server) registerTools(srv *sdkmcp.Server) {
 	sdkmcp.AddTool(srv, &sdkmcp.Tool{
 		Name:        "anito_services",
 		Description: "List all services registered with Anito, including their stable ports and current status.",
+		InputSchema: json.RawMessage(`{"type":"object","properties":{}}`),
 	}, func(ctx context.Context, req *sdkmcp.CallToolRequest, in struct{}) (*sdkmcp.CallToolResult, servicesOutput, error) {
 		log.Printf("[MCP] tool=anito_services")
 		svcs := s.svc.Services()
