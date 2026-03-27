@@ -68,6 +68,17 @@ output: ./dist/my-api
 env_file: .env.local    # optional
 ```
 
+For services that need multiple ports (e.g. WebSocket + HTTP API), use `ports:` instead:
+
+```yaml
+name: my-daemon
+ports:                  # named ports — each gets its own reverse proxy
+  ws: 7172
+  http: 7173
+health_check_port: ws   # which port to health-check
+output: ./dist/my-daemon
+```
+
 **2. Deploy:**
 
 ```bash
@@ -121,7 +132,7 @@ Every service deploying to Anito must follow two rules:
 
 | Rule | Details |
 |------|---------|
-| Read `PORT` from environment | Anito injects the ephemeral internal port at startup |
+| Read port(s) from environment | Single-port: `PORT=<ephemeral>`. Multi-port: `PORT_WS`, `PORT_HTTP`, etc. |
 | Expose `GET /health → 200 OK` | Used to gate proxy swaps and verify restarts |
 
 That's it. Anito doesn't care about the language, framework, or what's inside the binary.
@@ -133,8 +144,9 @@ That's it. Anito doesn't care about the language, framework, or what's inside th
 ```yaml
 name: my-service          # required — unique name across all your services
 
-port: 3000                # required — stable port consumers connect to
+port: 3000                # stable port consumers connect to (0 = auto-allocate)
                           # Anito holds this port permanently via its proxy
+                          # For multi-port services, use ports: instead (see below)
 
 type: binary              # binary (default) | static
                           # binary: a self-contained executable
@@ -148,6 +160,12 @@ env_file: .env.local      # optional — KEY=VALUE file loaded at service start
 
 health_check: /health     # optional — path used to gate proxy swaps
                           # default: /health
+
+# Multi-port alternative (mutually exclusive with port):
+# ports:
+#   ws: 7172
+#   http: 7173
+# health_check_port: ws   # which named port to health-check
 ```
 
 ---
@@ -157,10 +175,11 @@ health_check: /health     # optional — path used to gate proxy swaps
 | What | Port |
 |------|------|
 | Anito management API | `7700` (fixed) |
-| Your service (stable) | whatever you set in `config.yaml` — e.g. `3000` |
-| Your process (internal) | ephemeral, managed by Anito |
+| Anito MCP server | `7701` (fixed) |
+| Your service (stable) | whatever you set in `config.yaml` — e.g. `3000`, or multiple named ports |
+| Your process (internal) | ephemeral, managed by Anito — one per named port |
 
-You choose the stable port for each service. Anito owns it via a persistent proxy listener. The actual process moves to a new ephemeral port on every deploy — your consumers never notice.
+You choose the stable port(s) for each service. Anito owns them via persistent proxy listeners. The actual process moves to new ephemeral port(s) on every deploy — your consumers never notice. Multi-port services get one proxy per named port, all swapped atomically.
 
 ---
 

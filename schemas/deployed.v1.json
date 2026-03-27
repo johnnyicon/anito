@@ -30,12 +30,29 @@
           "type": "integer",
           "minimum": 1,
           "maximum": 65535,
-          "description": "The stable port consumers connect to. Owned by the Anito proxy — does not change across deploys."
+          "description": "The primary stable port consumers connect to. For multi-port services, this is the health-check port. Owned by the Anito proxy — does not change across deploys."
         },
         "address": {
           "type": "string",
           "format": "uri",
-          "description": "Full stable address: http://localhost:<stable_port>."
+          "description": "Full stable address for the primary port: http://localhost:<stable_port>."
+        },
+        "stable_ports": {
+          "type": "object",
+          "description": "All named stable ports. For single-port services: {\"default\": <port>}. For multi-port: {\"ws\": 7172, \"http\": 7173}. Each port is proxy-owned and permanent.",
+          "additionalProperties": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 65535
+          }
+        },
+        "addresses": {
+          "type": "object",
+          "description": "All named stable addresses. Same keys as stable_ports, values are full URLs.",
+          "additionalProperties": {
+            "type": "string",
+            "format": "uri"
+          }
         },
         "binary_path": {
           "type": "string",

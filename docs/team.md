@@ -40,6 +40,6 @@ These decisions are locked unless explicitly revisited:
 |----------|-----------|
 | Single binary for daemon + CLI + MCP | One install, one process, no coordination overhead |
 | Shared service layer | CLI and MCP are thin wrappers; all logic lives in the internal service layer, not in command handlers |
-| Stable port held by proxy | Consumers (browsers, MCP hosts, other services) never reconnect; the proxy owns the port permanently |
-| Port required in `config.yaml`, auto-allocation as fallback | Developers pin ports for stable integrations; Anito handles conflicts automatically |
+| Stable port(s) held by proxy | Consumers never reconnect; the proxy owns port(s) permanently. Multi-port services get one proxy per named port, all swapped atomically |
+| Port(s) in `config.yaml`, auto-allocation as fallback | `port:` for single-port, `ports:` map for multi-port. Developers pin ports for stable integrations; Anito handles conflicts automatically |
 | Streaming log endpoint (`GET /logs/:name`) | Consumers (LLMs, CI, dashboards) cannot be assumed to have local filesystem access |

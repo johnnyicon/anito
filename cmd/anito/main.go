@@ -357,26 +357,44 @@ func runDeploy(cli *client.Client, configPath string) {
 	}
 
 	portDesc := "auto"
-	if cfg.Port != 0 {
-		portDesc = fmt.Sprintf("localhost:%d", cfg.Port)
+	if len(cfg.Ports) > 0 {
+		if len(cfg.Ports) == 1 {
+			for _, p := range cfg.Ports {
+				if p != 0 {
+					portDesc = fmt.Sprintf("localhost:%d", p)
+				}
+			}
+		} else {
+			portDesc = fmt.Sprintf("%d ports", len(cfg.Ports))
+		}
 	}
 	fmt.Printf("deploying %s → %s...\n", cfg.Name, portDesc)
 
-	svc, err := cli.Deploy(client.DeployRequest{
+	req := client.DeployRequest{
 		Name:               cfg.Name,
 		Version:            cfg.Version,
 		Type:               registry.ServiceType(cfg.Type),
 		Path:               absOutput,
 		Args:               cfg.Args,
-		StablePort:         cfg.Port,
 		EnvFile:            absEnvFile,
 		HealthCheck:        cfg.HealthCheck,
+		HealthCheckPort:    cfg.HealthCheckPort,
 		WatchPaths:         cfg.Watch,
 		DrainWindow:        cfg.DrainWindow,
 		HealthCheckTimeout: cfg.HealthCheckTimeout,
 		RestartPolicy:      cfg.RestartPolicy,
 		ConfigPath:         absConfig,
-	})
+	}
+	// Pass ports: multi-port uses StablePorts, single-port uses StablePort.
+	if len(cfg.Ports) > 1 || (len(cfg.Ports) == 1 && !hasSingleDefault(cfg.Ports)) {
+		req.StablePorts = cfg.Ports
+	} else if cfg.Port != 0 {
+		req.StablePort = cfg.Port
+	} else if p, ok := cfg.Ports["default"]; ok {
+		req.StablePort = p
+	}
+
+	svc, err := cli.Deploy(req)
 	if err != nil {
 		fatal(err)
 	}
@@ -713,12 +731,20 @@ func runDaemon(apiPort, mcpPort int, dataDir string) {
 
 	// Restore services that were running before the daemon last stopped.
 	for _, svc := range reg.All() {
-		if svc.StablePort == 0 {
+		if len(svc.StablePorts) == 0 && svc.StablePort == 0 {
 			continue
 		}
-		if err := prx.Register(svc.Name, svc.StablePort); err != nil {
-			log.Printf("warn: could not re-register proxy for %s: %v", svc.Name, err)
-			continue
+		// Register all proxy listeners for this service.
+		if len(svc.StablePorts) > 0 {
+			if err := prx.RegisterPorts(svc.Name, svc.StablePorts); err != nil {
+				log.Printf("warn: could not re-register proxy for %s: %v", svc.Name, err)
+				continue
+			}
+		} else {
+			if err := prx.Register(svc.Name, svc.StablePort); err != nil {
+				log.Printf("warn: could not re-register proxy for %s: %v", svc.Name, err)
+				continue
+			}
 		}
 		if svc.Status == registry.StatusRunning {
 			log.Printf("restoring %s on localhost:%d", svc.Name, svc.StablePort)
@@ -730,12 +756,16 @@ func runDaemon(apiPort, mcpPort int, dataDir string) {
 				continue
 			}
 			// Verify binary exists before attempting to start.
-			if _, err := os.Stat(svc.BinaryPath); err != nil {
-				log.Printf("[RESTORE_FAILED] name=%s reason=binary not found: %s", svc.Name, svc.BinaryPath)
+			if _, err := os.Stat(svc.BinaryPath); os.IsNotExist(err) {
+				log.Printf("[ORPHAN] name=%s binary_path=%s", svc.Name, svc.BinaryPath)
+				_ = reg.UpdateStatus(svc.Name, registry.StatusOrphaned, 0)
+				continue
+			} else if err != nil {
+				log.Printf("[RESTORE_FAILED] name=%s reason=stat error: %v", svc.Name, err)
 				_ = reg.UpdateStatus(svc.Name, registry.StatusFailed, 0)
 				continue
 			}
-			internalPort, err := mgr.Start(svc)
+			internalPorts, err := mgr.Start(svc)
 			if err != nil {
 				log.Printf("[RESTORE_FAILED] name=%s error=%v", svc.Name, err)
 				_ = reg.UpdateStatus(svc.Name, registry.StatusFailed, 0)
@@ -746,14 +776,25 @@ func runDaemon(apiPort, mcpPort int, dataDir string) {
 			if hcTimeout == 0 {
 				hcTimeout = 15 * time.Second
 			}
-			if err := service.WaitHealthy(internalPort, svc.HealthCheck, hcTimeout); err != nil {
+			hcPort := svc.PrimaryInternalPort()
+			if p, ok := internalPorts[svc.HealthCheckPort]; ok && svc.HealthCheckPort != "" {
+				hcPort = p
+			} else if p, ok := internalPorts["default"]; ok {
+				hcPort = p
+			} else {
+				for _, p := range internalPorts {
+					hcPort = p
+					break
+				}
+			}
+			if err := service.WaitHealthy(hcPort, svc.HealthCheck, hcTimeout); err != nil {
 				log.Printf("[RESTORE_FAILED] name=%s health_check=%v", svc.Name, err)
 				_ = mgr.Stop(svc.Name)
 				_ = reg.UpdateStatus(svc.Name, registry.StatusFailed, 0)
 				continue
 			}
 
-			if err := prx.Swap(svc.Name, internalPort); err != nil {
+			if err := prx.SwapPorts(svc.Name, internalPorts); err != nil {
 				log.Printf("[RESTORE_FAILED] name=%s proxy_swap=%v", svc.Name, err)
 				_ = mgr.Stop(svc.Name)
 				_ = reg.UpdateStatus(svc.Name, registry.StatusFailed, 0)
@@ -795,6 +836,14 @@ func requireArg(cmd string, args []string) {
 		fmt.Fprintf(os.Stderr, "usage: anito %s <name>\n", cmd)
 		os.Exit(1)
 	}
+}
+
+func hasSingleDefault(ports map[string]int) bool {
+	if len(ports) != 1 {
+		return false
+	}
+	_, ok := ports["default"]
+	return ok
 }
 
 func fatal(err error) {

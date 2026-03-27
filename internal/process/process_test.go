@@ -115,12 +115,16 @@ func registerAndStart(t *testing.T, mgr *Manager, reg *registry.Registry, name, 
 		t.Fatalf("reg.Register: %v", err)
 	}
 
-	port, err := mgr.Start(svc)
+	ports, err := mgr.Start(svc)
 	if err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 	t.Cleanup(func() { _ = mgr.Stop(name) })
-	return port
+	// Return the primary (default) port for test compatibility.
+	for _, p := range ports {
+		return p
+	}
+	return 0
 }
 
 // ---------------------------------------------------------------------------

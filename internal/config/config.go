@@ -13,13 +13,15 @@ import (
 type Config struct {
 	Name        string        `yaml:"name"`
 	Version     string        `yaml:"version"`      // optional — semantic version tag, e.g. "v1.2.3"
-	Port        int           `yaml:"port"`         // stable port consumers connect to (0 = auto-allocate)
+	Port        int           `yaml:"port"`         // stable port consumers connect to (0 = auto-allocate); mutually exclusive with Ports
+	Ports       map[string]int `yaml:"ports"`        // named ports for multi-port services; mutually exclusive with Port
 	Type        string        `yaml:"type"`         // "binary" | "static" (default: binary)
 	Build       string        `yaml:"build"`        // build command to run before deploying
 	Output      string        `yaml:"output"`       // path to resulting binary or static dir
 	Args        []string      `yaml:"args"`         // optional arguments passed to the binary at startup
 	EnvFile     string        `yaml:"env_file"`     // optional .env file
-	HealthCheck string        `yaml:"health_check"` // health check path (default: /health)
+	HealthCheck     string        `yaml:"health_check"`      // health check path (default: /health)
+	HealthCheckPort string        `yaml:"health_check_port"` // which named port to health-check (for multi-port; default: first port)
 	Watch              []string      `yaml:"watch"`               // directories to watch for file changes (triggers restart)
 	DrainWindow        time.Duration `yaml:"drain_window"`        // grace period between proxy swap and SIGTERM to old process (e.g. 3s)
 	HealthCheckTimeout time.Duration `yaml:"health_check_timeout"` // how long to poll /health before giving up (0 = default 15s)
@@ -41,7 +43,20 @@ func Load(path string) (*Config, error) {
 	if cfg.Name == "" {
 		return nil, fmt.Errorf("%s: name is required", path)
 	}
-	// port is optional — 0 means Anito auto-allocates from its port range.
+	// port and ports are mutually exclusive.
+	if cfg.Port != 0 && len(cfg.Ports) > 0 {
+		return nil, fmt.Errorf("%s: port and ports are mutually exclusive — use one or the other", path)
+	}
+	// Normalize: singular port → map form for uniform downstream handling.
+	if cfg.Port != 0 && len(cfg.Ports) == 0 {
+		cfg.Ports = map[string]int{"default": cfg.Port}
+	}
+	// Validate health_check_port references a valid port name.
+	if cfg.HealthCheckPort != "" && len(cfg.Ports) > 0 {
+		if _, ok := cfg.Ports[cfg.HealthCheckPort]; !ok {
+			return nil, fmt.Errorf("%s: health_check_port %q does not match any key in ports", path, cfg.HealthCheckPort)
+		}
+	}
 	if cfg.Output == "" {
 		return nil, fmt.Errorf("%s: output is required", path)
 	}

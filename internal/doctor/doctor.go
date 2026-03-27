@@ -230,10 +230,26 @@ func checkConfig(cfgPath, relPath, repoRoot string, svc StatusFetcher) ConfigRes
 		}
 	}
 
-	// Port conflict check — verify nothing else is holding the stable port on
+	// Port conflict check — verify nothing else is holding the stable port(s) on
 	// any loopback interface. Anito binds both 127.0.0.1 and [::1]; if a third
 	// process grabbed either side first it will shadow Anito for IPv6 clients.
-	if cfg.Port != 0 {
+	// Check all named ports (cfg.Ports includes normalized Port).
+	for portName, port := range cfg.Ports {
+		if port != 0 {
+			if conflict := detectPortConflict(port); conflict != "" {
+				field := "port"
+				if portName != "default" {
+					field = fmt.Sprintf("ports.%s", portName)
+				}
+				cr.add(Issue{Severity: "error", Field: field,
+					Message: fmt.Sprintf("port %d has a competing listener: %s", port, conflict),
+					Action:  "another process is holding this port — find and stop it, then restart the service",
+				})
+			}
+		}
+	}
+	// Also check the singular port field for backward compat with old configs.
+	if cfg.Port != 0 && len(cfg.Ports) == 0 {
 		if conflict := detectPortConflict(cfg.Port); conflict != "" {
 			cr.add(Issue{Severity: "error", Field: "port",
 				Message: fmt.Sprintf("port %d has a competing listener: %s", cfg.Port, conflict),
@@ -265,6 +281,12 @@ func checkConfig(cfgPath, relPath, repoRoot string, svc StatusFetcher) ConfigRes
 				cr.add(Issue{Severity: "warning", Field: "status",
 					Message: "service is in failed state",
 					Action:  fmt.Sprintf("run `anito restart %s` or `anito deploy` to recover", cfg.Name),
+				})
+			}
+			if reg.Status == registry.StatusOrphaned {
+				cr.add(Issue{Severity: "error", Field: "binary_path",
+					Message: fmt.Sprintf("binary no longer exists on disk: %s", reg.BinaryPath),
+					Action:  fmt.Sprintf("rebuild and run `anito deploy`, or run `anito remove %s` to clean up the registry", cfg.Name),
 				})
 			}
 

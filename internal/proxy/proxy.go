@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httputil"
 	"net/url"
+	"strings"
 	"sync"
 	"sync/atomic"
 )
@@ -27,7 +28,8 @@ type entry struct {
 	handler    atomic.Value // stores handlerWrapper
 }
 
-// Manager owns one persistent listener per service and swaps the upstream atomically.
+// Manager owns one persistent listener per service port and swaps the upstream atomically.
+// Entries are keyed by "service:portName" for multi-port support.
 type Manager struct {
 	mu      sync.Mutex
 	entries map[string]*entry
@@ -37,73 +39,123 @@ func NewManager() *Manager {
 	return &Manager{entries: make(map[string]*entry)}
 }
 
+// entryKey returns the composite key for a service's named port.
+func entryKey(service, portName string) string {
+	return service + ":" + portName
+}
+
+// servicePrefix returns the prefix used to find all entries for a service.
+func servicePrefix(service string) string {
+	return service + ":"
+}
+
 // Register creates a permanent listener on stablePort for the named service.
+// For backward compat, this registers a single "default" port.
 // It is idempotent — calling it again for the same service name is a no-op.
 func (m *Manager) Register(name string, stablePort int) error {
+	return m.RegisterPorts(name, map[string]int{"default": stablePort})
+}
+
+// RegisterPorts creates permanent listeners for all named ports of a service.
+// On partial failure, all already-bound listeners are rolled back.
+// Idempotent for ports already registered.
+func (m *Manager) RegisterPorts(name string, ports map[string]int) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	if _, ok := m.entries[name]; ok {
-		return nil
-	}
+	// Track newly created entries so we can roll back on failure.
+	var created []string
 
-	l, err := net.Listen("tcp4", fmt.Sprintf("127.0.0.1:%d", stablePort))
-	if err != nil {
-		return fmt.Errorf("proxy: cannot bind port %d for %q: %w", stablePort, name, err)
-	}
-	// Best-effort IPv6 bind — don't fail if the system has no IPv6 loopback.
-	l6, _ := net.Listen("tcp6", fmt.Sprintf("[::1]:%d", stablePort))
+	for portName, stablePort := range ports {
+		key := entryKey(name, portName)
+		if _, ok := m.entries[key]; ok {
+			continue // already registered
+		}
 
-	e := &entry{stablePort: stablePort, listener: l, listener6: l6}
+		l, err := net.Listen("tcp4", fmt.Sprintf("127.0.0.1:%d", stablePort))
+		if err != nil {
+			// Roll back all entries created in this call.
+			for _, k := range created {
+				if e, ok := m.entries[k]; ok {
+					_ = e.server.Close()
+					if e.listener6 != nil {
+						_ = e.listener6.Close()
+					}
+					delete(m.entries, k)
+				}
+			}
+			return fmt.Errorf("proxy: cannot bind port %d for %q (port %s): %w", stablePort, name, portName, err)
+		}
+		// Best-effort IPv6 bind — don't fail if the system has no IPv6 loopback.
+		l6, _ := net.Listen("tcp6", fmt.Sprintf("[::1]:%d", stablePort))
 
-	// Placeholder handler until Swap is called after a successful health check.
-	e.handler.Store(handlerWrapper{h: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		http.Error(w, "service starting", http.StatusServiceUnavailable)
-	})})
+		e := &entry{stablePort: stablePort, listener: l, listener6: l6}
 
-	e.server = &http.Server{
-		Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			w.Header().Set("X-Anito-Proxy", "1")
-			e.handler.Load().(handlerWrapper).h.ServeHTTP(w, r)
-		}),
-	}
+		// Placeholder handler until Swap is called after a successful health check.
+		e.handler.Store(handlerWrapper{h: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			http.Error(w, "service starting", http.StatusServiceUnavailable)
+		})})
 
-	m.entries[name] = e
-	go e.server.Serve(l) //nolint:errcheck
-	if l6 != nil {
-		go e.server.Serve(l6) //nolint:errcheck
+		e.server = &http.Server{
+			Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("X-Anito-Proxy", "1")
+				e.handler.Load().(handlerWrapper).h.ServeHTTP(w, r)
+			}),
+		}
+
+		m.entries[key] = e
+		created = append(created, key)
+		go e.server.Serve(l) //nolint:errcheck
+		if l6 != nil {
+			go e.server.Serve(l6) //nolint:errcheck
+		}
 	}
 	return nil
 }
 
-// Swap atomically points the proxy for name at internalPort.
+// Swap atomically points the proxy for name at internalPort (default port).
 // The old process can be killed after this returns — all new requests go to the new one.
 func (m *Manager) Swap(name string, internalPort int) error {
+	return m.SwapPorts(name, map[string]int{"default": internalPort})
+}
+
+// SwapPorts atomically points all named proxies for a service at their new internal ports.
+func (m *Manager) SwapPorts(name string, internalPorts map[string]int) error {
 	m.mu.Lock()
-	e, ok := m.entries[name]
+	// Collect entries first, then release lock before creating proxies.
+	entries := make(map[string]*entry, len(internalPorts))
+	for portName := range internalPorts {
+		key := entryKey(name, portName)
+		e, ok := m.entries[key]
+		if !ok {
+			m.mu.Unlock()
+			return fmt.Errorf("proxy: service %q port %q not registered", name, portName)
+		}
+		entries[portName] = e
+	}
 	m.mu.Unlock()
-	if !ok {
-		return fmt.Errorf("proxy: service %q not registered", name)
-	}
 
-	target, err := url.Parse(fmt.Sprintf("http://localhost:%d", internalPort))
-	if err != nil {
-		return err
+	// Build and swap all handlers.
+	for portName, e := range entries {
+		port := internalPorts[portName]
+		target, err := url.Parse(fmt.Sprintf("http://localhost:%d", port))
+		if err != nil {
+			return err
+		}
+		rp := httputil.NewSingleHostReverseProxy(target)
+		rp.ErrorHandler = func(w http.ResponseWriter, r *http.Request, err error) {
+			http.Error(w, fmt.Sprintf("upstream error: %v", err), http.StatusBadGateway)
+		}
+		e.handler.Store(handlerWrapper{h: &flushProxy{rp: rp}})
 	}
-
-	rp := httputil.NewSingleHostReverseProxy(target)
-	rp.ErrorHandler = func(w http.ResponseWriter, r *http.Request, err error) {
-		http.Error(w, fmt.Sprintf("upstream error: %v", err), http.StatusBadGateway)
-	}
-
-	e.handler.Store(handlerWrapper{h: &flushProxy{rp: rp}})
 	return nil
 }
 
 // SwapStatic points the proxy at a directory of static files (for SPA deployments).
 func (m *Manager) SwapStatic(name string, dir string) error {
 	m.mu.Lock()
-	e, ok := m.entries[name]
+	key := entryKey(name, "default")
+	e, ok := m.entries[key]
 	m.mu.Unlock()
 	if !ok {
 		return fmt.Errorf("proxy: service %q not registered", name)
@@ -112,54 +164,78 @@ func (m *Manager) SwapStatic(name string, dir string) error {
 	return nil
 }
 
-// Unswap restores the 503 placeholder handler for name.
-// Call this when a service stops or crashes so the stable port returns a clean
-// "service unavailable" instead of a 502 pointing at a dead backend.
-// A subsequent Swap call (after a successful restart or deploy) re-enables proxying.
+// Unswap restores the 503 placeholder handler for name (default port).
 func (m *Manager) Unswap(name string) {
-	m.mu.Lock()
-	e, ok := m.entries[name]
-	m.mu.Unlock()
-	if !ok {
-		return
-	}
-	e.handler.Store(handlerWrapper{h: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		http.Error(w, "service unavailable", http.StatusServiceUnavailable)
-	})})
+	m.UnswapPorts(name)
 }
 
-// Remove shuts down the listener for name and removes it from the manager.
-func (m *Manager) Remove(name string) {
+// UnswapPorts restores the 503 placeholder handler for all named ports of a service.
+func (m *Manager) UnswapPorts(name string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	e, ok := m.entries[name]
-	if !ok {
-		return
+	prefix := servicePrefix(name)
+	for key, e := range m.entries {
+		if strings.HasPrefix(key, prefix) {
+			e.handler.Store(handlerWrapper{h: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				http.Error(w, "service unavailable", http.StatusServiceUnavailable)
+			})})
+		}
 	}
-	_ = e.server.Close()
-	if e.listener6 != nil {
-		_ = e.listener6.Close()
-	}
-	delete(m.entries, name)
 }
 
-// StablePort returns the stable port for a registered service, or 0.
+// Remove shuts down the listener for name (default port) and removes it from the manager.
+func (m *Manager) Remove(name string) {
+	m.RemovePorts(name)
+}
+
+// RemovePorts shuts down all listeners for a service and removes them from the manager.
+func (m *Manager) RemovePorts(name string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	prefix := servicePrefix(name)
+	for key, e := range m.entries {
+		if strings.HasPrefix(key, prefix) {
+			_ = e.server.Close()
+			if e.listener6 != nil {
+				_ = e.listener6.Close()
+			}
+			delete(m.entries, key)
+		}
+	}
+}
+
+// StablePort returns the stable port for a registered service's default port, or 0.
 func (m *Manager) StablePort(name string) int {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if e, ok := m.entries[name]; ok {
+	key := entryKey(name, "default")
+	if e, ok := m.entries[key]; ok {
 		return e.stablePort
+	}
+	// Fall back to finding any port for this service.
+	prefix := servicePrefix(name)
+	for key, e := range m.entries {
+		if strings.HasPrefix(key, prefix) {
+			return e.stablePort
+		}
 	}
 	return 0
 }
 
 // flushProxy wraps httputil.ReverseProxy and flushes after every write,
 // which is required for SSE streams (e.g. MCP servers using SSE transport).
+// WebSocket upgrade requests are passed through without flush wrapping.
 type flushProxy struct {
 	rp *httputil.ReverseProxy
 }
 
 func (f *flushProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	// WebSocket upgrade: pass through directly — the reverse proxy handles
+	// the protocol switch and bidirectional forwarding natively.
+	if strings.EqualFold(r.Header.Get("Connection"), "upgrade") {
+		f.rp.ServeHTTP(w, r)
+		return
+	}
 	// For SSE or any streaming response, wrap the writer with auto-flush.
 	if r.Header.Get("Accept") == "text/event-stream" {
 		f.rp.ServeHTTP(&flushWriter{w: w}, r)

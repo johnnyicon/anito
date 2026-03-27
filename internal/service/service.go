@@ -109,7 +109,9 @@ type DeployRequest struct {
 	Type               registry.ServiceType
 	Path               string   // binary path or static dir
 	Args               []string // optional arguments passed to the binary at startup
-	StablePort         int      // 0 = auto-allocate from [portRangeStart, portRangeEnd]
+	StablePort         int            // 0 = auto-allocate (backward compat, single port)
+	StablePorts        map[string]int // named ports (takes precedence over StablePort if non-nil)
+	HealthCheckPort    string         // which named port to health-check
 	EnvFile            string
 	HealthCheck        string
 	WatchPaths         []string      // directories to watch for file changes (triggers restart)
@@ -130,9 +132,8 @@ func (s *Service) lockDeploy(name string) func() {
 
 // Deploy registers, starts, and health-checks a service.
 //
-//   - If StablePort == 0, a port is auto-allocated from the configured range.
-//   - If StablePort is non-zero but unavailable, auto-allocation is used as fallback.
-//   - Re-deploying an existing service always preserves its stable port.
+//   - If StablePorts is nil and StablePort == 0, a port is auto-allocated.
+//   - Re-deploying an existing service always preserves its stable port(s).
 func (s *Service) Deploy(req DeployRequest) (*registry.Service, error) {
 	defer s.lockDeploy(req.Name)()
 
@@ -142,8 +143,17 @@ func (s *Service) Deploy(req DeployRequest) (*registry.Service, error) {
 	if req.Type == "" {
 		req.Type = registry.TypeBinary
 	}
+	if req.EnvFile == "null" {
+		req.EnvFile = ""
+	}
 
-	stablePort, err := s.allocatePort(req.Name, req.StablePort)
+	// Normalize: singular StablePort → StablePorts map.
+	if len(req.StablePorts) == 0 {
+		port := req.StablePort // may be 0 (auto-allocate)
+		req.StablePorts = map[string]int{"default": port}
+	}
+
+	stablePorts, err := s.allocatePorts(req.Name, req.StablePorts)
 	if err != nil {
 		return nil, err
 	}
@@ -172,7 +182,8 @@ func (s *Service) Deploy(req DeployRequest) (*registry.Service, error) {
 		Type:               req.Type,
 		BinaryPath:         req.Path,
 		Args:               req.Args,
-		StablePort:         stablePort,
+		StablePorts:        stablePorts,
+		HealthCheckPort:    req.HealthCheckPort,
 		EnvFile:            req.EnvFile,
 		HealthCheck:        req.HealthCheck,
 		WatchPaths:         req.WatchPaths,
@@ -181,6 +192,7 @@ func (s *Service) Deploy(req DeployRequest) (*registry.Service, error) {
 		RestartPolicy:      restartPolicy,
 		ConfigPath:         req.ConfigPath,
 	}
+	svc.NormalizePorts()
 
 	if err := s.reg.Register(svc); err != nil {
 		return nil, err
@@ -200,33 +212,42 @@ func (s *Service) Deploy(req DeployRequest) (*registry.Service, error) {
 	}
 
 	// Binary: start new process, health-check it, swap proxy, drain old process.
-	// If the manager is already tracking this service (e.g. after a daemon
-	// restart + restore), deregister it without killing it so the name slot is
-	// free. The old PID will be drained after the new process is healthy.
 	oldPID, oldCmd, oldDone := s.mgr.Deregister(svc.Name)
 	if oldPID == 0 {
-		oldPID = svc.PID // fall back to registry PID if not tracked in-memory
+		oldPID = svc.PID
 	}
 
 	startedAt := time.Now()
-	internalPort, err := s.mgr.Start(svc)
+	internalPorts, err := s.mgr.Start(svc)
 	if err != nil {
 		return nil, err
 	}
 	_ = s.reg.UpdateLastStarted(req.Name, startedAt)
 	_ = s.reg.UpdateStartHistory(req.Name, registry.StartEvent{StartedAt: startedAt, ExitCode: -1})
 
-	if err := waitHealthy(internalPort, req.HealthCheck, hcTimeout); err != nil {
+	// Health-check on the designated port.
+	hcPortName := req.HealthCheckPort
+	if hcPortName == "" {
+		hcPortName = "default"
+	}
+	hcInternalPort := internalPorts[hcPortName]
+	if hcInternalPort == 0 {
+		// Fall back to primary port if the named port doesn't exist.
+		for _, p := range internalPorts {
+			hcInternalPort = p
+			break
+		}
+	}
+
+	if err := waitHealthy(hcInternalPort, req.HealthCheck, hcTimeout); err != nil {
 		_ = s.mgr.Stop(req.Name)
-		// Preserve old process: mark its PID as draining to suppress false OnCrash
-		// when it eventually exits (it is still serving traffic via the proxy).
 		if oldPID > 0 {
 			s.mgr.MarkDraining(oldPID)
 		}
 		return nil, err
 	}
 
-	if err := s.prx.Swap(req.Name, internalPort); err != nil {
+	if err := s.prx.SwapPorts(req.Name, internalPorts); err != nil {
 		_ = s.mgr.Stop(req.Name)
 		if oldPID > 0 {
 			s.mgr.MarkDraining(oldPID)
@@ -234,12 +255,10 @@ func (s *Service) Deploy(req DeployRequest) (*registry.Service, error) {
 		return nil, err
 	}
 
-	// Authoritative running write — only after both health check AND proxy swap succeed.
 	newPID := s.mgr.PID(req.Name)
 	_ = s.reg.UpdateStatus(req.Name, registry.StatusRunning, newPID)
 	_ = s.reg.UpdateLastDeployed(req.Name, time.Now())
 
-	// Successful deploy — reset crash backoff counter.
 	s.crashMu.Lock()
 	delete(s.crashAttempts, req.Name)
 	s.crashMu.Unlock()
@@ -258,15 +277,40 @@ func (s *Service) Deploy(req DeployRequest) (*registry.Service, error) {
 	}
 
 	svc, _ = s.reg.Get(req.Name)
-	log.Printf("[DEPLOY] name=%s port=%d internal=%d pid=%d", svc.Name, svc.StablePort, internalPort, svc.PID)
+	log.Printf("[DEPLOY] name=%s port=%d internal=%d pid=%d", svc.Name, svc.StablePort, svc.InternalPort, svc.PID)
 	notify.Send("Anito", fmt.Sprintf("✓ %s deployed on :%d", svc.Name, svc.StablePort))
 	s.startWatcher(svc)
 	writeReceipt(svc)
 	return svc, nil
 }
 
+// isOrphaned reports whether svc's binary no longer exists on disk.
+// Only applies to TypeBinary services that are not currently running.
+// Running services are never orphaned — the process is live regardless of the binary on disk.
+func isOrphaned(svc *registry.Service) bool {
+	if svc.Type != registry.TypeBinary || svc.BinaryPath == "" {
+		return false
+	}
+	if svc.Status == registry.StatusRunning {
+		return false
+	}
+	_, err := os.Stat(svc.BinaryPath)
+	return os.IsNotExist(err)
+}
+
 func (s *Service) Services() []*registry.Service {
-	return s.reg.All()
+	all := s.reg.All()
+	result := make([]*registry.Service, len(all))
+	for i, svc := range all {
+		if isOrphaned(svc) {
+			projected := *svc
+			projected.Status = registry.StatusOrphaned
+			result[i] = &projected
+		} else {
+			result[i] = svc
+		}
+	}
+	return result
 }
 
 // UsedPorts returns the set of stable ports currently claimed in the registry.
@@ -280,6 +324,11 @@ func (s *Service) Status(name string) (*registry.Service, error) {
 	if !ok {
 		return nil, fmt.Errorf("service %q not found", name)
 	}
+	if isOrphaned(svc) {
+		projected := *svc
+		projected.Status = registry.StatusOrphaned
+		return &projected, nil
+	}
 	return svc, nil
 }
 
@@ -292,8 +341,8 @@ func (s *Service) Stop(name string) error {
 		_ = s.reg.UpdateStatus(name, registry.StatusStopped, 0)
 		log.Printf("[STOP] name=%s", name)
 	}
-	// Always unswap so the stable port returns 503 instead of 502 from the dead backend.
-	s.prx.Unswap(name)
+	// Always unswap so all stable ports return 503 instead of 502 from the dead backend.
+	s.prx.UnswapPorts(name)
 	return err
 }
 
@@ -306,20 +355,16 @@ func (s *Service) Restart(name string) error {
 	}
 
 	if svc.Type != registry.TypeBinary {
-		// Static services don't run a process — nothing to restart.
 		return nil
 	}
 
-	// Blue/green restart: deregister old process (don't kill it yet), start new
-	// one, health-check, swap proxy, then drain the old process.  This keeps the
-	// stable port live throughout and respects the configured drain window.
 	oldPID, oldCmd, oldDone := s.mgr.Deregister(name)
 	if oldPID == 0 {
 		oldPID = svc.PID
 	}
 
 	startedAt := time.Now()
-	internalPort, err := s.mgr.Start(svc)
+	internalPorts, err := s.mgr.Start(svc)
 	if err != nil {
 		log.Printf("[RESTART] name=%s error=%q", name, err)
 		return err
@@ -331,7 +376,21 @@ func (s *Service) Restart(name string) error {
 	if hcTimeout == 0 {
 		hcTimeout = defaultHealthCheckTimeout
 	}
-	if err := waitHealthy(internalPort, svc.HealthCheck, hcTimeout); err != nil {
+
+	// Health-check on the designated port.
+	hcInternalPort := svc.PrimaryInternalPort()
+	if p, ok := internalPorts[svc.HealthCheckPort]; ok && svc.HealthCheckPort != "" {
+		hcInternalPort = p
+	} else if p, ok := internalPorts["default"]; ok {
+		hcInternalPort = p
+	} else {
+		for _, p := range internalPorts {
+			hcInternalPort = p
+			break
+		}
+	}
+
+	if err := waitHealthy(hcInternalPort, svc.HealthCheck, hcTimeout); err != nil {
 		log.Printf("[RESTART] name=%s error=%q", name, err)
 		_ = s.mgr.Stop(name)
 		if oldPID > 0 {
@@ -340,7 +399,7 @@ func (s *Service) Restart(name string) error {
 		return err
 	}
 
-	if err := s.prx.Swap(name, internalPort); err != nil {
+	if err := s.prx.SwapPorts(name, internalPorts); err != nil {
 		_ = s.mgr.Stop(name)
 		if oldPID > 0 {
 			s.mgr.MarkDraining(oldPID)
@@ -348,11 +407,9 @@ func (s *Service) Restart(name string) error {
 		return err
 	}
 
-	// Authoritative running write — after both health check AND proxy swap.
 	newPID := s.mgr.PID(name)
 	_ = s.reg.UpdateStatus(name, registry.StatusRunning, newPID)
 
-	// Successful restart — reset crash backoff counter.
 	s.crashMu.Lock()
 	delete(s.crashAttempts, name)
 	s.crashMu.Unlock()
@@ -374,7 +431,7 @@ func (s *Service) Restart(name string) error {
 		}(oldCmd, oldDone, pid, drainWindow)
 	}
 
-	log.Printf("[RESTART] name=%s port=%d internal=%d", name, svc.StablePort, internalPort)
+	log.Printf("[RESTART] name=%s port=%d internal=%d", name, svc.StablePort, svc.InternalPort)
 	notify.Send("Anito", fmt.Sprintf("↺ %s restarted on :%d", name, svc.StablePort))
 	return nil
 }
@@ -385,7 +442,7 @@ func (s *Service) Remove(name string) error {
 
 	s.wtch.Stop(name)
 	_ = s.mgr.Stop(name)
-	s.prx.Remove(name)
+	s.prx.RemovePorts(name)
 	err := s.reg.Remove(name)
 	if err != nil {
 		log.Printf("[REMOVE] name=%s error=%q", name, err)
@@ -437,7 +494,7 @@ func writeReceipt(svc *registry.Service) {
 	if svc == nil || svc.ConfigPath == "" {
 		return
 	}
-	_ = receipt.Write(receipt.Entry{
+	e := receipt.Entry{
 		Name:       svc.Name,
 		StablePort: svc.StablePort,
 		Address:    fmt.Sprintf("http://localhost:%d", svc.StablePort),
@@ -445,7 +502,16 @@ func writeReceipt(svc *registry.Service) {
 		ConfigPath: svc.ConfigPath,
 		Version:    svc.Version,
 		DeployedAt: svc.LastDeployedAt,
-	})
+	}
+	// Multi-port: include all named ports and addresses.
+	if len(svc.StablePorts) > 0 {
+		e.StablePorts = svc.StablePorts
+		e.Addresses = make(map[string]string, len(svc.StablePorts))
+		for name, port := range svc.StablePorts {
+			e.Addresses[name] = fmt.Sprintf("http://localhost:%d", port)
+		}
+	}
+	_ = receipt.Write(e)
 }
 
 // startWatcher launches a file watcher for svc if it has WatchPaths configured.
@@ -491,9 +557,9 @@ func (s *Service) handleCrash(name string) {
 		return // intentionally stopped — do not restart
 	}
 
-	// Unswap immediately so the stable port returns 503 instead of 502 from the
+	// Unswap immediately so all stable ports return 503 instead of 502 from the
 	// now-dead backend. A successful Restart() below will re-swap the proxy.
-	s.prx.Unswap(name)
+	s.prx.UnswapPorts(name)
 
 	policy := svc.RestartPolicy
 	if policy == "" {
@@ -748,61 +814,107 @@ func (s *Service) LogStream(ctx context.Context, name string) (<-chan string, er
 	return ch, nil
 }
 
-// Reserve claims a stable port for a named service without deploying it.
+// Reserve claims stable port(s) for a named service without deploying it.
 // It is used by multi-service setup (anito_coordinate) to guarantee port
 // assignments before any binary exists. A subsequent Deploy() for the same
-// service name will re-use the reserved port — the assignment never changes.
+// service name will re-use the reserved port(s) — the assignment never changes.
+//
+// For backward compat, preferredPort allocates a single "default" port.
+// For multi-port, use ReservePorts instead.
 func (s *Service) Reserve(name string, preferredPort int) (int, error) {
-	port, err := s.allocatePort(name, preferredPort)
+	ports, err := s.allocatePorts(name, map[string]int{"default": preferredPort})
 	if err != nil {
 		return 0, err
 	}
-	// Write a stub registry entry so the port appears in UsedPorts() for
-	// subsequent allocations and survives daemon restarts.
+	port := ports["default"]
 	if _, exists := s.reg.Get(name); !exists {
-		_ = s.reg.Register(&registry.Service{
+		svc := &registry.Service{
 			Name:        name,
-			StablePort:  port,
+			StablePorts: ports,
 			Type:        registry.TypeBinary,
 			HealthCheck: "/health",
 			Status:      registry.StatusStopped,
-		})
+		}
+		svc.NormalizePorts()
+		_ = s.reg.Register(svc)
 	}
 	log.Printf("[RESERVE] name=%s port=%d", name, port)
 	return port, nil
 }
 
-// allocatePort returns the stable port to use for the named service.
+// ReservePorts claims multiple named stable ports for a service without deploying it.
+func (s *Service) ReservePorts(name string, preferred map[string]int) (map[string]int, error) {
+	ports, err := s.allocatePorts(name, preferred)
+	if err != nil {
+		return nil, err
+	}
+	if _, exists := s.reg.Get(name); !exists {
+		svc := &registry.Service{
+			Name:        name,
+			StablePorts: ports,
+			Type:        registry.TypeBinary,
+			HealthCheck: "/health",
+			Status:      registry.StatusStopped,
+		}
+		svc.NormalizePorts()
+		_ = s.reg.Register(svc)
+	}
+	log.Printf("[RESERVE] name=%s ports=%v", name, ports)
+	return ports, nil
+}
+
+// allocatePorts returns the stable ports to use for the named service.
 //
-//   - Existing services keep their current port (redeploy preserves stability).
+//   - Existing services keep their current ports (redeploy preserves stability).
 //   - New services try preferred first; if unavailable, auto-allocate from range.
-func (s *Service) allocatePort(name string, preferred int) (int, error) {
-	// Preserve port for existing services.
-	if existing, ok := s.reg.Get(name); ok && existing.StablePort != 0 {
-		_ = s.prx.Register(name, existing.StablePort) // idempotent
-		return existing.StablePort, nil
+//   - On partial failure, all already-registered ports are rolled back.
+func (s *Service) allocatePorts(name string, preferred map[string]int) (map[string]int, error) {
+	// Preserve ports for existing services.
+	if existing, ok := s.reg.Get(name); ok && len(existing.StablePorts) > 0 {
+		_ = s.prx.RegisterPorts(name, existing.StablePorts) // idempotent
+		return existing.StablePorts, nil
 	}
 
+	result := make(map[string]int, len(preferred))
+	used := s.reg.UsedPorts()
+
+	for portName, pref := range preferred {
+		port, err := s.allocateOnePort(name, portName, pref, used)
+		if err != nil {
+			// Roll back: remove all ports registered in this call.
+			s.prx.RemovePorts(name)
+			return nil, err
+		}
+		result[portName] = port
+		used[port] = true // prevent double-allocation within this call
+	}
+
+	return result, nil
+}
+
+// allocateOnePort allocates a single named port for a service.
+func (s *Service) allocateOnePort(name, portName string, preferred int, used map[int]bool) (int, error) {
 	if preferred != 0 {
 		if reservedPorts[preferred] {
 			return 0, fmt.Errorf("port %d is reserved by Anito and cannot be assigned to a service", preferred)
 		}
-		if err := s.prx.Register(name, preferred); err == nil {
-			return preferred, nil
+		if !used[preferred] {
+			if err := s.prx.RegisterPorts(name, map[string]int{portName: preferred}); err == nil {
+				return preferred, nil
+			}
 		}
 		// Preferred port unavailable — fall through to auto-allocate.
 	}
 
-	used := s.reg.UsedPorts()
 	for port := portRangeStart; port <= portRangeEnd; port++ {
 		if used[port] {
 			continue
 		}
-		if err := s.prx.Register(name, port); err == nil {
+		if err := s.prx.RegisterPorts(name, map[string]int{portName: port}); err == nil {
 			return port, nil
 		}
 	}
-	return 0, fmt.Errorf("no available ports in range %d–%d", portRangeStart, portRangeEnd)
+	return 0, fmt.Errorf("no available ports in range %d–%d for %s (port %s)", portRangeStart, portRangeEnd, name, portName)
 }
 
 // hashPath returns a short content hash for a file or directory.

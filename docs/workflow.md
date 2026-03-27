@@ -142,7 +142,7 @@ Tag before building the release binary so the version and the tag refer to the s
 | TEST | ephemeral (TestMain) | test run | Go test runner |
 | LOCAL PROD | stable (proxy) | across reboots | Anito + launchd |
 
-Services should read their port from `$PORT` at startup. Anito injects `PORT=<internal-port>` before starting the process. The stable port exposed to consumers is always handled by the proxy layer.
+Services should read their port(s) from the environment at startup. Anito injects `PORT=<ephemeral>` for single-port services, or `PORT_<NAME>=<ephemeral>` for each named port in multi-port services. The stable port(s) exposed to consumers are always handled by the proxy layer.
 
 ---
 

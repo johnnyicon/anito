@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -19,12 +20,13 @@ const (
 	drainTimeout = 5 * time.Second // time between SIGTERM and SIGKILL
 )
 
-// runningProc tracks a live process and the ephemeral port it is on.
+// runningProc tracks a live process and the ephemeral port(s) it is on.
 type runningProc struct {
-	cmd          *exec.Cmd
-	internalPort int
-	logFile      *os.File
-	done         chan struct{} // closed by the Start goroutine when the process exits
+	cmd           *exec.Cmd
+	internalPort  int            // primary port (backward compat)
+	internalPorts map[string]int // all named ephemeral ports
+	logFile       *os.File
+	done          chan struct{} // closed by the Start goroutine when the process exits
 }
 
 // Manager supervises running processes.
@@ -60,24 +62,39 @@ func (m *Manager) MarkDraining(pid int) {
 	m.mu.Unlock()
 }
 
-// Start launches a service process on a free ephemeral port and returns that port.
+// Start launches a service process on free ephemeral port(s) and returns them.
+// For single-port services, returns a single-entry map {"default": port}.
 // The caller is responsible for health-checking the process before swapping the proxy.
-func (m *Manager) Start(svc *registry.Service) (internalPort int, err error) {
+func (m *Manager) Start(svc *registry.Service) (map[string]int, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
 	if _, running := m.procs[svc.Name]; running {
-		return 0, fmt.Errorf("service %q is already running", svc.Name)
+		return nil, fmt.Errorf("service %q is already running", svc.Name)
 	}
 
-	port, err := freePort()
-	if err != nil {
-		return 0, fmt.Errorf("could not find free port for %q: %w", svc.Name, err)
+	// Allocate one ephemeral port per named port.
+	ports := make(map[string]int, len(svc.StablePorts))
+	if len(svc.StablePorts) > 0 {
+		for name := range svc.StablePorts {
+			p, err := freePort()
+			if err != nil {
+				return nil, fmt.Errorf("could not find free port for %q (port %s): %w", svc.Name, name, err)
+			}
+			ports[name] = p
+		}
+	} else {
+		// Fallback for services without StablePorts set (shouldn't happen after normalization).
+		p, err := freePort()
+		if err != nil {
+			return nil, fmt.Errorf("could not find free port for %q: %w", svc.Name, err)
+		}
+		ports["default"] = p
 	}
 
-	cmd, logFile, err := m.buildCmd(svc, port)
+	cmd, logFile, err := m.buildCmd(svc, ports)
 	if err != nil {
-		return 0, err
+		return nil, err
 	}
 
 	if err := cmd.Start(); err != nil {
@@ -85,13 +102,22 @@ func (m *Manager) Start(svc *registry.Service) (internalPort int, err error) {
 			_ = logFile.Close()
 		}
 		_ = m.reg.UpdateStatus(svc.Name, registry.StatusFailed, 0)
-		return 0, fmt.Errorf("failed to start %q: %w", svc.Name, err)
+		return nil, fmt.Errorf("failed to start %q: %w", svc.Name, err)
+	}
+
+	primaryPort := svc.PrimaryInternalPort()
+	if primaryPort == 0 {
+		// Use the first port from our allocated set.
+		for _, p := range ports {
+			primaryPort = p
+			break
+		}
 	}
 
 	done := make(chan struct{})
-	rp := &runningProc{cmd: cmd, internalPort: port, logFile: logFile, done: done}
+	rp := &runningProc{cmd: cmd, internalPort: primaryPort, internalPorts: ports, logFile: logFile, done: done}
 	m.procs[svc.Name] = rp
-	_ = m.reg.UpdateInternalPort(svc.Name, port)
+	_ = m.reg.UpdateInternalPorts(svc.Name, ports)
 
 	// Watch for unexpected exit. This is the sole goroutine that calls cmd.Wait().
 	pid := cmd.Process.Pid
@@ -125,7 +151,7 @@ func (m *Manager) Start(svc *registry.Service) (internalPort int, err error) {
 		}
 	}()
 
-	return port, nil
+	return ports, nil
 }
 
 // Stop sends SIGTERM to the named service, then SIGKILL after drainTimeout.
@@ -168,8 +194,8 @@ func StopPID(pid int) {
 }
 
 // Restart stops the old process (if running) then starts a new one.
-// Returns the new internal port.
-func (m *Manager) Restart(svc *registry.Service) (int, error) {
+// Returns the new internal ports.
+func (m *Manager) Restart(svc *registry.Service) (map[string]int, error) {
 	_ = m.Stop(svc.Name) // ignore "not running" errors
 	return m.Start(svc)
 }
@@ -219,7 +245,7 @@ func DrainProc(cmd *exec.Cmd, done <-chan struct{}) error {
 	return drainProc(cmd, done)
 }
 
-// InternalPort returns the ephemeral port for a running service, or 0.
+// InternalPort returns the primary ephemeral port for a running service, or 0.
 func (m *Manager) InternalPort(name string) int {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
@@ -229,17 +255,44 @@ func (m *Manager) InternalPort(name string) int {
 	return 0
 }
 
+// InternalPorts returns all named ephemeral ports for a running service.
+func (m *Manager) InternalPorts(name string) map[string]int {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	if rp, ok := m.procs[name]; ok {
+		return rp.internalPorts
+	}
+	return nil
+}
+
 // --- helpers ---
 
-func (m *Manager) buildCmd(svc *registry.Service, port int) (*exec.Cmd, *os.File, error) {
+func (m *Manager) buildCmd(svc *registry.Service, ports map[string]int) (*exec.Cmd, *os.File, error) {
 	if svc.Type != registry.TypeBinary {
 		return nil, nil, fmt.Errorf("buildCmd: static services do not run a process")
 	}
 
 	cmd := exec.Command(svc.BinaryPath, svc.Args...)
+	cmd.Env = os.Environ()
 
-	// Inject the ephemeral port — the process binds here, not on the stable port.
-	cmd.Env = append(os.Environ(), "PORT="+strconv.Itoa(port))
+	// Inject ephemeral port env vars.
+	isMultiPort := len(ports) > 1 || (len(ports) == 1 && !hasDefaultOnly(ports))
+	if isMultiPort {
+		// Multi-port: PORT_<NAME>=<ephemeral> for each named port.
+		for name, p := range ports {
+			envName := "PORT_" + strings.ToUpper(name)
+			cmd.Env = append(cmd.Env, envName+"="+strconv.Itoa(p))
+		}
+		// Also set PORT to the health check port for backward compat with
+		// frameworks that read PORT.
+		hcPort := primaryPortFromMap(ports, svc.HealthCheckPort)
+		cmd.Env = append(cmd.Env, "PORT="+strconv.Itoa(hcPort))
+	} else {
+		// Single-port: PORT=<ephemeral> (classic behavior).
+		for _, p := range ports {
+			cmd.Env = append(cmd.Env, "PORT="+strconv.Itoa(p))
+		}
+	}
 
 	if svc.EnvFile != "" {
 		envVars, err := loadEnvFile(svc.EnvFile)
@@ -258,6 +311,29 @@ func (m *Manager) buildCmd(svc *registry.Service, port int) (*exec.Cmd, *os.File
 	cmd.Stderr = logFile
 
 	return cmd, logFile, nil
+}
+
+func hasDefaultOnly(ports map[string]int) bool {
+	if len(ports) != 1 {
+		return false
+	}
+	_, ok := ports["default"]
+	return ok
+}
+
+func primaryPortFromMap(ports map[string]int, healthCheckPort string) int {
+	if healthCheckPort != "" {
+		if p, ok := ports[healthCheckPort]; ok {
+			return p
+		}
+	}
+	if p, ok := ports["default"]; ok {
+		return p
+	}
+	for _, p := range ports {
+		return p
+	}
+	return 0
 }
 
 // freePort asks the OS for an available TCP port.

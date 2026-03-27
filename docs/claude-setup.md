@@ -63,6 +63,6 @@ anito daemon
 ## Service contract
 
 This binary:
-- Reads `PORT` from the environment and listens on it (Anito injects an ephemeral port)
+- Reads `PORT` (or `PORT_<NAME>` for multi-port services) from the environment and listens on it (Anito injects ephemeral port(s))
 - Exposes `GET /health` returning `200 OK`
 ```

@@ -78,17 +78,25 @@ func TestStop_WritesStoppedStatus(t *testing.T) {
 		t.Fatalf("reg.Register: %v", err)
 	}
 	// Allocate proxy port so Start can proceed.
-	stablePort, err := svc.allocatePort("stop-test", 0)
+	stablePorts, err := svc.allocatePorts("stop-test", map[string]int{"default": 0})
 	if err != nil {
-		t.Fatalf("allocatePort: %v", err)
+		t.Fatalf("allocatePorts: %v", err)
 	}
-	_ = stablePort
+	_ = stablePorts
+	fakeSvc.StablePorts = stablePorts
+	fakeSvc.NormalizePorts()
 
-	internalPort, err := svc.mgr.Start(fakeSvc)
+	internalPorts, err := svc.mgr.Start(fakeSvc)
 	if err != nil {
 		t.Fatalf("mgr.Start: %v", err)
 	}
-	waitForPort(t, internalPort)
+	// Use the primary (default) port.
+	var primaryPort int
+	for _, p := range internalPorts {
+		primaryPort = p
+		break
+	}
+	waitForPort(t, primaryPort)
 	t.Cleanup(func() { _ = svc.mgr.Stop("stop-test") })
 
 	if err := svc.Stop("stop-test"); err != nil {

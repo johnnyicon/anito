@@ -21,9 +21,10 @@ const (
 type ServiceStatus string
 
 const (
-	StatusRunning ServiceStatus = "running"
-	StatusStopped ServiceStatus = "stopped"
-	StatusFailed  ServiceStatus = "failed"
+	StatusRunning  ServiceStatus = "running"
+	StatusStopped  ServiceStatus = "stopped"
+	StatusFailed   ServiceStatus = "failed"
+	StatusOrphaned ServiceStatus = "orphaned" // binary path no longer exists on disk
 )
 
 // StartEvent records a single start attempt for a service.
@@ -41,10 +42,18 @@ type Service struct {
 	ConfigPath   string        `json:"config_path,omitempty"`   // absolute path to the .anito/config.yaml that produced this deploy
 	BinaryPath   string        `json:"binary_path"`             // binary path (TypeBinary) or static dir (TypeStatic)
 	Args         []string      `json:"args,omitempty"`          // optional arguments passed to the binary
-	StablePort   int           `json:"stable_port"`             // permanent port exposed to consumers via proxy
-	InternalPort int           `json:"internal_port,omitempty"` // ephemeral port the process is actually on
+	StablePort   int           `json:"stable_port"`             // primary stable port (backward compat); see StablePorts for multi-port
+	InternalPort int           `json:"internal_port,omitempty"` // primary ephemeral port (backward compat); see InternalPorts for multi-port
 	EnvFile      string        `json:"env_file,omitempty"`
 	HealthCheck  string        `json:"health_check"` // path, e.g. "/health"
+
+	// Multi-port support: named ports for services that bind multiple ports.
+	// Single-port services have one entry with key "default".
+	// The singular StablePort/InternalPort fields are kept in sync for backward compat.
+	StablePorts     map[string]int `json:"stable_ports,omitempty"`      // name → stable port
+	InternalPorts   map[string]int `json:"internal_ports,omitempty"`    // name → ephemeral port
+	HealthCheckPort string         `json:"health_check_port,omitempty"` // which named port to health-check (default: "default" or first key)
+
 	WatchPaths          []string      `json:"watch_paths,omitempty"`           // directories to watch for file changes
 	DrainWindow         time.Duration `json:"drain_window,omitempty"`          // grace period between proxy swap and SIGTERM to old process
 	HealthCheckTimeout  time.Duration `json:"health_check_timeout,omitempty"`  // how long to wait for /health → 200 (0 = use default 15s)
@@ -60,6 +69,68 @@ type Service struct {
 	CrashAttempts int          `json:"crash_attempts,omitempty"`  // number of restart attempts in current crash loop
 	GaveUp        bool         `json:"gave_up,omitempty"`         // true if crash backoff hit max attempts
 	StartHistory  []StartEvent `json:"start_history,omitempty"`   // ring buffer, last 10 starts
+}
+
+// NormalizePorts ensures StablePorts/InternalPorts maps are populated from
+// the singular fields (backward compat with old registry.json files).
+// Also keeps the singular fields in sync with the maps.
+func (s *Service) NormalizePorts() {
+	// Upgrade: singular → map (loading old registry data)
+	if len(s.StablePorts) == 0 && s.StablePort != 0 {
+		s.StablePorts = map[string]int{"default": s.StablePort}
+	}
+	if len(s.InternalPorts) == 0 && s.InternalPort != 0 {
+		s.InternalPorts = map[string]int{"default": s.InternalPort}
+	}
+	// Downgrade: map → singular (keep backward compat fields in sync)
+	s.syncSingularFromMap()
+}
+
+// syncSingularFromMap keeps StablePort/InternalPort in sync with the maps.
+// Uses the primary port (HealthCheckPort, or "default", or first alphabetically).
+func (s *Service) syncSingularFromMap() {
+	s.StablePort = s.PrimaryStablePort()
+	s.InternalPort = s.PrimaryInternalPort()
+}
+
+// PrimaryStablePort returns the stable port that should be used for health checks
+// and backward-compat display. Prefers HealthCheckPort, then "default", then first key.
+func (s *Service) PrimaryStablePort() int {
+	return primaryPort(s.StablePorts, s.HealthCheckPort)
+}
+
+// PrimaryInternalPort returns the internal port for the health check port.
+func (s *Service) PrimaryInternalPort() int {
+	return primaryPort(s.InternalPorts, s.HealthCheckPort)
+}
+
+// IsMultiPort returns true if the service has more than one named port.
+func (s *Service) IsMultiPort() bool {
+	return len(s.StablePorts) > 1
+}
+
+func primaryPort(ports map[string]int, healthCheckPort string) int {
+	if len(ports) == 0 {
+		return 0
+	}
+	// Prefer the health check port
+	if healthCheckPort != "" {
+		if p, ok := ports[healthCheckPort]; ok {
+			return p
+		}
+	}
+	// Then "default"
+	if p, ok := ports["default"]; ok {
+		return p
+	}
+	// Then first key alphabetically (deterministic)
+	var first string
+	for k := range ports {
+		if first == "" || k < first {
+			first = k
+		}
+	}
+	return ports[first]
 }
 
 // Registry manages the on-disk service registry.
@@ -100,10 +171,19 @@ func (r *Registry) load() error {
 		return err
 	}
 	r.services = f.Services
+	// Normalize all services so StablePorts/InternalPorts maps are populated
+	// from old registry files that only had the singular fields.
+	for _, svc := range r.services {
+		svc.NormalizePorts()
+	}
 	return nil
 }
 
 func (r *Registry) save() error {
+	// Keep singular fields in sync with maps before persisting.
+	for _, svc := range r.services {
+		svc.syncSingularFromMap()
+	}
 	f := registryFile{Services: r.services}
 	data, err := json.MarshalIndent(f, "", "  ")
 	if err != nil {
@@ -117,17 +197,22 @@ func (r *Registry) save() error {
 }
 
 // Register adds or updates a service entry.
-// On re-deploy, StablePort is preserved from the existing entry.
+// On re-deploy, StablePorts (and the singular StablePort) are preserved from the existing entry.
 func (r *Registry) Register(s *Service) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
 	if existing, exists := r.services[s.Name]; exists {
-		s.StablePort = existing.StablePort // never change the stable port
+		// Preserve stable port assignments — they never change on redeploy.
+		if len(existing.StablePorts) > 0 {
+			s.StablePorts = existing.StablePorts
+		}
+		s.StablePort = existing.StablePort
 		s.DeployedAt = existing.DeployedAt
 	} else {
 		s.DeployedAt = time.Now()
 	}
+	s.NormalizePorts()
 	s.UpdatedAt = time.Now()
 	r.services[s.Name] = s
 	return r.save()
@@ -237,17 +322,37 @@ func (r *Registry) UpdateCrashState(name string, attempts int, gaveUp bool) erro
 	return r.save()
 }
 
-// UsedPorts returns a set of all stable ports currently in use.
+// UsedPorts returns a set of all stable ports currently in use (across all named ports).
 func (r *Registry) UsedPorts() map[int]bool {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
-	ports := make(map[int]bool, len(r.services))
+	ports := make(map[int]bool, len(r.services)*2)
 	for _, svc := range r.services {
+		for _, p := range svc.StablePorts {
+			if p != 0 {
+				ports[p] = true
+			}
+		}
+		// Backward compat: also include the singular field in case StablePorts is empty.
 		if svc.StablePort != 0 {
 			ports[svc.StablePort] = true
 		}
 	}
 	return ports
+}
+
+// UpdateInternalPorts records the ephemeral ports the process is running on.
+func (r *Registry) UpdateInternalPorts(name string, ports map[string]int) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	s, ok := r.services[name]
+	if !ok {
+		return fmt.Errorf("service %q not found", name)
+	}
+	s.InternalPorts = ports
+	s.syncSingularFromMap()
+	s.UpdatedAt = time.Now()
+	return r.save()
 }
 
 // Remove deletes a service from the registry.

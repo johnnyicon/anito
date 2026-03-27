@@ -55,13 +55,15 @@ Deploy a service. The binary must already be built. Anito handles the start, hea
 |-----------|------|----------|-------------|
 | `name` | string | yes | Unique service name |
 | `path` | string | yes | Absolute path to the binary or static directory |
-| `stable_port` | int | no | Preferred port consumers connect to. Omit or set to 0 to auto-allocate (range 8100–8200) |
+| `stable_port` | int | no | Preferred port for single-port services (0 = auto-allocate). For multi-port services, use `stable_ports` instead. |
+| `stable_ports` | object | no | Named ports for multi-port services, e.g. `{"ws": 7172, "http": 7173}`. Each port gets its own reverse proxy. The service receives `PORT_<NAME>` env vars. Mutually exclusive with `stable_port` for new services. |
+| `health_check_port` | string | no | Which named port to health-check (default: first port). Only relevant for multi-port services. |
 | `type` | string | no | `binary` (default) or `static` |
 | `env_file` | string | no | Path to a `KEY=VALUE` env file |
 | `health_check` | string | no | Health check path (default: `/health`) |
 | `watch_paths` | []string | no | Directories to watch for file changes. Any write triggers an automatic restart (debounced 500ms). Also enables crash auto-restart. |
 
-Returns the service record including the assigned stable port.
+Returns the service record including the assigned stable port(s). Response includes both singular fields (`stable_port`, `pinned_address`) and map fields (`stable_ports`, `pinned_addresses`) for backward compatibility.
 
 Watch paths are persisted in the registry and survive daemon restarts — the watcher is restored automatically.
 
@@ -208,14 +210,15 @@ Returns `{ id, status: "logged" }`.
 ---
 
 ### `anito_reserve`
-Reserve a stable port for a named service before its binary exists. Called by the LLM after `anito_setup` returns composite allocations — locks each port in the registry so nothing else can claim it before the binary is built and deployed.
+Reserve stable port(s) for a named service before its binary exists. Called by the LLM after `anito_setup` returns composite allocations — locks each port in the registry so nothing else can claim it before the binary is built and deployed.
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
 | `name` | string | yes | Service name |
-| `preferred_port` | int | no | Preferred port (0 = auto-allocate from 8100–8200) |
+| `preferred_port` | int | no | Preferred port for single-port services (0 = auto-allocate from 8100–8200) |
+| `preferred_ports` | object | no | Named ports for multi-port services, e.g. `{"ws": 7172, "http": 7173}`. Use instead of `preferred_port`. |
 
-Returns `{ name, stable_port, address }`.
+Returns `{ name, stable_port, address }` for single-port. For multi-port, also returns `stable_ports` and `addresses` maps.
 
 ---
 
@@ -223,8 +226,10 @@ Returns `{ name, stable_port, address }`.
 
 Every service managed by Anito must:
 
-1. **Read `PORT` from the environment** — Anito injects an ephemeral internal port at startup. The service must bind to this port, not a hardcoded one.
-2. **Expose `GET /health → 200 OK`** — Anito polls this after every start and restart before swapping the proxy. If it doesn't return 200, the deploy fails and the old process keeps serving.
+1. **Read port(s) from the environment** — Anito injects ephemeral internal port(s) at startup. The service must bind to these ports, not hardcoded ones.
+   - **Single-port services:** `PORT=<ephemeral>` (classic behavior)
+   - **Multi-port services:** `PORT_<NAME>=<ephemeral>` for each named port (e.g. `PORT_WS`, `PORT_HTTP`), plus `PORT=<ephemeral>` set to the health-check port for backward compatibility.
+2. **Expose `GET /health → 200 OK`** — Anito polls this after every start and restart before swapping the proxy. If it doesn't return 200, the deploy fails and the old process keeps serving. For multi-port services, the health check runs on the `health_check_port` (default: the first named port).
 
 Anito does not care about language, framework, or what's inside the binary.
 
@@ -236,8 +241,10 @@ Anito does not care about language, framework, or what's inside the binary.
 |------|------|
 | Anito management API | `7700` |
 | Anito MCP server | `7701` |
-| Your service (stable) | set in deploy request, or auto-allocated from `8100–8200` |
-| Your process (internal) | ephemeral, assigned by Anito at start time |
+| Your service (stable) | set in deploy request via `stable_port` or `stable_ports`, or auto-allocated from `8100–8200` |
+| Your process (internal) | ephemeral, assigned by Anito at start time — one per named port |
+
+A service can have **multiple named stable ports** (e.g. one for WebSocket, one for HTTP API). Each gets its own reverse proxy and ephemeral internal port. All ports swap atomically on deploy — zero downtime across all ports.
 
 ---
 
@@ -276,6 +283,27 @@ anito_deploy(
   watch_paths=["/abs/path/to/src/"]
 )
 # any .go file change now triggers automatic recompile + restart
+```
+
+**Deploy a multi-port service (e.g. WebSocket + HTTP API):**
+```
+anito_deploy(
+  name="my-daemon",
+  path="/abs/path/to/binary",
+  stable_ports={"ws": 7172, "http": 7173},
+  health_check_port="ws",
+  health_check="/health"
+)
+# my-daemon receives PORT_WS=<ephemeral1> and PORT_HTTP=<ephemeral2>
+# ws  → http://localhost:7172 (permanent, proxied)
+# http → http://localhost:7173 (permanent, proxied)
+# WebSocket upgrades are proxied transparently
+```
+
+**Reserve multi-port before building:**
+```
+anito_reserve(name="my-daemon", preferred_ports={"ws": 7172, "http": 7173})
+# ports locked — build the binary, then anito_deploy with the same name
 ```
 
 **Check why a service restarted:**

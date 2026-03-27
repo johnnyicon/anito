@@ -2,8 +2,26 @@ import { useState } from 'react'
 import { useMutation, useQueryClient } from '@tanstack/react-query'
 import type { Service } from '@/lib/api'
 import { relativeTime } from '@/lib/format'
-import { FailedCard } from '@/components/FailedCard'
+import { FailedCard, OrphanedCard } from '@/components/FailedCard'
 import { Button } from '@/components/ui/button'
+
+/** Format port display: single-port shows ":3000", multi-port shows ":7172 :7173" */
+function formatPorts(svc: Service): string {
+  const ports = svc.stable_ports
+  if (ports && Object.keys(ports).length > 1) {
+    return Object.entries(ports).map(([, port]) => `:${port}`).join(' ')
+  }
+  return `:${svc.stable_port}`
+}
+
+/** Format port tooltip for multi-port: "ws:7172 http:7173" */
+function portTooltip(svc: Service): string | undefined {
+  const ports = svc.stable_ports
+  if (ports && Object.keys(ports).length > 1) {
+    return Object.entries(ports).map(([name, port]) => `${name}:${port}`).join('  ')
+  }
+  return undefined
+}
 
 interface ServiceRowProps {
   service:      Service
@@ -28,6 +46,11 @@ export function ServiceRow({ service: svc, stale, onOpenLogs, onOpenDetail, onRe
     onError: (err) => setActionError(err instanceof Error ? err.message : 'restart failed'),
   })
 
+  // ── Orphaned state → delegate to OrphanedCard ────────────────────────────
+  if (svc.status === 'orphaned') {
+    return <OrphanedCard service={svc} onRemove={onRemove} />
+  }
+
   // ── Failed state → delegate to FailedCard (auto-expanded) ─────────────────
   if (svc.status === 'failed') {
     return (
@@ -45,8 +68,8 @@ export function ServiceRow({ service: svc, stale, onOpenLogs, onOpenDetail, onRe
       <div className="group flex items-center gap-3 px-4 h-10 border-b border-border/50 text-sm hover:bg-muted/30 transition-colors">
         <span className="text-muted-foreground text-base leading-none">◌</span>
         <span className="font-mono font-medium text-muted-foreground">{svc.name}</span>
-        <span className="font-mono text-xs text-muted-foreground">
-          :{svc.stable_port}{stale ? ' (stale)' : ''}
+        <span className="font-mono text-xs text-muted-foreground" title={portTooltip(svc)}>
+          {formatPorts(svc)}{stale ? ' (stale)' : ''}
         </span>
         <span className="text-xs text-muted-foreground ml-1">stopped</span>
 

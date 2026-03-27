@@ -25,13 +25,13 @@ Before making architectural or implementation decisions, consult:
 
 **Shared service layer.** The CLI and MCP are thin wrappers. All logic lives in the internal packages (`internal/registry`, `internal/process`, `internal/proxy`, `internal/server`). Command handlers must not contain business logic.
 
-**Stable ports.** The proxy listener owns the stable port permanently. The process behind it can change on every deploy. This is the core invariant — nothing should break it.
+**Stable ports.** The proxy listener owns the stable port(s) permanently. The process behind them can change on every deploy. This is the core invariant — nothing should break it. Services can have multiple named ports (e.g. WebSocket + HTTP API) — each gets its own proxy.
 
-**Service contract.** Every managed service must: (1) read `PORT` from environment, (2) serve HTTP on that port, (3) expose `GET /health → 200`. Anito does not care about language, framework, or what's inside the binary.
+**Service contract.** Every managed service must: (1) read port(s) from environment — `PORT` for single-port, `PORT_<NAME>` for multi-port, (2) serve HTTP on those ports, (3) expose `GET /health → 200`. Anito does not care about language, framework, or what's inside the binary.
 
 ## Port allocation
 
-`port` in `config.yaml` is the preferred stable port. Anito should respect it if available and auto-allocate from the configured range if not. Auto-allocation is Anito's responsibility, not the developer's.
+`port` in `config.yaml` is the preferred stable port for single-port services. Multi-port services use `ports:` (a named map, e.g. `{ws: 7172, http: 7173}`). The two fields are mutually exclusive. Anito should respect preferred ports if available and auto-allocate from the configured range if not. Auto-allocation is Anito's responsibility, not the developer's.
 
 ## Log access
 

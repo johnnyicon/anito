@@ -31,6 +31,8 @@ type DeployRequest struct {
 	Path               string               `json:"path"`
 	Args               []string             `json:"args,omitempty"`
 	StablePort         int                  `json:"stable_port"`
+	StablePorts        map[string]int       `json:"stable_ports,omitempty"`
+	HealthCheckPort    string               `json:"health_check_port,omitempty"`
 	EnvFile            string               `json:"env_file,omitempty"`
 	HealthCheck        string               `json:"health_check,omitempty"`
 	WatchPaths         []string             `json:"watch_paths,omitempty"`

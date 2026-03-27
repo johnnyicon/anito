@@ -111,7 +111,7 @@ anito deploy
 
 ```yaml
 name: my-service          # required — unique service name
-port: 3000                # stable port (0 = auto-allocate from 8100–8200)
+port: 3000                # stable port (0 = auto-allocate from 8100–8200); mutually exclusive with ports
 type: binary              # "binary" (default) or "static"
 build: go build -o ./dist/my-service ./cmd/my-service
 output: ./dist/my-service # path to binary or static dir (required)
@@ -125,6 +125,20 @@ watch:
   - ./src                 # relative paths — resolved against this config file's directory
   - ./cmd
 ```
+
+**Multi-port services** use `ports:` instead of `port:` (mutually exclusive):
+
+```yaml
+name: my-daemon
+ports:                    # named ports — each gets its own reverse proxy
+  ws: 7172                # WebSocket port
+  http: 7173              # HTTP API port
+health_check_port: ws     # which named port to health-check (default: first port)
+output: ./dist/my-daemon
+health_check: /health
+```
+
+The service receives `PORT_WS=<ephemeral>` and `PORT_HTTP=<ephemeral>` env vars. All ports swap atomically on deploy — zero downtime across all ports. WebSocket upgrades are proxied transparently.
 
 **`restart_policy` values:**
 - `on-watch` (default) — auto-restart on crash only if `watch:` paths are configured
@@ -150,7 +164,7 @@ After every successful `anito deploy`, Anito writes a receipt into the repo's `.
 
 **Schema:** `schemas/deployed.v1.json` — JSON Schema (draft 2020-12). All fields are defined; no additional fields are allowed. Add this to your editor's JSON schema association for validation.
 
-**Example:**
+**Example (single-port):**
 ```json
 {
   "services": {
@@ -158,10 +172,31 @@ After every successful `anito deploy`, Anito writes a receipt into the repo's `.
       "name": "sogs-api",
       "stable_port": 8080,
       "address": "http://localhost:8080",
+      "stable_ports": { "default": 8080 },
+      "addresses": { "default": "http://localhost:8080" },
       "binary_path": "/Users/you/myapp/.anito/sogs-api-dev.sh",
       "config_path": "/Users/you/myapp/.anito/sogs-api.yaml",
       "version": "sha:916dc873",
       "deployed_at": "2026-03-19T14:20:11-04:00"
+    }
+  }
+}
+```
+
+**Example (multi-port):**
+```json
+{
+  "services": {
+    "my-daemon": {
+      "name": "my-daemon",
+      "stable_port": 7172,
+      "address": "http://localhost:7172",
+      "stable_ports": { "ws": 7172, "http": 7173 },
+      "addresses": { "ws": "http://localhost:7172", "http": "http://localhost:7173" },
+      "binary_path": "/Users/you/myapp/dist/my-daemon",
+      "config_path": "/Users/you/myapp/.anito/config.yaml",
+      "version": "v1.0.0",
+      "deployed_at": "2026-03-26T14:20:11-04:00"
     }
   }
 }

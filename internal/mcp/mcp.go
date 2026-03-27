@@ -79,35 +79,41 @@ func (s *Server) Start() error {
 // --- input/output types ---
 
 type deployInput struct {
-	Name               string   `json:"name"                  jsonschema:"service name, must be unique"`
-	Version            string   `json:"version"               jsonschema:"optional semver tag for this build, e.g. v1.2.3"`
-	Path               string   `json:"path"                  jsonschema:"absolute path to the binary or static directory"`
-	Args               []string `json:"args"                  jsonschema:"optional arguments passed to the binary at startup"`
-	StablePort         int      `json:"stable_port"           jsonschema:"preferred stable port consumers connect to (0 = auto-allocate); ports 7700 and 7701 are reserved"`
-	Type               string   `json:"type"                  jsonschema:"service type: binary (default) or static"`
-	EnvFile            string   `json:"env_file"              jsonschema:"optional path to a KEY=VALUE env file"`
-	HealthCheck        string   `json:"health_check"          jsonschema:"health check path polled after start (default: /health)"`
-	WatchPaths         []string `json:"watch_paths"           jsonschema:"directories to watch for file changes; any change triggers an automatic restart"`
-	DrainWindow        string   `json:"drain_window"          jsonschema:"grace period between proxy swap and SIGTERM to the old process (e.g. '3s', '500ms'). Use this for SSE services to let in-flight connections finish."`
-	HealthCheckTimeout string   `json:"health_check_timeout"  jsonschema:"how long to wait for /health to return 200 (e.g. '30s', '60s'). Default: '15s'. Increase for slow-starting services."`
-	RestartPolicy      string   `json:"restart_policy"        jsonschema:"crash restart behavior: 'on-watch' (default, restart only if watch paths set), 'always' (always restart on crash), 'never' (never auto-restart)"`
-	ConfigPath         string   `json:"config_path,omitempty" jsonschema:"absolute path to the .anito/config.yaml that defines this service. Doctor will flag services without a recorded config path."`
+	Name               string         `json:"name"                  jsonschema:"service name, must be unique"`
+	Version            string         `json:"version"               jsonschema:"optional semver tag for this build, e.g. v1.2.3"`
+	Path               string         `json:"path"                  jsonschema:"absolute path to the binary or static directory"`
+	Args               []string       `json:"args"                  jsonschema:"optional arguments passed to the binary at startup"`
+	StablePort         int            `json:"stable_port"           jsonschema:"preferred stable port for single-port services (0 = auto-allocate). For multi-port services, use stable_ports instead."`
+	StablePorts        map[string]int `json:"stable_ports"          jsonschema:"named ports for multi-port services, e.g. {ws: 7172, http: 7173}. Each port gets its own reverse proxy. The service receives PORT_<NAME> env vars. Mutually exclusive with stable_port for new services."`
+	HealthCheckPort    string         `json:"health_check_port"     jsonschema:"which named port to health-check (default: first port). Only relevant for multi-port services."`
+	Type               string         `json:"type"                  jsonschema:"service type: binary (default) or static"`
+	EnvFile            string         `json:"env_file"              jsonschema:"optional path to a KEY=VALUE env file"`
+	HealthCheck        string         `json:"health_check"          jsonschema:"health check path polled after start (default: /health)"`
+	WatchPaths         []string       `json:"watch_paths"           jsonschema:"directories to watch for file changes; any change triggers an automatic restart"`
+	DrainWindow        string         `json:"drain_window"          jsonschema:"grace period between proxy swap and SIGTERM to the old process (e.g. '3s', '500ms'). Use this for SSE services to let in-flight connections finish."`
+	HealthCheckTimeout string         `json:"health_check_timeout"  jsonschema:"how long to wait for /health to return 200 (e.g. '30s', '60s'). Default: '15s'. Increase for slow-starting services."`
+	RestartPolicy      string         `json:"restart_policy"        jsonschema:"crash restart behavior: 'on-watch' (default, restart only if watch paths set), 'always' (always restart on crash), 'never' (never auto-restart)"`
+	ConfigPath         string         `json:"config_path,omitempty" jsonschema:"absolute path to the .anito/config.yaml that defines this service. Doctor will flag services without a recorded config path."`
 }
 
 type serviceView struct {
-	Name           string    `json:"name"`
-	Version        string    `json:"version,omitempty"`
-	Type           string    `json:"type"`
-	StablePort     int       `json:"stable_port"`
-	PinnedAddress  string    `json:"pinned_address"` // permanent address — never changes on redeploy
-	InternalPort   int       `json:"internal_port,omitempty"`
-	Status         string    `json:"status"`
-	PID            int       `json:"pid,omitempty"`
-	BinaryPath     string    `json:"binary_path"`
-	ConfigPath     string    `json:"config_path,omitempty"`
-	DeployedAt     time.Time `json:"deployed_at,omitempty"`
-	UpdatedAt      time.Time `json:"updated_at,omitempty"`
-	LastDeployedAt time.Time `json:"last_deployed_at,omitempty"`
+	Name            string            `json:"name"`
+	Version         string            `json:"version,omitempty"`
+	Type            string            `json:"type"`
+	StablePort      int               `json:"stable_port"`                 // primary port (backward compat)
+	PinnedAddress   string            `json:"pinned_address"`              // primary address (backward compat)
+	StablePorts     map[string]int    `json:"stable_ports,omitempty"`      // all named ports
+	PinnedAddresses map[string]string `json:"pinned_addresses,omitempty"`  // all named addresses
+	InternalPort    int               `json:"internal_port,omitempty"`     // primary internal port (backward compat)
+	InternalPorts   map[string]int    `json:"internal_ports,omitempty"`    // all named internal ports
+	HealthCheckPort string            `json:"health_check_port,omitempty"` // which named port is health-checked
+	Status          string            `json:"status"`
+	PID             int               `json:"pid,omitempty"`
+	BinaryPath      string            `json:"binary_path"`
+	ConfigPath      string            `json:"config_path,omitempty"`
+	DeployedAt      time.Time         `json:"deployed_at,omitempty"`
+	UpdatedAt       time.Time         `json:"updated_at,omitempty"`
+	LastDeployedAt  time.Time         `json:"last_deployed_at,omitempty"`
 }
 
 // setupInput is the unified input for anito_setup.
@@ -184,14 +190,17 @@ type coordinateOutput struct {
 }
 
 type reserveInput struct {
-	Name          string `json:"name"           jsonschema:"service name"`
-	PreferredPort int    `json:"preferred_port" jsonschema:"preferred stable port (0 = auto-allocate)"`
+	Name           string         `json:"name"            jsonschema:"service name"`
+	PreferredPort  int            `json:"preferred_port"  jsonschema:"preferred stable port for single-port services (0 = auto-allocate)"`
+	PreferredPorts map[string]int `json:"preferred_ports" jsonschema:"named ports to reserve for multi-port services, e.g. {ws: 7172, http: 7173}. Use this instead of preferred_port for multi-port services."`
 }
 
 type reserveOutput struct {
-	Name       string `json:"name"`
-	StablePort int    `json:"stable_port"`
-	Address    string `json:"address"`
+	Name        string            `json:"name"`
+	StablePort  int               `json:"stable_port"`            // primary port (backward compat)
+	Address     string            `json:"address"`                // primary address (backward compat)
+	StablePorts map[string]int    `json:"stable_ports,omitempty"` // all named ports
+	Addresses   map[string]string `json:"addresses,omitempty"`    // all named addresses
 }
 
 // ---
@@ -323,6 +332,8 @@ func (s *Server) registerTools(srv *sdkmcp.Server) {
 			Path:               in.Path,
 			Args:               in.Args,
 			StablePort:         in.StablePort,
+			StablePorts:        in.StablePorts,
+			HealthCheckPort:    in.HealthCheckPort,
 			EnvFile:            in.EnvFile,
 			HealthCheck:        in.HealthCheck,
 			DrainWindow:        drainWindow,
@@ -427,6 +438,33 @@ func (s *Server) registerTools(srv *sdkmcp.Server) {
 			"to another service. A subsequent anito_deploy for the same name will use the reserved port. " +
 			"Returns the assigned stable port and permanent address.",
 	}, func(ctx context.Context, req *sdkmcp.CallToolRequest, in reserveInput) (*sdkmcp.CallToolResult, reserveOutput, error) {
+		// Multi-port reserve if PreferredPorts is provided.
+		if len(in.PreferredPorts) > 0 {
+			log.Printf("[MCP] tool=anito_reserve name=%s ports=%v", in.Name, in.PreferredPorts)
+			ports, err := s.svc.ReservePorts(in.Name, in.PreferredPorts)
+			if err != nil {
+				log.Printf("[MCP] tool=anito_reserve name=%s error=%q", in.Name, err)
+				s.logErr("anito_reserve", in, err)
+				return nil, reserveOutput{}, err
+			}
+			out := reserveOutput{
+				Name:        in.Name,
+				StablePorts: ports,
+				Addresses:   make(map[string]string, len(ports)),
+			}
+			for name, port := range ports {
+				out.Addresses[name] = fmt.Sprintf("http://localhost:%d", port)
+			}
+			// Set primary port for backward compat.
+			for _, p := range ports {
+				out.StablePort = p
+				out.Address = fmt.Sprintf("http://localhost:%d", p)
+				break
+			}
+			return nil, out, nil
+		}
+
+		// Single-port reserve (backward compat).
 		log.Printf("[MCP] tool=anito_reserve name=%s preferred=%d", in.Name, in.PreferredPort)
 		port, err := s.svc.Reserve(in.Name, in.PreferredPort)
 		if err != nil {
@@ -666,19 +704,32 @@ func (s *Server) registerTools(srv *sdkmcp.Server) {
 }
 
 func toView(svc *registry.Service) serviceView {
-	return serviceView{
-		Name:           svc.Name,
-		Version:        svc.Version,
-		Type:           string(svc.Type),
-		StablePort:     svc.StablePort,
-		PinnedAddress:  fmt.Sprintf("http://localhost:%d", svc.StablePort),
-		InternalPort:   svc.InternalPort,
-		Status:         string(svc.Status),
-		PID:            svc.PID,
-		BinaryPath:     svc.BinaryPath,
-		ConfigPath:     svc.ConfigPath,
-		DeployedAt:     svc.DeployedAt,
-		UpdatedAt:      svc.UpdatedAt,
-		LastDeployedAt: svc.LastDeployedAt,
+	v := serviceView{
+		Name:            svc.Name,
+		Version:         svc.Version,
+		Type:            string(svc.Type),
+		StablePort:      svc.StablePort,
+		PinnedAddress:   fmt.Sprintf("http://localhost:%d", svc.StablePort),
+		InternalPort:    svc.InternalPort,
+		HealthCheckPort: svc.HealthCheckPort,
+		Status:          string(svc.Status),
+		PID:             svc.PID,
+		BinaryPath:      svc.BinaryPath,
+		ConfigPath:      svc.ConfigPath,
+		DeployedAt:      svc.DeployedAt,
+		UpdatedAt:       svc.UpdatedAt,
+		LastDeployedAt:  svc.LastDeployedAt,
 	}
+	// Multi-port: include all named ports and addresses.
+	if len(svc.StablePorts) > 0 {
+		v.StablePorts = svc.StablePorts
+		v.PinnedAddresses = make(map[string]string, len(svc.StablePorts))
+		for name, port := range svc.StablePorts {
+			v.PinnedAddresses[name] = fmt.Sprintf("http://localhost:%d", port)
+		}
+	}
+	if len(svc.InternalPorts) > 0 {
+		v.InternalPorts = svc.InternalPorts
+	}
+	return v
 }

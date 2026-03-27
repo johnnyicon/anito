@@ -107,7 +107,7 @@ Framework config patches (Vite proxy config, etc.) are marked with `// [anito:ma
 
 Every Anito-managed service must:
 
-1. **Read `PORT` from the environment** — Anito injects an ephemeral port at startup.
+1. **Read port(s) from the environment** — Anito injects `PORT=<ephemeral>` for single-port services, or `PORT_<NAME>=<ephemeral>` for each named port in multi-port services.
 2. **Expose `GET /health → 200`** — Anito polls this after every start and restart.
 
 That's it. Language, framework, and internals don't matter.

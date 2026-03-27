@@ -20,13 +20,15 @@ import (
 
 // Entry records one deployed service.
 type Entry struct {
-	Name       string    `json:"name"`
-	StablePort int       `json:"stable_port"`
-	Address    string    `json:"address"`              // "http://localhost:<port>"
-	BinaryPath string    `json:"binary_path"`
-	ConfigPath string    `json:"config_path"`
-	Version    string    `json:"version,omitempty"`
-	DeployedAt time.Time `json:"deployed_at"`
+	Name        string            `json:"name"`
+	StablePort  int               `json:"stable_port"`
+	Address     string            `json:"address"`                        // "http://localhost:<port>" (primary)
+	StablePorts map[string]int    `json:"stable_ports,omitempty"`         // all named ports
+	Addresses   map[string]string `json:"addresses,omitempty"`            // all named addresses
+	BinaryPath  string            `json:"binary_path"`
+	ConfigPath  string            `json:"config_path"`
+	Version     string            `json:"version,omitempty"`
+	DeployedAt  time.Time         `json:"deployed_at"`
 }
 
 // File is the structure written to deployed.json.

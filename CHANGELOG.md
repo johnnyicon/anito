@@ -8,6 +8,51 @@ Format: `## [date] — description`, breaking changes marked **BREAKING**.
 
 ---
 
+## 2026-03-26 — Multi-port service support
+
+Services can now bind multiple named ports. Each port gets its own reverse proxy with the same zero-downtime hot-swap guarantees as single-port services.
+
+**Config:** New `ports:` map field, mutually exclusive with `port:`. New `health_check_port:` field to specify which named port to health-check.
+
+```yaml
+# Single-port (unchanged)
+port: 3000
+
+# Multi-port (new)
+ports:
+  ws: 7172
+  http: 7173
+health_check_port: ws
+```
+
+**Registry:** New fields: `stable_ports` (map of name → port), `internal_ports`, `health_check_port`. The singular `stable_port` / `internal_port` fields remain and are kept in sync with the primary port for backward compatibility. Existing `registry.json` files are auto-migrated on load — no manual migration needed.
+
+**MCP:** `anito_deploy` accepts `stable_ports` (map) alongside `stable_port` (int). `anito_reserve` accepts `preferred_ports` (map) alongside `preferred_port` (int). Response views include `stable_ports`, `internal_ports`, and `pinned_addresses` maps. Singular fields remain populated for backward compat.
+
+**Env vars:** Single-port services still receive `PORT=<ephemeral>`. Multi-port services receive `PORT_<NAME>=<ephemeral>` for each named port, plus `PORT=<ephemeral>` set to the health-check port for backward compat.
+
+**Proxy:** WebSocket `Connection: Upgrade` requests are now passed through without SSE flush wrapping, enabling WebSocket proxying.
+
+**Receipt:** `deployed.json` now includes `stable_ports` and `addresses` maps alongside the singular fields.
+
+**Dashboard:** Multi-port services display all ports in the service row.
+
+---
+
+## 2026-03-24 — Orphaned service detection
+
+Services whose binary no longer exists on disk are now given a distinct `"orphaned"` status instead of `"failed"`.
+
+**Registry:** New `ServiceStatus` value: `"orphaned"`. At daemon startup, services whose binary path cannot be found on disk are marked `orphaned` (previously `failed`) and logged with the `[ORPHAN]` tag. The service layer also annotates orphan status dynamically on every `GET /services` and `GET /status/:name` call — so services whose binary is deleted while the daemon is running are also detected without a restart.
+
+**MCP / HTTP API:** `GET /services` and `GET /status/:name` now return `"status": "orphaned"` for these services. Callers that previously handled only `"running"`, `"stopped"`, and `"failed"` should add handling for `"orphaned"`. Orphaned services behave like stopped services — no process is running, stable port returns 503.
+
+**Doctor:** `anito_doctor` now flags orphaned services as errors with the missing binary path and a suggested remediation: rebuild and redeploy, or `anito remove <name>` to clean up.
+
+**Dashboard:** Orphaned services render with amber styling and a "Remove" button — the only sensible action when the binary is gone. An "Orphaned" filter chip is available in the filter bar.
+
+---
+
 ## 2026-03-20 — env_file paths are now always absolute in config
 
 **Bug fix — breaking for workarounds only.**

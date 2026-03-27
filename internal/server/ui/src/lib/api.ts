@@ -2,7 +2,7 @@ import { queryOptions, useMutation, useQueryClient } from '@tanstack/react-query
 
 // ── Types ──────────────────────────────────────────────────────────────────
 
-export type ServiceStatus = 'running' | 'stopped' | 'failed'
+export type ServiceStatus = 'running' | 'stopped' | 'failed' | 'orphaned'
 export type ServiceType   = 'binary'  | 'static'
 
 export interface StartEvent {
@@ -29,6 +29,10 @@ export interface Service {
   deployed_at:    string
   updated_at:     string
   last_deployed_at: string
+  // Multi-port support
+  stable_ports?:      Record<string, number>
+  internal_ports?:    Record<string, number>
+  health_check_port?: string
   // Runtime observability
   last_started_at: string
   crash_attempts:  number
@@ -185,7 +189,17 @@ export function repoRootFromConfigPath(configPath: string): string {
 
 /** Count ports used from the auto-allocation range 8100–8200 */
 export function countAllocatedPorts(services: Service[]): number {
-  return services.filter(s => s.stable_port >= 8100 && s.stable_port <= 8200).length
+  let count = 0
+  for (const s of services) {
+    if (s.stable_ports && Object.keys(s.stable_ports).length > 0) {
+      for (const port of Object.values(s.stable_ports)) {
+        if (port >= 8100 && port <= 8200) count++
+      }
+    } else if (s.stable_port >= 8100 && s.stable_port <= 8200) {
+      count++
+    }
+  }
+  return count
 }
 
 export const PORT_RANGE_TOTAL = 101 // 8100–8200 inclusive
