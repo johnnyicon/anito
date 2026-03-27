@@ -1,0 +1,24 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" fill="none">
+  <!-- Anito: guardian spirit mark — a shield with a watchful eye -->
+  <!-- Rounded shield/crest shape -->
+  <path
+    d="M256 48 L420 140 Q440 152 440 176 L440 296 Q440 380 360 432 L256 480 L152 432 Q72 380 72 296 L72 176 Q72 152 92 140 Z"
+    fill="#10b981"
+  />
+  <!-- Inner cutout — creates the shield border feel -->
+  <path
+    d="M256 88 L392 164 Q408 174 408 192 L408 296 Q408 364 340 408 L256 448 L172 408 Q104 364 104 296 L104 192 Q104 174 120 164 Z"
+    fill="white"
+  />
+  <!-- Guardian eye — the watchful center -->
+  <ellipse cx="256" cy="260" rx="96" ry="64" fill="#10b981" />
+  <!-- Pupil -->
+  <circle cx="256" cy="260" r="28" fill="white" />
+  <!-- Inner pupil dot -->
+  <circle cx="256" cy="260" r="12" fill="#10b981" />
+  <!-- Upper eyelid accent — gives alertness -->
+  <path
+    d="M160 260 Q208 196 256 196 Q304 196 352 260"
+    stroke="#059669" stroke-width="6" fill="none" stroke-linecap="round"
+  />
+</svg>

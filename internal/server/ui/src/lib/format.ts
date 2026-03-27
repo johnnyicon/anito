@@ -65,3 +65,64 @@ export function formatDateTime(iso: string): string {
     hour12: false,
   })
 }
+
+/** Parse a daemon log line into a structured activity event */
+export interface ActivityEvent {
+  time: string       // HH:MM
+  icon: string       // ↻ ⟳ ▶ ✕ ◆
+  service: string    // service name
+  description: string // human-readable
+  detail: string     // trigger/source
+  type: 'deploy' | 'restart' | 'watch' | 'crash' | 'startup' | 'stop' | 'remove' | 'mcp' | 'other'
+}
+
+export function parseDaemonLogLine(line: string): ActivityEvent | null {
+  // Format: "2026/03/26 20:33:16 [TAG] key=value key=value"
+  const timeMatch = line.match(/^\d{4}\/\d{2}\/\d{2}\s+(\d{2}:\d{2}):\d{2}\s+/)
+  if (!timeMatch) return null
+  const time = timeMatch[1]
+  const rest = line.slice(timeMatch[0].length)
+
+  // Extract tag
+  const tagMatch = rest.match(/^\[(\w+)\]\s*(.*)/)
+  if (!tagMatch) return null
+  const tag = tagMatch[1]
+  const body = tagMatch[2]
+
+  // Parse key=value pairs
+  const kv: Record<string, string> = {}
+  const kvRegex = /(\w+)=(\S+)/g
+  let m
+  while ((m = kvRegex.exec(body)) !== null) {
+    kv[m[1]] = m[2]
+  }
+
+  const name = kv['name'] || ''
+
+  switch (tag) {
+    case 'DEPLOY':
+      return { time, icon: '▶', service: name, description: 'deployed', detail: kv['port'] ? `port ${kv['port']}` : '', type: 'deploy' }
+    case 'WATCH':
+      return { time, icon: '⟳', service: name, description: 'file changed', detail: kv['trigger'] ? truncatePath(kv['trigger'], 30) : '', type: 'watch' }
+    case 'RESTART':
+      return { time, icon: '↻', service: name, description: 'restarted', detail: kv['reason'] === 'crash' ? `crash attempt ${kv['attempt']}` : `port ${kv['port']}`, type: 'restart' }
+    case 'CRASH':
+      return { time, icon: '✕', service: name, description: 'crashed', detail: kv['pid'] ? `pid ${kv['pid']}` : '', type: 'crash' }
+    case 'CRASH_GIVE_UP':
+      return { time, icon: '✕', service: name, description: 'gave up', detail: `${kv['attempts'] || '5'} attempts`, type: 'crash' }
+    case 'STOP':
+      return { time, icon: '◼', service: name, description: 'stopped', detail: '', type: 'stop' }
+    case 'REMOVE':
+      return { time, icon: '◼', service: name, description: 'removed', detail: '', type: 'remove' }
+    case 'DRAIN':
+      return null // Not interesting to surface
+    case 'MCP':
+      return { time, icon: '◆', service: name, description: `MCP ${kv['tool'] || ''}`, detail: name ? `service ${name}` : '', type: 'mcp' }
+    case 'STARTUP': {
+      // "version=dev data=... api=:7700 mcp=:7701"
+      return { time, icon: '▶', service: 'anito', description: 'started', detail: kv['version'] || '', type: 'startup' }
+    }
+    default:
+      return null
+  }
+}

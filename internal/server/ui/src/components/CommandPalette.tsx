@@ -78,11 +78,19 @@ export function CommandPalette({ services, onAction, onClose, onOpenLogs }: Comm
             <input
               ref={inputRef}
               value={query}
-              onChange={e => setQuery(e.target.value)}
+              onChange={e => { setQuery(e.target.value); setMutError(null) }}
               onKeyDown={handleKeyDown}
               placeholder="Type a command or service name…"
               className="flex-1 bg-transparent text-sm focus:outline-none placeholder:text-muted-foreground"
             />
+            {query && (
+              <button
+                onClick={() => { setQuery(''); setMutError(null); inputRef.current?.focus() }}
+                className="text-muted-foreground hover:text-foreground text-xs leading-none"
+              >
+                ✕
+              </button>
+            )}
           </div>
 
           {/* Results */}

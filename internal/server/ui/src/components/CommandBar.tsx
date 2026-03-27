@@ -1,11 +1,9 @@
 import { type HealthResponse, type Service, countAllocatedPorts, PORT_RANGE_TOTAL } from '@/lib/api'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
-import { Badge } from '@/components/ui/badge'
 
 interface CommandBarProps {
   health?:       HealthResponse
   daemonDown:    boolean
-  systemState:   'ok' | 'warning' | 'error'
   services:      Service[]
   unreadIssues:  number
   onOpenPalette: () => void
@@ -15,7 +13,6 @@ interface CommandBarProps {
 export function CommandBar({
   health,
   daemonDown,
-  systemState,
   services,
   unreadIssues,
   onOpenPalette,
@@ -23,48 +20,38 @@ export function CommandBar({
 }: CommandBarProps) {
   const portsUsed  = countAllocatedPorts(services)
   const portPct    = portsUsed / PORT_RANGE_TOTAL
-  const portColor  = portPct > 0.9 ? 'text-destructive' : portPct > 0.7 ? 'text-amber-500' : 'text-muted-foreground'
-
-  const barBg =
-    systemState === 'error'   ? 'bg-destructive/10 border-b border-destructive/20' :
-    systemState === 'warning' ? 'bg-amber-50 border-b border-amber-200 dark:bg-amber-950/20 dark:border-amber-800/30' :
-    'bg-background border-b border-border'
-
-  const dotColor =
-    systemState === 'error'   ? 'text-destructive' :
-    systemState === 'warning' ? 'text-amber-500' : 'text-emerald-500'
+  const portColor  = portPct > 0.9 ? 'text-red-600' : portPct > 0.7 ? 'text-amber-600' : 'text-muted-foreground'
 
   function copyVersion() {
     if (health?.version) void navigator.clipboard.writeText(health.version)
   }
 
   return (
-    <div className={`shrink-0 flex items-center gap-3 px-4 h-11 text-sm transition-colors duration-150 ${barBg}`}>
-      {/* Status dot + wordmark */}
+    <div className="shrink-0 flex items-center gap-3 px-4 h-12 text-sm border-b border-border bg-background">
+      {/* Logo + wordmark */}
       <div className="flex items-center gap-2 shrink-0">
-        <span className={`text-base leading-none ${dotColor}`}>
-          {daemonDown ? '✕' : '●'}
-        </span>
-        <span className="font-mono font-medium tracking-tight">anito</span>
+        <img src="/favicon.svg" alt="Anito" className="size-5" />
+        <span className="font-semibold tracking-tight">anito</span>
+        {daemonDown && <span className="text-xs text-red-500">●</span>}
       </div>
 
       {/* Command input */}
       <button
-        className="flex-1 h-7 rounded border border-border bg-muted/50 px-3 text-left text-xs text-muted-foreground hover:border-primary/40 hover:bg-muted transition-colors"
+        className="flex-1 max-w-md h-8 rounded-lg border border-border bg-muted/40 px-3 text-left text-xs text-muted-foreground hover:border-foreground/20 hover:bg-muted/60 transition-colors"
         onClick={onOpenPalette}
       >
-        search or press ⌘K…
+        Search services or press ⌘K…
       </button>
 
       {/* Right side metadata */}
-      <div className="flex items-center gap-3 shrink-0 text-xs">
+      <div className="flex items-center gap-3 shrink-0 text-xs ml-auto">
         {/* Issues badge */}
         {unreadIssues > 0 && (
           <button
             onClick={onOpenIssues}
-            className="flex items-center gap-1 rounded bg-destructive px-2 py-0.5 font-medium text-destructive-foreground hover:bg-destructive/90 transition-colors"
+            className="flex items-center gap-1 rounded-md bg-red-100 text-red-700 px-2 py-1 font-medium hover:bg-red-200 transition-colors"
           >
-            ⚠ {unreadIssues}
+            {unreadIssues} {unreadIssues === 1 ? 'issue' : 'issues'}
           </button>
         )}
 
@@ -73,7 +60,7 @@ export function CommandBar({
           <Tooltip>
             <TooltipTrigger asChild>
               <span className={`font-mono cursor-default ${portColor}`}>
-                ⬛ {portsUsed}/{PORT_RANGE_TOTAL}
+                {portsUsed}/{PORT_RANGE_TOTAL} ports
               </span>
             </TooltipTrigger>
             <TooltipContent side="bottom" className="max-w-xs">
@@ -100,13 +87,14 @@ export function CommandBar({
           </Tooltip>
         )}
 
-        {/* Daemon health badge */}
-        <Badge
-          variant={daemonDown ? 'destructive' : 'secondary'}
-          className="text-xs font-mono"
-        >
-          {daemonDown ? 'unreachable' : 'daemon ok'}
-        </Badge>
+        {/* Daemon health */}
+        <span className={`font-mono px-2 py-0.5 rounded-md ${
+          daemonDown
+            ? 'bg-red-100 text-red-700'
+            : 'bg-emerald-50 text-emerald-700'
+        }`}>
+          {daemonDown ? 'unreachable' : 'healthy'}
+        </span>
       </div>
     </div>
   )

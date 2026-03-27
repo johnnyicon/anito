@@ -20,8 +20,6 @@ export function IssuesDrawer({ issues, unread, open, onToggle }: IssuesDrawerPro
     return iss.source?.startsWith(sourceFilter)
   })
 
-  const hasUnread = unread > 0
-
   return (
     <div className="shrink-0 border-t border-border bg-background">
       {/* Header / toggle */}
@@ -29,32 +27,33 @@ export function IssuesDrawer({ issues, unread, open, onToggle }: IssuesDrawerPro
         className="w-full flex items-center gap-2 px-4 py-2 text-xs hover:bg-muted/30 transition-colors"
         onClick={onToggle}
       >
-        <span className="text-muted-foreground">── Issues</span>
-        {hasUnread && (
-          <span className="rounded-full bg-destructive px-1.5 py-0.5 text-xs font-medium text-destructive-foreground">
-            ●{unread} unread
+        <span className="text-muted-foreground font-medium">Issues</span>
+        {unread > 0 && (
+          <span className="rounded-full bg-red-100 text-red-700 px-1.5 py-0.5 text-xs font-medium">
+            {unread} new
           </span>
         )}
-        <span className="ml-auto text-muted-foreground">{open ? '▲' : '▼'}</span>
+        <span className="ml-auto text-muted-foreground">{open ? '▾' : '▸'}</span>
       </button>
 
       {open && (
         <div className="max-h-52 flex flex-col border-t border-border">
           {/* Source filter chips */}
-          <div className="shrink-0 flex items-center gap-1 px-3 py-1.5 border-b border-border">
+          <div className="shrink-0 flex items-center gap-1 px-4 py-1.5 border-b border-border">
             {(['all', 'mcp:', 'cli:', 'consumer:'] as SourceFilter[]).map(f => (
               <button
                 key={f}
                 onClick={() => setSourceFilter(f)}
-                className={`px-2 py-0.5 rounded text-xs transition-colors ${
+                className={`px-2 py-0.5 rounded-md text-xs transition-colors ${
                   sourceFilter === f
-                    ? 'bg-primary text-primary-foreground'
-                    : 'bg-muted text-muted-foreground hover:text-foreground'
+                    ? 'bg-foreground text-background'
+                    : 'text-muted-foreground hover:text-foreground hover:bg-muted'
                 }`}
               >
-                {f === 'all' ? 'all' : f}
+                {f === 'all' ? 'All' : f.replace(':', '')}
               </button>
             ))}
+            <span className="ml-auto text-xs text-muted-foreground">{filtered.length} issues</span>
           </div>
 
           {/* Issue list */}
@@ -63,32 +62,26 @@ export function IssuesDrawer({ issues, unread, open, onToggle }: IssuesDrawerPro
               <p className="px-4 py-4 text-xs text-muted-foreground text-center">No issues</p>
             ) : (
               filtered.map(iss => (
-                <div key={iss.id ?? iss.timestamp} className="border-b border-border/50 last:border-0">
+                <div key={iss.id ?? iss.timestamp} className="border-b border-border/40 last:border-0">
                   <button
-                    className="w-full flex items-start gap-2 px-3 py-2 text-xs text-left hover:bg-muted/30 transition-colors"
+                    className="w-full flex items-start gap-2 px-4 py-2 text-xs text-left hover:bg-muted/30 transition-colors"
                     onClick={() => setExpandedId(prev => prev === (iss.id ?? iss.timestamp) ? null : (iss.id ?? iss.timestamp))}
                   >
                     <span className={
-                      iss.severity === 'error' ? 'text-destructive shrink-0' :
+                      iss.severity === 'error' ? 'text-red-500 shrink-0' :
                       iss.severity === 'warning' ? 'text-amber-500 shrink-0' :
                       'text-muted-foreground shrink-0'
                     }>
-                      {iss.severity === 'error' ? '✕' : iss.severity === 'warning' ? '⚠' : 'ℹ'}
+                      {iss.severity === 'error' ? '●' : iss.severity === 'warning' ? '●' : '●'}
                     </span>
-                    <span className="text-muted-foreground shrink-0">
-                      {timeAgo(iss.timestamp)}
-                    </span>
-                    <span className="font-mono text-muted-foreground shrink-0">
-                      {iss.source}
-                    </span>
+                    <span className="text-muted-foreground shrink-0 w-12">{timeAgo(iss.timestamp)}</span>
+                    <span className="font-mono text-muted-foreground shrink-0">{iss.tool || iss.source}</span>
                     <span className="flex-1 truncate text-foreground">{iss.error}</span>
-                    <span className="text-muted-foreground shrink-0">
-                      {expandedId === (iss.id ?? iss.timestamp) ? '▲' : '▼'}
-                    </span>
+                    <span className="text-muted-foreground shrink-0">{expandedId === (iss.id ?? iss.timestamp) ? '▾' : '▸'}</span>
                   </button>
 
                   {expandedId === (iss.id ?? iss.timestamp) && (
-                    <div className="px-8 pb-2 space-y-1 text-xs">
+                    <div className="px-10 pb-2 space-y-1 text-xs">
                       <p className="text-foreground">{iss.error}</p>
                       {iss.context && (
                         <p className="text-muted-foreground whitespace-pre-wrap">{iss.context}</p>

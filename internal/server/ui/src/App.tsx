@@ -1,37 +1,33 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { servicesQuery, healthQuery, issuesQuery, type Service } from '@/lib/api'
-import { CommandBar }         from '@/components/CommandBar'
-import { FilterBar }          from '@/components/FilterBar'
-import { ServiceList }        from '@/components/ServiceList'
-import { LogPane }            from '@/components/LogPane'
-import { CommandPalette }     from '@/components/CommandPalette'
-import { ServiceDetailPanel } from '@/components/ServiceDetailPanel'
-import { IssuesDrawer }       from '@/components/IssuesDrawer'
-import { RemoveModal }        from '@/components/RemoveModal'
+import { CommandBar }     from '@/components/CommandBar'
+import { FilterBar }      from '@/components/FilterBar'
+import { ServiceList }    from '@/components/ServiceList'
+import { CommandPalette } from '@/components/CommandPalette'
+import { IssuesDrawer }   from '@/components/IssuesDrawer'
+import { RemoveModal }    from '@/components/RemoveModal'
+import { RightPanel }     from '@/components/RightPanel'
 import type { CommandAction } from '@/lib/commands'
 
-// ── Split-pane constants ────────────────────────────────────────────────────
+// ── Panel tab types ─────────────────────────────────────────────────────────
 
-const SPLIT_KEY    = 'anito:split-ratio'
-const DEFAULT_SPLIT = 0.58
-const MIN_SPLIT     = 0.25
-const NARROW_VP     = 900
+type PanelTab =
+  | { type: 'activity' }
+  | { type: 'logs'; name: string }
+  | { type: 'detail'; name: string }
 
-function getSavedSplit(): number {
-  try {
-    const v = parseFloat(localStorage.getItem(SPLIT_KEY) ?? '')
-    return isNaN(v) ? DEFAULT_SPLIT : Math.min(Math.max(v, MIN_SPLIT), 1 - MIN_SPLIT)
-  } catch {
-    return DEFAULT_SPLIT
-  }
+function tabId(tab: PanelTab): string {
+  if (tab.type === 'activity') return '__activity__'
+  return `${tab.type}:${tab.name}`
 }
 
 // ── Status group classification ─────────────────────────────────────────────
 
-type StatusGroup = 'failed-gave-up' | 'failed-crashing' | 'healthy' | 'stopped'
+type StatusGroup = 'failed-gave-up' | 'failed-crashing' | 'orphaned' | 'healthy' | 'stopped'
 
 function statusGroup(svc: Service): StatusGroup {
+  if (svc.status === 'orphaned') return 'orphaned'
   if (svc.status === 'failed') return svc.gave_up ? 'failed-gave-up' : 'failed-crashing'
   if (svc.status === 'stopped') return 'stopped'
   return 'healthy'
@@ -40,8 +36,9 @@ function statusGroup(svc: Service): StatusGroup {
 const GROUP_ORDER: Record<StatusGroup, number> = {
   'failed-gave-up':  0,
   'failed-crashing': 1,
-  'healthy':         2,
-  'stopped':         3,
+  'orphaned':        2,
+  'healthy':         3,
+  'stopped':         4,
 }
 
 function sortServices(services: Service[]): Service[] {
@@ -55,12 +52,13 @@ function sortServices(services: Service[]): Service[] {
 
 // ── Filter helpers ──────────────────────────────────────────────────────────
 
-export type FilterStatus = 'all' | 'running' | 'warning' | 'failed' | 'stopped'
+export type FilterStatus = 'all' | 'running' | 'warning' | 'failed' | 'orphaned' | 'stopped'
 
 function applyFilter(services: Service[], filter: FilterStatus, search: string): Service[] {
   let list = services
   if (filter === 'running')  list = list.filter(s => s.status === 'running')
   if (filter === 'failed')   list = list.filter(s => s.status === 'failed')
+  if (filter === 'orphaned') list = list.filter(s => s.status === 'orphaned')
   if (filter === 'stopped')  list = list.filter(s => s.status === 'stopped')
   if (search) {
     const q = search.toLowerCase()
@@ -71,13 +69,15 @@ function applyFilter(services: Service[], filter: FilterStatus, search: string):
 
 // ── App ─────────────────────────────────────────────────────────────────────
 
+const PANEL_KEY = 'anito:panel-open'
+
 export default function App() {
   // ── Data ──────────────────────────────────────────────────────────────────
   const { data: health,  isError: daemonDown } = useQuery(healthQuery)
   const { data: rawServices = [] }             = useQuery(servicesQuery)
   const { data: issuesData }                   = useQuery(issuesQuery(50))
 
-  // ── Stable sort: re-sort only when a service changes status group ──────────
+  // ── Stable sort ───────────────────────────────────────────────────────────
   const [sorted, setSorted] = useState<Service[]>([])
   const sortKeyRef          = useRef<string>('')
 
@@ -103,68 +103,64 @@ export default function App() {
   const [search,       setSearch]       = useState('')
   const filtered = applyFilter(sorted, filterStatus, search)
 
-  // ── Log pane tabs (max 4) ─────────────────────────────────────────────────
-  const [logTabs,      setLogTabs]      = useState<string[]>([])
-  const [activeLogTab, setActiveLogTab] = useState<string | null>(null)
+  // ── Right panel tabs ──────────────────────────────────────────────────────
+  const [panelTabs, setPanelTabs] = useState<PanelTab[]>([{ type: 'activity' }])
+  const [activeTabId, setActiveTabId] = useState('__activity__')
+  const [panelOpen, setPanelOpen] = useState(() => {
+    try { return localStorage.getItem(PANEL_KEY) !== 'false' } catch { return true }
+  })
 
-  const openLogTab = useCallback((name: string) => {
-    setLogTabs(prev => {
-      if (prev.includes(name)) {
-        setActiveLogTab(name)
-        return prev
-      }
-      const next = [...prev, name]
-      if (next.length > 4) next.shift() // oldest auto-closed
-      setActiveLogTab(name)
+  function togglePanel() {
+    setPanelOpen(prev => {
+      const next = !prev
+      localStorage.setItem(PANEL_KEY, String(next))
       return next
     })
+  }
+
+  const openLogTab = useCallback((name: string) => {
+    const newTab: PanelTab = { type: 'logs', name }
+    const id = tabId(newTab)
+    setPanelTabs(prev => {
+      if (prev.find(t => tabId(t) === id)) return prev
+      // Max 4 log tabs — remove oldest log tab if needed
+      const logTabs = prev.filter(t => t.type === 'logs')
+      if (logTabs.length >= 4) {
+        const oldest = logTabs[0]
+        return [...prev.filter(t => tabId(t) !== tabId(oldest)), newTab]
+      }
+      return [...prev, newTab]
+    })
+    setActiveTabId(id)
+    setPanelOpen(true)
   }, [])
 
-  const closeLogTab = useCallback((name: string) => {
-    setLogTabs(prev => {
-      const next = prev.filter(t => t !== name)
-      setActiveLogTab(cur => {
-        if (cur !== name) return cur
-        return next[next.length - 1] ?? null
+  const openDetailTab = useCallback((name: string) => {
+    const newTab: PanelTab = { type: 'detail', name }
+    const id = tabId(newTab)
+    setPanelTabs(prev => {
+      // Replace any existing detail tab (only show one at a time)
+      const without = prev.filter(t => t.type !== 'detail')
+      return [...without, newTab]
+    })
+    setActiveTabId(id)
+    setPanelOpen(true)
+  }, [])
+
+  const closeTab = useCallback((id: string) => {
+    if (id === '__activity__') return // Can't close activity
+    setPanelTabs(prev => {
+      const next = prev.filter(t => tabId(t) !== id)
+      // If closing the active tab, switch to the previous one
+      setActiveTabId(cur => {
+        if (cur !== id) return cur
+        const idx = prev.findIndex(t => tabId(t) === id)
+        const fallback = next[Math.min(idx, next.length - 1)]
+        return fallback ? tabId(fallback) : '__activity__'
       })
       return next
     })
   }, [])
-
-  // ── Split pane ────────────────────────────────────────────────────────────
-  const [splitRatio, setSplitRatio] = useState(getSavedSplit)
-  const [isDragging, setIsDragging] = useState(false)
-  const [isNarrow,   setIsNarrow]   = useState(() => window.innerWidth < NARROW_VP)
-  const containerRef = useRef<HTMLDivElement>(null)
-
-  useEffect(() => {
-    const obs = new ResizeObserver(entries => {
-      setIsNarrow((entries[0]?.contentRect.width ?? window.innerWidth) < NARROW_VP)
-    })
-    if (containerRef.current) obs.observe(containerRef.current)
-    return () => obs.disconnect()
-  }, [])
-
-  const handleDividerMouseDown = useCallback((e: React.MouseEvent) => {
-    e.preventDefault()
-    setIsDragging(true)
-    const startX     = e.clientX
-    const startRatio = splitRatio
-
-    function onMove(ev: MouseEvent) {
-      const w = containerRef.current?.clientWidth ?? window.innerWidth
-      const next = Math.min(Math.max(startRatio + (ev.clientX - startX) / w, MIN_SPLIT), 1 - MIN_SPLIT)
-      setSplitRatio(next)
-    }
-    function onUp() {
-      setIsDragging(false)
-      setSplitRatio(prev => { localStorage.setItem(SPLIT_KEY, String(prev)); return prev })
-      window.removeEventListener('mousemove', onMove)
-      window.removeEventListener('mouseup',   onUp)
-    }
-    window.addEventListener('mousemove', onMove)
-    window.addEventListener('mouseup',   onUp)
-  }, [splitRatio])
 
   // ── Command palette ───────────────────────────────────────────────────────
   const [paletteOpen, setPaletteOpen] = useState(false)
@@ -183,21 +179,16 @@ export default function App() {
     return () => window.removeEventListener('keydown', onKey)
   }, [])
 
-  // ── Detail panel + remove modal ───────────────────────────────────────────
-  const [detailService, setDetailService] = useState<string | null>(null)
+  // ── Remove modal ──────────────────────────────────────────────────────────
   const [removeService, setRemoveService] = useState<string | null>(null)
 
   // ── Issues drawer ─────────────────────────────────────────────────────────
-  const issues      = issuesData?.issues ?? []
+  const issues = issuesData?.issues ?? []
   const [issuesOpen, setIssuesOpen] = useState(() => {
     try { return localStorage.getItem('anito:issues-drawer-open') === 'true' } catch { return false }
   })
   const [lastSeen, setLastSeen] = useState(0)
   const unread = Math.max(0, issues.length - lastSeen)
-
-  useEffect(() => {
-    if (issues.length > lastSeen && !issuesOpen) setIssuesOpen(true)
-  }, [issues.length]) // eslint-disable-line react-hooks/exhaustive-deps
 
   function toggleIssues() {
     setIssuesOpen(prev => {
@@ -212,27 +203,19 @@ export default function App() {
   function handleCommand(action: CommandAction) {
     setPaletteOpen(false)
     switch (action.type) {
-      case 'logs':   openLogTab(action.name);      break
-      case 'detail': setDetailService(action.name); break
+      case 'logs':   openLogTab(action.name);   break
+      case 'detail': openDetailTab(action.name); break
       case 'remove': setRemoveService(action.name); break
       case 'filter': setFilterStatus(action.status as FilterStatus); break
       case 'issues': setIssuesOpen(true); setLastSeen(issues.length); break
     }
   }
 
-  // ── System state ──────────────────────────────────────────────────────────
-  const hasFailed = sorted.some(s => s.status === 'failed')
-  const systemState: 'ok' | 'warning' | 'error' =
-    daemonDown || hasFailed ? 'error' : 'ok'
-
-  const showLogPane = !isNarrow && logTabs.length > 0
-
   return (
-    <div className="flex h-screen flex-col overflow-hidden" ref={containerRef}>
+    <div className="flex h-screen flex-col overflow-hidden">
       <CommandBar
         health={health}
         daemonDown={daemonDown}
-        systemState={systemState}
         services={sorted}
         unreadIssues={unread}
         onOpenPalette={() => setPaletteOpen(true)}
@@ -240,26 +223,16 @@ export default function App() {
       />
 
       <div className="flex flex-1 min-h-0">
-        {/* Left pane */}
-        <div
-          className="flex flex-col min-h-0 border-r border-border"
-          style={{ width: showLogPane ? `${splitRatio * 100}%` : '100%' }}
-        >
-          {/* S13 — daemon unreachable banner */}
+        {/* Left pane — services */}
+        <div className="flex flex-col min-h-0 flex-1">
+          {/* Daemon unreachable banner */}
           {daemonDown && (
-            <div className="shrink-0 bg-destructive/10 border-b border-destructive/20 px-4 py-3">
-              <p className="text-sm font-medium text-destructive">
-                ✕ Daemon unreachable — localhost:7700 is not responding
+            <div className="shrink-0 bg-red-50 border-b border-red-200 px-4 py-3">
+              <p className="text-sm font-medium text-red-800">
+                Daemon unreachable — localhost:7700 is not responding
               </p>
-              <p className="mt-1 text-xs text-destructive/80">
-                The Anito daemon may have crashed or been stopped.
-              </p>
-              <p className="mt-2 font-mono text-xs text-destructive/60">
-                launchctl load ~/Library/LaunchAgents/com.anito.daemon.plist
-              </p>
-              <p className="mt-0.5 font-mono text-xs text-destructive/60">make start</p>
-              <p className="mt-1 text-xs text-destructive/50">
-                Service data below is from the last successful poll.
+              <p className="mt-1 text-xs text-red-600">
+                Run <code className="font-mono bg-red-100 rounded px-1">make start</code> to restart
               </p>
             </div>
           )}
@@ -277,7 +250,7 @@ export default function App() {
               services={filtered}
               daemonDown={daemonDown}
               onOpenLogs={openLogTab}
-              onOpenDetail={setDetailService}
+              onOpenDetail={openDetailTab}
               onRemove={setRemoveService}
             />
           </div>
@@ -290,32 +263,20 @@ export default function App() {
           />
         </div>
 
-        {/* Drag divider */}
-        {showLogPane && (
-          <div
-            className={`w-1 shrink-0 cursor-col-resize select-none transition-colors ${
-              isDragging ? 'bg-primary/40' : 'bg-border hover:bg-primary/20'
-            }`}
-            onMouseDown={handleDividerMouseDown}
+        {/* Right panel — activity, logs, detail */}
+        <div className="shrink-0" style={{ width: panelOpen ? '36%' : undefined }}>
+          <RightPanel
+            collapsed={!panelOpen}
+            onToggle={togglePanel}
+            tabs={panelTabs}
+            activeTab={activeTabId}
+            onActivate={setActiveTabId}
+            onCloseTab={closeTab}
+            services={sorted}
+            onOpenLogs={openLogTab}
+            onRemove={setRemoveService}
           />
-        )}
-
-        {/* Right pane — Log Pane */}
-        {showLogPane && (
-          <div
-            className="flex flex-col min-h-0"
-            style={{ width: `${(1 - splitRatio) * 100}%` }}
-          >
-            <LogPane
-              tabs={logTabs}
-              activeTab={activeLogTab}
-              onActivate={setActiveLogTab}
-              onClose={closeLogTab}
-              onAdd={openLogTab}
-              services={sorted}
-            />
-          </div>
-        )}
+        </div>
       </div>
 
       {/* Overlays */}
@@ -325,16 +286,6 @@ export default function App() {
           onAction={handleCommand}
           onClose={() => setPaletteOpen(false)}
           onOpenLogs={openLogTab}
-        />
-      )}
-
-      {detailService && (
-        <ServiceDetailPanel
-          name={detailService}
-          services={sorted}
-          onClose={() => setDetailService(null)}
-          onOpenLogs={openLogTab}
-          onRemove={setRemoveService}
         />
       )}
 

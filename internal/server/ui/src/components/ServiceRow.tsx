@@ -1,27 +1,7 @@
 import { useState } from 'react'
 import { useMutation, useQueryClient } from '@tanstack/react-query'
 import type { Service } from '@/lib/api'
-import { relativeTime } from '@/lib/format'
-import { FailedCard, OrphanedCard } from '@/components/FailedCard'
-import { Button } from '@/components/ui/button'
-
-/** Format port display: single-port shows ":3000", multi-port shows ":7172 :7173" */
-function formatPorts(svc: Service): string {
-  const ports = svc.stable_ports
-  if (ports && Object.keys(ports).length > 1) {
-    return Object.entries(ports).map(([, port]) => `:${port}`).join(' ')
-  }
-  return `:${svc.stable_port}`
-}
-
-/** Format port tooltip for multi-port: "ws:7172 http:7173" */
-function portTooltip(svc: Service): string | undefined {
-  const ports = svc.stable_ports
-  if (ports && Object.keys(ports).length > 1) {
-    return Object.entries(ports).map(([name, port]) => `${name}:${port}`).join('  ')
-  }
-  return undefined
-}
+import { timeAgo, truncatePath, formatDateTime, durationFromNs } from '@/lib/format'
 
 interface ServiceRowProps {
   service:      Service
@@ -31,8 +11,47 @@ interface ServiceRowProps {
   onRemove:     (name: string) => void
 }
 
+/** Compute subtitle text: watch mode + recency */
+function subtitle(svc: Service): string {
+  const parts: string[] = []
+  if (svc.watch_paths && svc.watch_paths.length > 0) parts.push('watching')
+
+  if (svc.status === 'failed') {
+    if (svc.gave_up) parts.push(`crashed ${svc.crash_attempts}x, gave up`)
+    else if (svc.crash_attempts > 0) parts.push(`restarting ${svc.crash_attempts}/5`)
+    else parts.push('exited unexpectedly')
+  } else if (svc.status === 'stopped') {
+    parts.push('stopped')
+  } else if (svc.last_started_at && svc.last_deployed_at && svc.last_started_at !== svc.last_deployed_at) {
+    parts.push(`restarted ${timeAgo(svc.last_started_at)}`)
+  } else if (svc.last_deployed_at && svc.last_deployed_at !== '0001-01-01T00:00:00Z') {
+    parts.push(`deployed ${timeAgo(svc.last_deployed_at)}`)
+  } else if (svc.deployed_at) {
+    parts.push(`deployed ${timeAgo(svc.deployed_at)}`)
+  }
+
+  if (parts.length === 0) parts.push('idle')
+  return parts.join(' · ')
+}
+
+function primaryAddress(svc: Service): string {
+  return `http://localhost:${svc.stable_port}`
+}
+
+/** Status styling for the card */
+function statusStyle(status: string): { dot: string; border: string; bg: string; label: string; labelColor: string } {
+  switch (status) {
+    case 'running':  return { dot: 'bg-emerald-500', border: 'border-emerald-200', bg: '', label: 'Running', labelColor: 'text-emerald-700 bg-emerald-50' }
+    case 'failed':   return { dot: 'bg-red-500', border: 'border-red-200', bg: 'bg-red-50/40', label: 'Failed', labelColor: 'text-red-700 bg-red-50' }
+    case 'orphaned': return { dot: 'bg-amber-500', border: 'border-amber-200', bg: 'bg-amber-50/40', label: 'Orphaned', labelColor: 'text-amber-700 bg-amber-50' }
+    case 'stopped':  return { dot: 'bg-gray-400', border: 'border-border', bg: '', label: 'Stopped', labelColor: 'text-muted-foreground bg-muted' }
+    default:         return { dot: 'bg-gray-400', border: 'border-border', bg: '', label: status, labelColor: 'text-muted-foreground bg-muted' }
+  }
+}
+
 export function ServiceRow({ service: svc, stale, onOpenLogs, onOpenDetail, onRemove }: ServiceRowProps) {
   const qc = useQueryClient()
+  const [expanded, setExpanded] = useState(false)
   const [actionError, setActionError] = useState<string | null>(null)
 
   const restart = useMutation({
@@ -46,149 +65,202 @@ export function ServiceRow({ service: svc, stale, onOpenLogs, onOpenDetail, onRe
     onError: (err) => setActionError(err instanceof Error ? err.message : 'restart failed'),
   })
 
-  // ── Orphaned state → delegate to OrphanedCard ────────────────────────────
-  if (svc.status === 'orphaned') {
-    return <OrphanedCard service={svc} onRemove={onRemove} />
-  }
-
-  // ── Failed state → delegate to FailedCard (auto-expanded) ─────────────────
-  if (svc.status === 'failed') {
-    return (
-      <FailedCard
-        service={svc}
-        onOpenLogs={onOpenLogs}
-        onRemove={onRemove}
-      />
-    )
-  }
-
-  // ── Stopped state ─────────────────────────────────────────────────────────
-  if (svc.status === 'stopped') {
-    return (
-      <div className="group flex items-center gap-3 px-4 h-10 border-b border-border/50 text-sm hover:bg-muted/30 transition-colors">
-        <span className="text-muted-foreground text-base leading-none">◌</span>
-        <span className="font-mono font-medium text-muted-foreground">{svc.name}</span>
-        <span className="font-mono text-xs text-muted-foreground" title={portTooltip(svc)}>
-          {formatPorts(svc)}{stale ? ' (stale)' : ''}
-        </span>
-        <span className="text-xs text-muted-foreground ml-1">stopped</span>
-
-        <div className="ml-auto flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
-          {actionError && <span className="text-xs text-destructive mr-2">{actionError}</span>}
-          <Button size="sm" variant="ghost" className="h-6 text-xs px-2"
-            onClick={() => { setActionError(null); restart.mutate() }} disabled={restart.isPending}>
-            {restart.isPending ? 'Starting…' : 'Start'}
-          </Button>
-          <ServiceContextMenu svc={svc} onOpenLogs={onOpenLogs} onOpenDetail={onOpenDetail} onRemove={onRemove} />
-        </div>
-      </div>
-    )
-  }
-
-  // ── Running / healthy state ───────────────────────────────────────────────
-  const healthySince = svc.last_started_at ? `healthy ${relativeTime(svc.last_started_at)}` : 'running'
-
-  return (
-    <div className="group flex items-center gap-3 px-4 h-10 border-b border-border/50 text-sm hover:bg-muted/30 transition-colors">
-      <span className="text-emerald-500 text-base leading-none shrink-0">●</span>
-      <button
-        className="font-mono font-medium shrink-0 hover:underline"
-        onClick={() => onOpenDetail(svc.name)}
-      >
-        {svc.name}
-      </button>
-      <span className="font-mono text-xs text-muted-foreground shrink-0">
-        :{svc.stable_port}{stale ? ' (stale)' : ''}
-      </span>
-      <span className="text-xs text-muted-foreground shrink-0">{healthySince}</span>
-      {svc.version && (
-        <span className="text-xs text-muted-foreground font-mono">{svc.version}</span>
-      )}
-
-      {/* Hover actions */}
-      <div className="ml-auto flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
-        {actionError && <span className="text-xs text-destructive mr-2">{actionError}</span>}
-
-        <Button size="sm" variant="ghost" className="h-6 w-6 p-0 text-base"
-          title="Open in browser"
-          onClick={() => window.open(`http://localhost:${svc.stable_port}`, '_blank')}>
-          ↗
-        </Button>
-
-        <Button size="sm" variant="ghost" className="h-6 w-6 p-0 text-base"
-          title="View logs"
-          onClick={() => onOpenLogs(svc.name)}>
-          ≡
-        </Button>
-
-        <ServiceContextMenu svc={svc} onOpenLogs={onOpenLogs} onOpenDetail={onOpenDetail} onRemove={onRemove} />
-      </div>
-    </div>
-  )
-}
-
-function ServiceContextMenu({ svc, onOpenLogs, onOpenDetail, onRemove }: {
-  svc:          Service
-  onOpenLogs:   (n: string) => void
-  onOpenDetail: (n: string) => void
-  onRemove:     (n: string) => void
-}) {
-  const qc = useQueryClient()
-  const [open, setOpen] = useState(false)
-  const [err,  setErr]  = useState<string | null>(null)
-
-  const restart = useMutation({
-    mutationFn: () => fetch(`/restart/${svc.name}`, { method: 'POST' }).then(r => { if (!r.ok) throw new Error('restart failed') }),
-    onSettled:  () => qc.invalidateQueries({ queryKey: ['services'] }),
-    onError:    (e) => setErr(e instanceof Error ? e.message : 'failed'),
-  })
   const stop = useMutation({
-    mutationFn: () => fetch(`/stop/${svc.name}`, { method: 'POST' }).then(r => { if (!r.ok) throw new Error('stop failed') }),
-    onSettled:  () => qc.invalidateQueries({ queryKey: ['services'] }),
-    onError:    (e) => setErr(e instanceof Error ? e.message : 'failed'),
+    mutationFn: () => fetch(`/stop/${svc.name}`, { method: 'POST' }).then(r => {
+      if (!r.ok) throw new Error('stop failed')
+    }),
+    onSettled: () => {
+      qc.invalidateQueries({ queryKey: ['services'] })
+      qc.invalidateQueries({ queryKey: ['status'] })
+    },
+    onError: (err) => setActionError(err instanceof Error ? err.message : 'stop failed'),
   })
 
-  if (!open) {
-    return (
-      <Button size="sm" variant="ghost" className="h-6 w-6 p-0" onClick={() => setOpen(true)}>
-        ⋯
-      </Button>
-    )
-  }
+  const style = statusStyle(svc.status)
+  const isFailed = svc.status === 'failed'
+  const isRunning = svc.status === 'running'
+  const isOrphaned = svc.status === 'orphaned'
 
   return (
-    <div className="relative">
-      <Button size="sm" variant="secondary" className="h-6 w-6 p-0" onClick={() => setOpen(false)}>
-        ⋯
-      </Button>
-      {/* Simple inline menu — avoids needing dropdown-menu primitive */}
-      <div className="absolute right-0 top-7 z-50 min-w-32 rounded-md border border-border bg-popover shadow-md py-1 text-xs"
-        onMouseLeave={() => setOpen(false)}>
-        {err && <p className="px-3 py-1 text-destructive">{err}</p>}
-        <button className="w-full text-left px-3 py-1.5 hover:bg-muted transition-colors"
-          onClick={() => { setOpen(false); restart.mutate() }}>
-          {restart.isPending ? 'Restarting…' : 'Restart'}
-        </button>
-        {svc.status === 'running' && (
-          <button className="w-full text-left px-3 py-1.5 hover:bg-muted transition-colors"
-            onClick={() => { setOpen(false); stop.mutate() }}>
-            {stop.isPending ? 'Stopping…' : 'Stop'}
+    <div className={`rounded-lg border ${style.border} ${style.bg} transition-all hover:shadow-sm`}>
+      {/* Card header — always visible */}
+      <div
+        className="px-4 pt-3.5 pb-3 cursor-pointer"
+        onClick={() => setExpanded(e => !e)}
+      >
+        {/* Top row: status dot + name + status badge */}
+        <div className="flex items-center gap-2 mb-2">
+          <span className={`size-2.5 rounded-full shrink-0 ${style.dot}`} />
+          <span className="font-semibold text-sm truncate">{svc.name}</span>
+          <span className={`ml-auto text-xs font-medium px-2 py-0.5 rounded-full ${style.labelColor}`}>
+            {style.label}
+          </span>
+        </div>
+
+        {/* Address — prominent, mono */}
+        <div className="flex items-center gap-2 mb-2">
+          <span className="font-mono text-sm text-foreground/80">
+            localhost:{svc.stable_port}
+          </span>
+          {svc.version && (
+            <span className="font-mono text-xs text-muted-foreground">{svc.version}</span>
+          )}
+          {stale && <span className="text-xs text-amber-600">(stale)</span>}
+        </div>
+
+        {/* Subtitle — watch mode, recency */}
+        <p className="text-xs text-muted-foreground">{subtitle(svc)}</p>
+      </div>
+
+      {/* Action bar — always visible */}
+      <div className="flex items-center gap-2 px-4 pb-3" onClick={e => e.stopPropagation()}>
+        {actionError && <span className="text-xs text-red-600">{actionError}</span>}
+
+        {/* Open in browser */}
+        {(isRunning || svc.status === 'stopped') && (
+          <button
+            className="inline-flex items-center gap-1.5 rounded-md bg-foreground text-background px-3 py-1.5 text-xs font-medium hover:bg-foreground/90 transition-colors"
+            onClick={() => window.open(primaryAddress(svc), '_blank')}
+            title={primaryAddress(svc)}
+          >
+            Open ↗
           </button>
         )}
-        <button className="w-full text-left px-3 py-1.5 hover:bg-muted transition-colors"
-          onClick={() => { setOpen(false); onOpenLogs(svc.name) }}>
-          View Logs
-        </button>
-        <button className="w-full text-left px-3 py-1.5 hover:bg-muted transition-colors"
-          onClick={() => { setOpen(false); onOpenDetail(svc.name) }}>
-          View Detail
-        </button>
-        <hr className="my-1 border-border" />
-        <button className="w-full text-left px-3 py-1.5 hover:bg-muted text-destructive transition-colors"
-          onClick={() => { setOpen(false); onRemove(svc.name) }}>
-          Remove…
+
+        {/* Restart */}
+        {!isOrphaned && (
+          <button
+            className="inline-flex items-center rounded-md border border-border px-3 py-1.5 text-xs font-medium hover:bg-muted transition-colors disabled:opacity-50"
+            onClick={() => { setActionError(null); restart.mutate() }}
+            disabled={restart.isPending}
+          >
+            {restart.isPending ? 'Restarting…' : 'Restart'}
+          </button>
+        )}
+
+        {/* Failed: View Logs */}
+        {isFailed && (
+          <button
+            className="inline-flex items-center rounded-md border border-red-200 text-red-700 px-3 py-1.5 text-xs font-medium hover:bg-red-50 transition-colors"
+            onClick={() => onOpenLogs(svc.name)}
+          >
+            View Logs
+          </button>
+        )}
+
+        {/* More menu */}
+        <button
+          className="inline-flex items-center rounded-md border border-border px-2 py-1.5 text-xs text-muted-foreground hover:text-foreground hover:bg-muted transition-colors ml-auto"
+          onClick={() => setExpanded(e => !e)}
+        >
+          {expanded ? 'Less' : 'More'}
         </button>
       </div>
+
+      {/* Expanded detail */}
+      {expanded && (
+        <div className="px-4 pb-4 pt-1 border-t border-border/50">
+          <div className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-1.5 text-xs mt-2">
+            {svc.last_deployed_at && svc.last_deployed_at !== '0001-01-01T00:00:00Z' && (
+              <>
+                <span className="text-muted-foreground">Deployed</span>
+                <span>{timeAgo(svc.last_deployed_at)} <span className="text-muted-foreground/60">({formatDateTime(svc.last_deployed_at)})</span></span>
+              </>
+            )}
+            {svc.last_started_at && svc.last_started_at !== '0001-01-01T00:00:00Z' && (
+              <>
+                <span className="text-muted-foreground">Started</span>
+                <span>{timeAgo(svc.last_started_at)} <span className="text-muted-foreground/60">({formatDateTime(svc.last_started_at)})</span></span>
+              </>
+            )}
+            <span className="text-muted-foreground">Binary</span>
+            <span className="font-mono truncate" title={svc.binary_path}>{truncatePath(svc.binary_path, 45)}</span>
+            {svc.config_path && (
+              <>
+                <span className="text-muted-foreground">Config</span>
+                <span className="font-mono truncate" title={svc.config_path}>{truncatePath(svc.config_path, 45)}</span>
+              </>
+            )}
+            {svc.watch_paths && svc.watch_paths.length > 0 && (
+              <>
+                <span className="text-muted-foreground">Watch</span>
+                <span className="font-mono truncate">{svc.watch_paths.map(p => truncatePath(p, 20)).join(', ')}</span>
+              </>
+            )}
+            <>
+              <span className="text-muted-foreground">Policy</span>
+              <span>{svc.restart_policy || 'on-watch'}{svc.health_check ? ` · ${svc.health_check}` : ''}</span>
+            </>
+            {svc.env_file && (
+              <>
+                <span className="text-muted-foreground">Env</span>
+                <span className="font-mono truncate" title={svc.env_file}>{truncatePath(svc.env_file, 45)}</span>
+              </>
+            )}
+            {svc.stable_ports && Object.keys(svc.stable_ports).length > 1 && (
+              <>
+                <span className="text-muted-foreground">Ports</span>
+                <span className="font-mono">
+                  {Object.entries(svc.stable_ports).map(([name, port]) => (
+                    <span key={name} className="mr-3">{name} → :{port}</span>
+                  ))}
+                </span>
+              </>
+            )}
+            {svc.pid > 0 && (
+              <>
+                <span className="text-muted-foreground">PID</span>
+                <span className="font-mono">{svc.pid}</span>
+              </>
+            )}
+            {svc.start_history && svc.start_history.length > 1 && (
+              <>
+                <span className="text-muted-foreground">History</span>
+                <div className="flex items-center gap-1">
+                  {[...svc.start_history].reverse().slice(0, 5).map((ev, i) => (
+                    <span
+                      key={i}
+                      className={`size-2 rounded-sm ${ev.exit_code === -1 || ev.exit_code === 0 ? 'bg-emerald-500' : 'bg-red-500'}`}
+                      title={ev.exit_code === -1 ? 'running' : `exit ${ev.exit_code}, lasted ${durationFromNs(ev.duration)}`}
+                    />
+                  ))}
+                </div>
+              </>
+            )}
+          </div>
+
+          {/* Secondary actions */}
+          <div className="flex items-center gap-2 mt-3 pt-2 border-t border-border/40">
+            <button
+              className="inline-flex items-center rounded-md border border-border px-2.5 py-1 text-xs hover:bg-muted transition-colors"
+              onClick={() => onOpenLogs(svc.name)}
+            >
+              View Logs
+            </button>
+            {isRunning && (
+              <button
+                className="inline-flex items-center rounded-md border border-border px-2.5 py-1 text-xs hover:bg-muted transition-colors disabled:opacity-50"
+                onClick={() => stop.mutate()}
+                disabled={stop.isPending}
+              >
+                {stop.isPending ? 'Stopping…' : 'Stop'}
+              </button>
+            )}
+            <button
+              className="inline-flex items-center rounded-md border border-border px-2.5 py-1 text-xs hover:bg-muted transition-colors"
+              onClick={() => onOpenDetail(svc.name)}
+            >
+              Full Detail
+            </button>
+            <button
+              className="inline-flex items-center rounded-md border border-border px-2.5 py-1 text-xs text-red-600 hover:bg-red-50 transition-colors ml-auto"
+              onClick={() => onRemove(svc.name)}
+            >
+              Remove
+            </button>
+          </div>
+        </div>
+      )}
     </div>
   )
 }
