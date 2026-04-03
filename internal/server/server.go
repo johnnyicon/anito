@@ -314,6 +314,14 @@ func (s *Server) handleGetIssues(c echo.Context) error {
 	return c.JSON(http.StatusOK, map[string]any{"issues": list})
 }
 
+// setSSEHeaders configures the response for Server-Sent Events streaming.
+func setSSEHeaders(w *echo.Response) {
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	w.WriteHeader(http.StatusOK)
+}
+
 func (s *Server) streamBuildLogs(c echo.Context, name string) error {
 	w := c.Response()
 	flusher, ok := w.Writer.(http.Flusher)
@@ -321,10 +329,7 @@ func (s *Server) streamBuildLogs(c echo.Context, name string) error {
 		return echo.NewHTTPError(http.StatusInternalServerError, "streaming not supported")
 	}
 
-	w.Header().Set("Content-Type", "text/event-stream")
-	w.Header().Set("Cache-Control", "no-cache")
-	w.Header().Set("Connection", "keep-alive")
-	w.WriteHeader(http.StatusOK)
+	setSSEHeaders(w)
 
 	backlog, err := s.svc.BuildLogs(name, 500)
 	if err != nil {
@@ -357,10 +362,7 @@ func (s *Server) streamLogs(c echo.Context, name string, backlogLines int) error
 		return echo.NewHTTPError(http.StatusInternalServerError, "streaming not supported")
 	}
 
-	w.Header().Set("Content-Type", "text/event-stream")
-	w.Header().Set("Cache-Control", "no-cache")
-	w.Header().Set("Connection", "keep-alive")
-	w.WriteHeader(http.StatusOK)
+	setSSEHeaders(w)
 
 	backlog, err := s.svc.Logs(name, backlogLines)
 	if err != nil {

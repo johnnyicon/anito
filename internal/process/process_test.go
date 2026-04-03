@@ -5,6 +5,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strconv"
 	"testing"
 	"time"
@@ -232,6 +233,235 @@ func TestStopPreventsOnCrash(t *testing.T) {
 	}
 }
 
-// Ensure net is referenced (used by freePort in helpers above, but let's keep
-// the import used directly here too).
+// ---------------------------------------------------------------------------
+// Tests for uncovered functions
+// ---------------------------------------------------------------------------
+
+// TestMarkDraining_ZeroPIDIsNoOp verifies that MarkDraining with pid=0 does nothing.
+func TestMarkDraining_ZeroPIDIsNoOp(t *testing.T) {
+	mgr, _ := newTestManager(t)
+	mgr.MarkDraining(0)  // should not panic or add an entry
+	mgr.MarkDraining(-1) // negative pid also no-op
+}
+
+// TestIsRunning returns true after Start, false after Stop.
+func TestIsRunning(t *testing.T) {
+	mgr, reg := newTestManager(t)
+
+	if mgr.IsRunning("nope") {
+		t.Error("IsRunning returned true for unknown service")
+	}
+
+	registerAndStart(t, mgr, reg, "isrunning", "fake_service")
+	if !mgr.IsRunning("isrunning") {
+		t.Error("IsRunning returned false after Start")
+	}
+
+	_ = mgr.Stop("isrunning")
+	if mgr.IsRunning("isrunning") {
+		t.Error("IsRunning returned true after Stop")
+	}
+}
+
+// TestDeregister removes a running process from the table and returns its PID.
+func TestDeregister(t *testing.T) {
+	mgr, reg := newTestManager(t)
+	registerAndStart(t, mgr, reg, "dereg", "fake_service")
+
+	pid, cmd, done := mgr.Deregister("dereg")
+	if pid == 0 {
+		t.Error("Deregister returned pid=0 for running process")
+	}
+	if cmd == nil {
+		t.Error("Deregister returned nil cmd")
+	}
+	if done == nil {
+		t.Error("Deregister returned nil done channel")
+	}
+
+	// Process is no longer tracked.
+	if mgr.IsRunning("dereg") {
+		t.Error("IsRunning still true after Deregister")
+	}
+
+	// Clean up: kill the deregistered process.
+	if cmd != nil && cmd.Process != nil {
+		_ = cmd.Process.Kill()
+		<-done
+	}
+}
+
+// TestDeregister_Unknown returns zero values for unknown service.
+func TestDeregister_Unknown(t *testing.T) {
+	mgr, _ := newTestManager(t)
+	pid, cmd, done := mgr.Deregister("nope")
+	if pid != 0 || cmd != nil || done != nil {
+		t.Errorf("Deregister(unknown) = (%d, %v, %v), want (0, nil, nil)", pid, cmd, done)
+	}
+}
+
+// TestPID returns non-zero after Start, zero after Stop.
+func TestPID(t *testing.T) {
+	mgr, reg := newTestManager(t)
+
+	if mgr.PID("nope") != 0 {
+		t.Error("PID returned non-zero for unknown service")
+	}
+
+	registerAndStart(t, mgr, reg, "pid-test", "fake_service")
+	if mgr.PID("pid-test") == 0 {
+		t.Error("PID returned 0 after Start")
+	}
+}
+
+// TestInternalPort returns port after Start, 0 for unknown.
+func TestInternalPort(t *testing.T) {
+	mgr, reg := newTestManager(t)
+
+	if mgr.InternalPort("nope") != 0 {
+		t.Error("InternalPort returned non-zero for unknown")
+	}
+
+	port := registerAndStart(t, mgr, reg, "iport", "fake_service")
+	got := mgr.InternalPort("iport")
+	if got != port {
+		t.Errorf("InternalPort = %d, want %d", got, port)
+	}
+}
+
+// TestInternalPorts returns all named ports after Start.
+func TestInternalPorts(t *testing.T) {
+	mgr, reg := newTestManager(t)
+
+	if mgr.InternalPorts("nope") != nil {
+		t.Error("InternalPorts returned non-nil for unknown")
+	}
+
+	registerAndStart(t, mgr, reg, "iports", "fake_service")
+	ports := mgr.InternalPorts("iports")
+	if len(ports) == 0 {
+		t.Error("InternalPorts returned empty map after Start")
+	}
+}
+
+// TestHasDefaultOnly verifies the helper function.
+func TestHasDefaultOnly(t *testing.T) {
+	cases := []struct {
+		name string
+		in   map[string]int
+		want bool
+	}{
+		{"default only", map[string]int{"default": 1}, true},
+		{"multi port", map[string]int{"ws": 1, "http": 2}, false},
+		{"empty", map[string]int{}, false},
+		{"non-default single", map[string]int{"other": 1}, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := hasDefaultOnly(tc.in); got != tc.want {
+				t.Errorf("hasDefaultOnly(%v) = %v, want %v", tc.in, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestPrimaryPortFromMap verifies port selection logic.
+func TestPrimaryPortFromMap(t *testing.T) {
+	cases := []struct {
+		name            string
+		ports           map[string]int
+		healthCheckPort string
+		want            int
+	}{
+		{"health check port", map[string]int{"ws": 1, "http": 2}, "ws", 1},
+		{"default fallback", map[string]int{"default": 3, "ws": 1}, "", 3},
+		{"first port", map[string]int{"ws": 1}, "", 1},
+		{"empty map", map[string]int{}, "", 0},
+		{"missing hc port", map[string]int{"ws": 1}, "missing", 1},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := primaryPortFromMap(tc.ports, tc.healthCheckPort); got != tc.want {
+				t.Errorf("primaryPortFromMap = %d, want %d", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestLoadEnvFile reads KEY=VALUE lines, skips comments and empty lines.
+func TestLoadEnvFile(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, ".env")
+	content := "# comment\nFOO=bar\n\nBAZ=qux\n"
+	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	vars, err := loadEnvFile(path)
+	if err != nil {
+		t.Fatalf("loadEnvFile: %v", err)
+	}
+	if len(vars) != 2 {
+		t.Fatalf("len(vars) = %d, want 2", len(vars))
+	}
+	if vars[0] != "FOO=bar" {
+		t.Errorf("vars[0] = %q, want FOO=bar", vars[0])
+	}
+	if vars[1] != "BAZ=qux" {
+		t.Errorf("vars[1] = %q, want BAZ=qux", vars[1])
+	}
+}
+
+// TestLoadEnvFile_Missing returns error for nonexistent file.
+func TestLoadEnvFile_Missing(t *testing.T) {
+	_, err := loadEnvFile("/nonexistent/file")
+	if err == nil {
+		t.Error("expected error for missing file")
+	}
+}
+
+// TestLoadEnvFile_NoTrailingNewline handles file without trailing newline.
+func TestLoadEnvFile_NoTrailingNewline(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, ".env")
+	if err := os.WriteFile(path, []byte("KEY=val"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	vars, err := loadEnvFile(path)
+	if err != nil {
+		t.Fatalf("loadEnvFile: %v", err)
+	}
+	if len(vars) != 1 || vars[0] != "KEY=val" {
+		t.Errorf("vars = %v, want [KEY=val]", vars)
+	}
+}
+
+// TestSplitLines verifies the line splitter.
+func TestSplitLines(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		want []string
+	}{
+		{"simple", "a\nb\nc", []string{"a", "b", "c"}},
+		{"trailing newline", "a\nb\n", []string{"a", "b"}},
+		{"empty", "", nil},
+		{"single line", "hello", []string{"hello"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := splitLines(tc.in)
+			if len(got) != len(tc.want) {
+				t.Fatalf("splitLines(%q) = %v (len %d), want %v (len %d)", tc.in, got, len(got), tc.want, len(tc.want))
+			}
+			for i := range got {
+				if got[i] != tc.want[i] {
+					t.Errorf("splitLines(%q)[%d] = %q, want %q", tc.in, i, got[i], tc.want[i])
+				}
+			}
+		})
+	}
+}
+
+// Ensure net and filepath are referenced.
 var _ net.Listener

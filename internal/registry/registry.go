@@ -62,10 +62,10 @@ type Service struct {
 	PID          int           `json:"pid,omitempty"`
 	DeployedAt   time.Time     `json:"deployed_at"`
 	UpdatedAt    time.Time     `json:"updated_at"`
-	LastDeployedAt time.Time   `json:"last_deployed_at,omitempty"`
+	LastDeployedAt time.Time   `json:"last_deployed_at,omitzero"`
 
 	// Runtime observability fields (set by service layer, persisted to registry).
-	LastStartedAt time.Time    `json:"last_started_at,omitempty"` // when the current (or last) process started
+	LastStartedAt time.Time    `json:"last_started_at,omitzero"` // when the current (or last) process started
 	CrashAttempts int          `json:"crash_attempts,omitempty"`  // number of restart attempts in current crash loop
 	GaveUp        bool         `json:"gave_up,omitempty"`         // true if crash backoff hit max attempts
 	StartHistory  []StartEvent `json:"start_history,omitempty"`   // ring buffer, last 10 starts
@@ -265,6 +265,11 @@ func (r *Registry) UpdateLastDeployed(name string, t time.Time) error {
 }
 
 // UpdateInternalPort records the ephemeral port the process is running on.
+//
+// Deprecated: This method sets s.InternalPort directly, but save() calls
+// syncSingularFromMap() which overwrites it from the InternalPorts map.
+// The singular field is effectively derived — use UpdateInternalPorts instead.
+// Kept for backward compatibility; will be removed before v1.0.
 func (r *Registry) UpdateInternalPort(name string, port int) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()

@@ -1,11 +1,14 @@
 package proxy
 
 import (
+	"bufio"
 	"fmt"
 	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -220,4 +223,458 @@ func TestRemoveReleasesPort(t *testing.T) {
 		t.Fatalf("port %d not released after Remove: %v", port, err)
 	}
 	l.Close()
+}
+
+// ---------------------------------------------------------------------------
+// New tests — SwapStatic, Unswap/UnswapPorts, StablePort, RegisterPorts,
+// SwapPorts multi-port, rollback, flushProxy, X-Anito-Proxy header
+// ---------------------------------------------------------------------------
+
+// TestSwapStaticServesFiles verifies that SwapStatic serves files from a
+// directory via http.FileServer.
+func TestSwapStaticServesFiles(t *testing.T) {
+	m := NewManager()
+	port := freePort(t)
+
+	if err := m.Register("static-svc", port); err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+	t.Cleanup(func() { m.Remove("static-svc") })
+
+	// Create a temp directory with a file to serve.
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "hello.txt"), []byte("static-content"), 0644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	time.Sleep(10 * time.Millisecond)
+
+	if err := m.SwapStatic("static-svc", dir); err != nil {
+		t.Fatalf("SwapStatic: %v", err)
+	}
+
+	addr := fmt.Sprintf("http://localhost:%d/hello.txt", port)
+	body, status, err := get(addr)
+	if err != nil {
+		t.Fatalf("GET: %v", err)
+	}
+	if status != http.StatusOK {
+		t.Errorf("status = %d, want 200", status)
+	}
+	if body != "static-content" {
+		t.Errorf("body = %q, want %q", body, "static-content")
+	}
+}
+
+// TestSwapStaticErrorUnregistered verifies that SwapStatic returns an error
+// for a service that has not been registered.
+func TestSwapStaticErrorUnregistered(t *testing.T) {
+	m := NewManager()
+	err := m.SwapStatic("no-such-svc", t.TempDir())
+	if err == nil {
+		t.Fatal("SwapStatic should return error for unregistered service")
+	}
+	if !strings.Contains(err.Error(), "not registered") {
+		t.Errorf("error = %q, want it to contain %q", err.Error(), "not registered")
+	}
+}
+
+// TestUnswapRestores503 verifies that Unswap restores the 503 placeholder
+// handler after a successful Swap.
+func TestUnswapRestores503(t *testing.T) {
+	m := NewManager()
+	port := freePort(t)
+
+	if err := m.Register("svc", port); err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+	t.Cleanup(func() { m.Remove("svc") })
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, "upstream")
+	}))
+	defer upstream.Close()
+	upPort := upstream.Listener.Addr().(*net.TCPAddr).Port
+
+	time.Sleep(10 * time.Millisecond)
+
+	// Swap to upstream — should return 200.
+	if err := m.Swap("svc", upPort); err != nil {
+		t.Fatalf("Swap: %v", err)
+	}
+	_, status, err := get(fmt.Sprintf("http://localhost:%d/", port))
+	if err != nil {
+		t.Fatalf("GET after Swap: %v", err)
+	}
+	if status != http.StatusOK {
+		t.Errorf("after Swap: status = %d, want 200", status)
+	}
+
+	// Unswap — should return 503.
+	m.Unswap("svc")
+	_, status, err = get(fmt.Sprintf("http://localhost:%d/", port))
+	if err != nil {
+		t.Fatalf("GET after Unswap: %v", err)
+	}
+	if status != http.StatusServiceUnavailable {
+		t.Errorf("after Unswap: status = %d, want 503", status)
+	}
+}
+
+// TestUnswapPortsRestores503OnAllPorts verifies that UnswapPorts restores the
+// 503 placeholder on every named port of a multi-port service.
+func TestUnswapPortsRestores503OnAllPorts(t *testing.T) {
+	m := NewManager()
+	portWS := freePort(t)
+	portHTTP := freePort(t)
+
+	ports := map[string]int{"ws": portWS, "http": portHTTP}
+	if err := m.RegisterPorts("multi", ports); err != nil {
+		t.Fatalf("RegisterPorts: %v", err)
+	}
+	t.Cleanup(func() { m.RemovePorts("multi") })
+
+	upWS := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, "ws-up")
+	}))
+	defer upWS.Close()
+	upHTTP := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, "http-up")
+	}))
+	defer upHTTP.Close()
+
+	time.Sleep(10 * time.Millisecond)
+
+	internalPorts := map[string]int{
+		"ws":   upWS.Listener.Addr().(*net.TCPAddr).Port,
+		"http": upHTTP.Listener.Addr().(*net.TCPAddr).Port,
+	}
+	if err := m.SwapPorts("multi", internalPorts); err != nil {
+		t.Fatalf("SwapPorts: %v", err)
+	}
+
+	// Verify both ports serve upstream content.
+	for portName, stablePort := range ports {
+		body, status, err := get(fmt.Sprintf("http://localhost:%d/", stablePort))
+		if err != nil {
+			t.Fatalf("GET %s: %v", portName, err)
+		}
+		if status != http.StatusOK {
+			t.Errorf("%s: status = %d, want 200", portName, status)
+		}
+		if body == "" {
+			t.Errorf("%s: body is empty", portName)
+		}
+	}
+
+	// UnswapPorts — both should return 503.
+	m.UnswapPorts("multi")
+	for portName, stablePort := range ports {
+		_, status, err := get(fmt.Sprintf("http://localhost:%d/", stablePort))
+		if err != nil {
+			t.Fatalf("GET %s after UnswapPorts: %v", portName, err)
+		}
+		if status != http.StatusServiceUnavailable {
+			t.Errorf("%s after UnswapPorts: status = %d, want 503", portName, status)
+		}
+	}
+}
+
+// TestStablePortReturnsPortForRegistered verifies that StablePort returns the
+// correct port for a registered service.
+func TestStablePortReturnsPortForRegistered(t *testing.T) {
+	m := NewManager()
+	port := freePort(t)
+
+	if err := m.Register("known", port); err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+	t.Cleanup(func() { m.Remove("known") })
+
+	got := m.StablePort("known")
+	if got != port {
+		t.Errorf("StablePort = %d, want %d", got, port)
+	}
+}
+
+// TestStablePortReturnsZeroForUnknown verifies that StablePort returns 0 for a
+// service that has never been registered.
+func TestStablePortReturnsZeroForUnknown(t *testing.T) {
+	m := NewManager()
+	got := m.StablePort("nonexistent")
+	if got != 0 {
+		t.Errorf("StablePort = %d, want 0", got)
+	}
+}
+
+// TestStablePortFallsBackToNonDefault verifies that StablePort falls back to
+// any port for the service when "default" is not registered (multi-port
+// services that don't use a "default" port name).
+func TestStablePortFallsBackToNonDefault(t *testing.T) {
+	m := NewManager()
+	portWS := freePort(t)
+
+	// Register only a "ws" port — no "default".
+	if err := m.RegisterPorts("daemon", map[string]int{"ws": portWS}); err != nil {
+		t.Fatalf("RegisterPorts: %v", err)
+	}
+	t.Cleanup(func() { m.RemovePorts("daemon") })
+
+	got := m.StablePort("daemon")
+	if got != portWS {
+		t.Errorf("StablePort = %d, want %d (fallback to ws port)", got, portWS)
+	}
+}
+
+// TestRegisterPortsMultiPort verifies that RegisterPorts binds two named ports
+// and both serve requests after SwapPorts.
+func TestRegisterPortsMultiPort(t *testing.T) {
+	m := NewManager()
+	portWS := freePort(t)
+	portHTTP := freePort(t)
+
+	ports := map[string]int{"ws": portWS, "http": portHTTP}
+	if err := m.RegisterPorts("multi-svc", ports); err != nil {
+		t.Fatalf("RegisterPorts: %v", err)
+	}
+	t.Cleanup(func() { m.RemovePorts("multi-svc") })
+
+	time.Sleep(10 * time.Millisecond)
+
+	// Before swap — both should return 503.
+	for portName, sp := range ports {
+		_, status, err := get(fmt.Sprintf("http://localhost:%d/", sp))
+		if err != nil {
+			t.Fatalf("GET %s before swap: %v", portName, err)
+		}
+		if status != http.StatusServiceUnavailable {
+			t.Errorf("%s before swap: status = %d, want 503", portName, status)
+		}
+	}
+
+	// Create upstreams.
+	upWS := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, "ws-response")
+	}))
+	defer upWS.Close()
+	upHTTP := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, "http-response")
+	}))
+	defer upHTTP.Close()
+
+	internalPorts := map[string]int{
+		"ws":   upWS.Listener.Addr().(*net.TCPAddr).Port,
+		"http": upHTTP.Listener.Addr().(*net.TCPAddr).Port,
+	}
+	if err := m.SwapPorts("multi-svc", internalPorts); err != nil {
+		t.Fatalf("SwapPorts: %v", err)
+	}
+
+	// After swap — verify each port routes to its correct upstream.
+	body, status, err := get(fmt.Sprintf("http://localhost:%d/", portWS))
+	if err != nil {
+		t.Fatalf("GET ws: %v", err)
+	}
+	if status != http.StatusOK || body != "ws-response" {
+		t.Errorf("ws: status=%d body=%q, want 200 ws-response", status, body)
+	}
+
+	body, status, err = get(fmt.Sprintf("http://localhost:%d/", portHTTP))
+	if err != nil {
+		t.Fatalf("GET http: %v", err)
+	}
+	if status != http.StatusOK || body != "http-response" {
+		t.Errorf("http: status=%d body=%q, want 200 http-response", status, body)
+	}
+}
+
+// TestSwapPortsErrorUnregisteredPortName verifies that SwapPorts returns an
+// error when given a port name that was not registered.
+func TestSwapPortsErrorUnregisteredPortName(t *testing.T) {
+	m := NewManager()
+	port := freePort(t)
+
+	if err := m.Register("svc", port); err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+	t.Cleanup(func() { m.Remove("svc") })
+
+	// "grpc" was never registered — only "default" was.
+	err := m.SwapPorts("svc", map[string]int{"grpc": 9999})
+	if err == nil {
+		t.Fatal("SwapPorts should return error for unregistered port name")
+	}
+	if !strings.Contains(err.Error(), "not registered") {
+		t.Errorf("error = %q, want it to contain %q", err.Error(), "not registered")
+	}
+}
+
+// TestRegisterPortsRollbackOnPartialFailure verifies that when RegisterPorts
+// fails to bind one port, all previously bound ports in that call are released.
+func TestRegisterPortsRollbackOnPartialFailure(t *testing.T) {
+	m := NewManager()
+	portGood := freePort(t)
+
+	// Occupy a port so that RegisterPorts will fail on it.
+	occupied, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("Listen: %v", err)
+	}
+	defer occupied.Close()
+	portBad := occupied.Addr().(*net.TCPAddr).Port
+
+	// RegisterPorts with two ports — one will fail because portBad is occupied.
+	err = m.RegisterPorts("rollback-svc", map[string]int{"good": portGood, "bad": portBad})
+	if err == nil {
+		// Cleanup just in case.
+		m.RemovePorts("rollback-svc")
+		t.Fatal("RegisterPorts should fail when a port is occupied")
+	}
+
+	// The "good" port should have been rolled back and be rebindable.
+	time.Sleep(20 * time.Millisecond)
+	l, lerr := net.Listen("tcp4", fmt.Sprintf("127.0.0.1:%d", portGood))
+	if lerr != nil {
+		t.Fatalf("port %d not released after rollback: %v", portGood, lerr)
+	}
+	l.Close()
+
+	// StablePort should return 0 — nothing should be registered.
+	if got := m.StablePort("rollback-svc"); got != 0 {
+		t.Errorf("StablePort after rollback = %d, want 0", got)
+	}
+}
+
+// TestXAnitoProxyHeaderBeforeSwap verifies that the X-Anito-Proxy header is
+// present on responses even before an upstream is swapped in (503 placeholder).
+func TestXAnitoProxyHeaderBeforeSwap(t *testing.T) {
+	m := NewManager()
+	port := freePort(t)
+
+	if err := m.Register("hdr-svc", port); err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+	t.Cleanup(func() { m.Remove("hdr-svc") })
+
+	time.Sleep(10 * time.Millisecond)
+
+	resp, err := http.Get(fmt.Sprintf("http://localhost:%d/", port)) //nolint:noctx
+	if err != nil {
+		t.Fatalf("GET: %v", err)
+	}
+	defer resp.Body.Close()
+
+	val := resp.Header.Get("X-Anito-Proxy")
+	if val != "1" {
+		t.Errorf("X-Anito-Proxy = %q, want %q (before swap)", val, "1")
+	}
+}
+
+// TestXAnitoProxyHeaderAfterSwap verifies that the X-Anito-Proxy header is
+// present on responses after an upstream has been swapped in.
+func TestXAnitoProxyHeaderAfterSwap(t *testing.T) {
+	m := NewManager()
+	port := freePort(t)
+
+	if err := m.Register("hdr-svc", port); err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+	t.Cleanup(func() { m.Remove("hdr-svc") })
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, "ok")
+	}))
+	defer upstream.Close()
+
+	time.Sleep(10 * time.Millisecond)
+
+	if err := m.Swap("hdr-svc", upstream.Listener.Addr().(*net.TCPAddr).Port); err != nil {
+		t.Fatalf("Swap: %v", err)
+	}
+
+	resp, err := http.Get(fmt.Sprintf("http://localhost:%d/", port)) //nolint:noctx
+	if err != nil {
+		t.Fatalf("GET: %v", err)
+	}
+	defer resp.Body.Close()
+
+	val := resp.Header.Get("X-Anito-Proxy")
+	if val != "1" {
+		t.Errorf("X-Anito-Proxy = %q, want %q (after swap)", val, "1")
+	}
+}
+
+// TestSSERequestIsFlushed verifies that SSE requests (Accept: text/event-stream)
+// are auto-flushed so that events arrive without waiting for the buffer to fill.
+func TestSSERequestIsFlushed(t *testing.T) {
+	m := NewManager()
+	port := freePort(t)
+
+	if err := m.Register("sse-svc", port); err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+	t.Cleanup(func() { m.Remove("sse-svc") })
+
+	// SSE upstream that sends two events then closes.
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.Header().Set("Cache-Control", "no-cache")
+		w.Header().Set("Connection", "keep-alive")
+		w.WriteHeader(http.StatusOK)
+		if f, ok := w.(http.Flusher); ok {
+			f.Flush()
+		}
+		for _, msg := range []string{"data: event-1\n\n", "data: event-2\n\n"} {
+			fmt.Fprint(w, msg)
+			if f, ok := w.(http.Flusher); ok {
+				f.Flush()
+			}
+		}
+	}))
+	defer upstream.Close()
+
+	time.Sleep(10 * time.Millisecond)
+
+	if err := m.Swap("sse-svc", upstream.Listener.Addr().(*net.TCPAddr).Port); err != nil {
+		t.Fatalf("Swap: %v", err)
+	}
+
+	// Make an SSE request through the proxy.
+	req, err := http.NewRequest("GET", fmt.Sprintf("http://localhost:%d/events", port), nil)
+	if err != nil {
+		t.Fatalf("NewRequest: %v", err)
+	}
+	req.Header.Set("Accept", "text/event-stream")
+
+	client := &http.Client{Timeout: 5 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("Do: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+
+	// Read SSE events from the proxied response. The flushProxy should ensure
+	// each event arrives promptly. We collect "data:" lines.
+	scanner := bufio.NewScanner(resp.Body)
+	var events []string
+	for scanner.Scan() {
+		line := scanner.Text()
+		if strings.HasPrefix(line, "data: ") {
+			events = append(events, line)
+		}
+	}
+
+	if len(events) != 2 {
+		t.Fatalf("got %d events, want 2: %v", len(events), events)
+	}
+	if events[0] != "data: event-1" {
+		t.Errorf("event[0] = %q, want %q", events[0], "data: event-1")
+	}
+	if events[1] != "data: event-2" {
+		t.Errorf("event[1] = %q, want %q", events[1], "data: event-2")
+	}
 }

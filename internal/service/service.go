@@ -27,16 +27,7 @@ import (
 	"github.com/johnnyicon/anito/internal/receipt"
 	"github.com/johnnyicon/anito/internal/registry"
 	"github.com/johnnyicon/anito/internal/watcher"
-	"gopkg.in/yaml.v3"
 )
-
-// buildConfig holds the subset of config fields needed by BuildLog.
-type buildConfig struct {
-	Build string `yaml:"build"`
-}
-
-// yamlUnmarshal is a thin alias so loadConfig doesn't need a direct yaml import reference.
-var yamlUnmarshal = yaml.Unmarshal
 
 // sseHealthCheckPaths is the set of health check paths that require an SSE
 // readiness probe instead of a plain HTTP 200 check.  The MCP SSE transport
@@ -548,7 +539,7 @@ func (s *Service) StartWatchers() {
 // Restarts use exponential backoff (1s→2s→4s→8s→30s). After all attempts are
 // exhausted the service is left in the failed state and [CRASH_GIVE_UP] is logged.
 func (s *Service) handleCrash(name string) {
-	notify.Send("Anito", fmt.Sprintf("⚠ %s crashed", name))
+	notify.SendWithSound("Anito", fmt.Sprintf("⚠ %s crashed", name))
 	svc, ok := s.reg.Get(name)
 	if !ok {
 		return
@@ -581,6 +572,7 @@ func (s *Service) handleCrash(name string) {
 	if attempt >= len(crashBackoffDurations) {
 		s.crashMu.Unlock()
 		log.Printf("[CRASH_GIVE_UP] name=%s attempts=%d", name, attempt)
+		notify.SendWithSound("Anito", fmt.Sprintf("✕ %s gave up after %d crashes", name, attempt))
 		_ = s.reg.UpdateCrashState(name, attempt, true)
 		_ = s.reg.UpdateStatus(name, registry.StatusFailed, 0)
 		return

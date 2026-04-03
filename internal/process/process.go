@@ -101,7 +101,9 @@ func (m *Manager) Start(svc *registry.Service) (map[string]int, error) {
 		if logFile != nil {
 			_ = logFile.Close()
 		}
-		_ = m.reg.UpdateStatus(svc.Name, registry.StatusFailed, 0)
+		if regErr := m.reg.UpdateStatus(svc.Name, registry.StatusFailed, 0); regErr != nil {
+			log.Printf("[ERROR] name=%s registry update failed: %v", svc.Name, regErr)
+		}
 		return nil, fmt.Errorf("failed to start %q: %w", svc.Name, err)
 	}
 
@@ -117,7 +119,9 @@ func (m *Manager) Start(svc *registry.Service) (map[string]int, error) {
 	done := make(chan struct{})
 	rp := &runningProc{cmd: cmd, internalPort: primaryPort, internalPorts: ports, logFile: logFile, done: done}
 	m.procs[svc.Name] = rp
-	_ = m.reg.UpdateInternalPorts(svc.Name, ports)
+	if regErr := m.reg.UpdateInternalPorts(svc.Name, ports); regErr != nil {
+		log.Printf("[ERROR] name=%s registry port update failed: %v", svc.Name, regErr)
+	}
 
 	// Watch for unexpected exit. This is the sole goroutine that calls cmd.Wait().
 	pid := cmd.Process.Pid
@@ -144,7 +148,9 @@ func (m *Manager) Start(svc *registry.Service) (map[string]int, error) {
 			return // intentional kill — not a crash
 		}
 
-		_ = m.reg.UpdateStatus(svc.Name, registry.StatusFailed, 0)
+		if regErr := m.reg.UpdateStatus(svc.Name, registry.StatusFailed, 0); regErr != nil {
+			log.Printf("[ERROR] name=%s registry status update failed: %v", svc.Name, regErr)
+		}
 		log.Printf("[CRASH] name=%s pid=%d", svc.Name, pid)
 		if handler := m.OnCrash; handler != nil {
 			handler(svc.Name)
@@ -173,8 +179,10 @@ func (m *Manager) Stop(name string) error {
 	return drainProc(rp.cmd, rp.done)
 }
 
-// StopPID sends SIGTERM to an arbitrary PID (used when draining the old process
-// after a hot-swap). The caller no longer holds a reference to the cmd.
+// Deprecated: StopPID has a goroutine leak — proc.Wait() races with the
+// cmd.Wait() goroutine from Start(). Use Deregister() + DrainProc() instead,
+// which reuses the Start goroutine's done channel and avoids the double-wait.
+// Kept temporarily for backward compatibility; will be removed before v1.0.
 func StopPID(pid int) {
 	proc, err := os.FindProcess(pid)
 	if err != nil {
@@ -347,10 +355,14 @@ func freePort() (int, error) {
 	return port, nil
 }
 
-// drainProc sends SIGTERM to cmd and waits for the process to exit via done.
-// done is the channel closed by the Start goroutine — this avoids calling
-// cmd.Wait() a second time, which would race on exec.Cmd's internal goroutineErr
-// channel and hang indefinitely.
+// drainProc gracefully terminates a process started by Start().
+//
+// The done channel is closed by the goroutine that Start() spawns to call
+// cmd.Wait(). We wait on this channel rather than calling cmd.Wait() ourselves,
+// because exec.Cmd only allows a single Wait() call — a second one races on
+// the internal goroutineErr channel and hangs indefinitely.
+//
+// Sequence: SIGTERM → wait for done (up to drainTimeout) → SIGKILL if stuck.
 func drainProc(cmd *exec.Cmd, done <-chan struct{}) error {
 	if cmd.Process == nil {
 		return nil
