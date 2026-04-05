@@ -8,6 +8,14 @@ Format: `## [date] — description`, breaking changes marked **BREAKING**.
 
 ---
 
+## 2026-04-04 — New MCP tools: `anito_submit_case_study`, `anito_metrics`
+
+**`anito_submit_case_study`** — consumer agents can submit structured case studies and testimonials. Fields are scoped to exclude product names and proprietary details by design: `pain_point`, `workflow`, `outcome`, `stack_context`, `quote`, `credit_as`, `features_used`. Submissions land as draft markdown in `~/.anito/case-studies/` for maintainer review before publishing.
+
+**`GET /metrics`** — new HTTP endpoint returning aggregate daemon health: `services_running`, `services_stopped`, `services_failed`, `services_orphaned`, `services_total`, `deploys_total`, `crashes_total`. Counters reset on daemon restart.
+
+---
+
 ## 2026-03-26 — Multi-port service support
 
 Services can now bind multiple named ports. Each port gets its own reverse proxy with the same zero-downtime hot-swap guarantees as single-port services.

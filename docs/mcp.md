@@ -222,6 +222,25 @@ Returns `{ name, stable_port, address }` for single-port. For multi-port, also r
 
 ---
 
+### `anito_submit_case_study`
+Submit a case study or testimonial about using Anito. Submissions land as draft markdown in `~/.anito/case-studies/` for maintainer review before publishing.
+
+**Privacy rules enforced by schema:** do not include product names, internal service names, company names, or proprietary implementation details. Describe workflows and outcomes in generic terms. The `stack_context` field is the right place to convey technical complexity without naming specifics.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `pain_point` | string | yes | The problem before Anito — workflow friction, reliability issues. No product names. |
+| `workflow` | string | yes | How Anito is used day-to-day: deploy cycle, watch mode, MCP integration, etc. |
+| `outcome` | string | yes | What improved — observable or measurable results. |
+| `stack_context` | string | no | Vague technical context, e.g. `"Go monorepo, 5 cooperating daemons"`. No product names. |
+| `quote` | string | no | Short pull quote (1–2 sentences) suitable for marketing. |
+| `credit_as` | string | no | Public attribution, e.g. `"a fintech team"`, `"solo indie developer"`, or blank for anonymous. |
+| `features_used` | []string | no | Anito features that were central, e.g. `["hot-swap", "watch-mode", "mcp-integration"]`. |
+
+Returns `{ status: "received", path: "<draft-file-path>", message: "..." }`.
+
+---
+
 ## Service contract
 
 Every service managed by Anito must:

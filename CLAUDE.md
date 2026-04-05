@@ -17,7 +17,7 @@ Before making architectural or implementation decisions, consult:
 
 - @docs/setup.md — how to install and run Anito itself as a launchd daemon (the prerequisite for everything)
 - @docs/mcp.md — MCP server reference: where it runs, all tools, service contract, port architecture
-- @docs/ideas.md — parked ideas (self-healing daemon, admin SPA, anito_setup tool) — do not build without discussion
+- @docs/ideas.md — parked ideas (self-healing daemon, native .app, schema versioning hook) — do not build without discussion
 
 ## Architectural principles (non-negotiable)
 
@@ -48,7 +48,7 @@ internal/
   server/               HTTP management API (port 7700)
   config/               anito.yaml loading and validation
   client/               CLI → daemon HTTP client
-  mcp/                  MCP server (not yet built)
+  mcp/                  MCP server (Streamable HTTP on :7701)
 ```
 
 ## Changelog discipline
@@ -68,10 +68,11 @@ The pre-commit hook in `scripts/pre-commit` (installed via `make install-hooks`)
 
 ## What's not built yet
 
-- MCP server (`internal/mcp/`) — the next major piece
-- `GET /logs/:name` streaming endpoint — prerequisite for MCP
-- Port auto-allocation fallback — required before MCP `anito_deploy` tool
-- `anito init` / `anito_setup` — repo scaffolding and introspection
+- `anito init` CLI scaffolding command — `anito_setup` MCP tool exists, but no CLI equivalent
+- Schema versioning pre-commit hook — parked in `docs/ideas.md`
+- Self-healing daemon watchdog — parked in `docs/ideas.md`
+- Native macOS .app distribution — parked in `docs/ideas.md`
+- Admin SPA v2 write operations — v1 read-only is shipped; restart/stop/remove from the browser is in progress
 
 ## Gomanan Toolbox
 

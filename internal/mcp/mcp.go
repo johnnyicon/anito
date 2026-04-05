@@ -7,9 +7,11 @@
 package mcp
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"time"
@@ -20,6 +22,7 @@ import (
 	"github.com/johnnyicon/anito/internal/issues"
 	"github.com/johnnyicon/anito/internal/registry"
 	"github.com/johnnyicon/anito/internal/service"
+	"github.com/johnnyicon/anito/internal/sessions"
 	"github.com/johnnyicon/anito/internal/setup"
 )
 
@@ -27,11 +30,12 @@ import (
 type Server struct {
 	svc  *service.Service
 	iss  *issues.Store
+	sess *sessions.Store
 	port int
 }
 
-func New(svc *service.Service, iss *issues.Store, port int) *Server {
-	return &Server{svc: svc, iss: iss, port: port}
+func New(svc *service.Service, iss *issues.Store, sess *sessions.Store, port int) *Server {
+	return &Server{svc: svc, iss: iss, sess: sess, port: port}
 }
 
 // logErr auto-logs a tool error to the issue store. Called in each tool handler
@@ -62,18 +66,67 @@ func (s *Server) Start() error {
 
 	s.registerTools(srv)
 
-	// Stateless mode: no session ID validation. Each request gets a fresh
-	// temporary session. This means the server can be reloaded (anito reload)
-	// without agents getting "session not found" errors on subsequent calls.
-	// Our tools are all request/response — no server-initiated messages — so
-	// stateless is correct here.
-	handler := sdkmcp.NewStreamableHTTPHandler(func(r *http.Request) *sdkmcp.Server {
+	// Stateless mode: the SDK does not validate session IDs, so daemon
+	// restarts are seamless — no "session not found" errors. The SDK still
+	// assigns Mcp-Session-Id in initialize responses and clients echo it
+	// back per the MCP spec; our sessionMiddleware captures those IDs for
+	// observability without taking on the session-lifecycle risk of stateful
+	// mode.
+	mcpHandler := sdkmcp.NewStreamableHTTPHandler(func(r *http.Request) *sdkmcp.Server {
 		return srv
 	}, &sdkmcp.StreamableHTTPOptions{Stateless: true})
+
+	handler := sessionMiddleware(s.sess, mcpHandler)
 
 	addr := fmt.Sprintf("localhost:%d", s.port)
 	log.Printf("[STARTUP] MCP server listening on http://%s", addr)
 	return http.ListenAndServe(addr, handler)
+}
+
+// sessionMiddleware records session activity in the persistent store.
+//   - Requests with Mcp-Session-Id: touch the session (update LastSeenAt,
+//     increment call count, capture tool name from JSON-RPC body if present).
+//   - Requests without: capture the new Mcp-Session-Id from the response
+//     header after the SDK assigns it during initialize.
+func sessionMiddleware(sess *sessions.Store, next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if id := r.Header.Get("Mcp-Session-Id"); id != "" {
+			tool := extractToolName(r)
+			_ = sess.Touch(id, tool)
+			next.ServeHTTP(w, r)
+			return
+		}
+		// No session ID yet — let the SDK handle the request, then read the
+		// new session ID it assigned from the response header.
+		next.ServeHTTP(w, r)
+		if id := w.Header().Get("Mcp-Session-Id"); id != "" {
+			_ = sess.Create(id)
+		}
+	})
+}
+
+// extractToolName reads the JSON-RPC body to find the tools/call method's
+// tool name. Returns "" if the body is not a tool call or cannot be parsed.
+// The body is restored so the downstream handler can read it normally.
+func extractToolName(r *http.Request) string {
+	if r.Body == nil {
+		return ""
+	}
+	body, err := io.ReadAll(r.Body)
+	r.Body = io.NopCloser(bytes.NewReader(body))
+	if err != nil {
+		return ""
+	}
+	var rpc struct {
+		Method string `json:"method"`
+		Params struct {
+			Name string `json:"name"`
+		} `json:"params"`
+	}
+	if json.Unmarshal(body, &rpc) != nil || rpc.Method != "tools/call" {
+		return ""
+	}
+	return rpc.Params.Name
 }
 
 // --- input/output types ---
@@ -288,6 +341,22 @@ type reportInput struct {
 type reportOutput struct {
 	ID     string `json:"id"`
 	Status string `json:"status"`
+}
+
+type caseStudyInput struct {
+	PainPoint    string   `json:"pain_point"     jsonschema:"required — describe the problem you had before Anito, in terms of workflow friction or reliability issues. Do not name specific internal products or proprietary systems."`
+	Workflow     string   `json:"workflow"       jsonschema:"required — describe how you use Anito day-to-day: deploy cycle, watch mode, MCP integration, etc. Be specific about the mechanics, vague about what the services are."`
+	Outcome      string   `json:"outcome"        jsonschema:"required — what improved? Describe the observable or measurable result: faster iteration, fewer interruptions, more reliable local stack, etc."`
+	StackContext string   `json:"stack_context"  jsonschema:"optional — brief vague technical context that conveys complexity without revealing specifics, e.g. 'Go monorepo with 5 cooperating daemons' or 'Node API + React SPA'. Do not name the actual services or products."`
+	Quote        string   `json:"quote"          jsonschema:"optional — a short pull quote (1-2 sentences) suitable for marketing. First person. Should convey genuine value without naming internal systems."`
+	CreditAs     string   `json:"credit_as"      jsonschema:"optional — how to attribute this case study publicly, e.g. 'a fintech team', 'a solo indie developer', or leave blank for anonymous."`
+	FeaturesUsed []string `json:"features_used"  jsonschema:"optional — Anito features that were central to your workflow, e.g. ['hot-swap', 'watch-mode', 'mcp-integration', 'multi-port']."`
+}
+
+type caseStudyOutput struct {
+	Status  string `json:"status"`
+	Path    string `json:"path"`
+	Message string `json:"message"`
 }
 
 // --- tool registration ---
@@ -700,6 +769,36 @@ func (s *Server) registerTools(srv *sdkmcp.Server) {
 			id = recent[len(recent)-1].ID
 		}
 		return nil, reportOutput{ID: id, Status: "logged"}, nil
+	})
+
+	sdkmcp.AddTool(srv, &sdkmcp.Tool{
+		Name: "anito_submit_case_study",
+		Description: "Submit a case study or testimonial about using Anito. " +
+			"Describe the workflow problem, how Anito solved it, and the outcome. " +
+			"IMPORTANT: do not include product names, internal service names, company names, " +
+			"or proprietary implementation details — describe workflows and outcomes in generic terms. " +
+			"The maintainer reviews all submissions before publishing. " +
+			"Use stack_context to convey technical complexity (e.g. 'Go monorepo, 5 services') without naming specific products.",
+	}, func(ctx context.Context, req *sdkmcp.CallToolRequest, in caseStudyInput) (*sdkmcp.CallToolResult, caseStudyOutput, error) {
+		log.Printf("[MCP] tool=anito_submit_case_study credit_as=%q", in.CreditAs)
+		path, err := s.svc.SubmitCaseStudy(service.CaseStudyRequest{
+			PainPoint:    in.PainPoint,
+			Workflow:     in.Workflow,
+			Outcome:      in.Outcome,
+			StackContext: in.StackContext,
+			Quote:        in.Quote,
+			CreditAs:     in.CreditAs,
+			FeaturesUsed: in.FeaturesUsed,
+		})
+		if err != nil {
+			s.logErr("anito_submit_case_study", in, err)
+			return nil, caseStudyOutput{}, err
+		}
+		return nil, caseStudyOutput{
+			Status:  "received",
+			Path:    path,
+			Message: "Draft saved. The maintainer will review and publish when ready.",
+		}, nil
 	})
 }
 

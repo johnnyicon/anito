@@ -1,5 +1,6 @@
 import { useState } from 'react'
 import type { Issue } from '@/lib/api'
+import { useClearIssues } from '@/lib/api'
 import { timeAgo } from '@/lib/format'
 
 interface IssuesDrawerProps {
@@ -14,6 +15,7 @@ type SourceFilter = 'all' | 'mcp:' | 'cli:' | 'consumer:'
 export function IssuesDrawer({ issues, unread, open, onToggle }: IssuesDrawerProps) {
   const [sourceFilter, setSourceFilter] = useState<SourceFilter>('all')
   const [expandedId,   setExpandedId]   = useState<string | null>(null)
+  const clearIssues = useClearIssues()
 
   const filtered = issues.filter(iss => {
     if (sourceFilter === 'all') return true
@@ -53,7 +55,19 @@ export function IssuesDrawer({ issues, unread, open, onToggle }: IssuesDrawerPro
                 {f === 'all' ? 'All' : f.replace(':', '')}
               </button>
             ))}
-            <span className="ml-auto text-xs text-muted-foreground">{filtered.length} issues</span>
+            <span className="ml-auto flex items-center gap-2 text-xs text-muted-foreground">
+              {filtered.length} issues
+              {issues.length > 0 && (
+                <button
+                  onClick={() => clearIssues.mutate()}
+                  disabled={clearIssues.isPending}
+                  className="text-muted-foreground hover:text-foreground transition-colors disabled:opacity-50"
+                  title="Clear all issues"
+                >
+                  Clear all
+                </button>
+              )}
+            </span>
           </div>
 
           {/* Issue list */}

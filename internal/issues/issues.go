@@ -70,6 +70,13 @@ func (s *Store) Append(iss Issue) error {
 	return err
 }
 
+// Clear removes all issues from the log.
+func (s *Store) Clear() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return os.WriteFile(s.path, nil, 0644)
+}
+
 // Recent returns the last n issues from the log, optionally filtered by a
 // source prefix (e.g. "mcp:", "consumer:", "cli:"). Pass source="" to return
 // all sources. Pass n<=0 to return all issues.

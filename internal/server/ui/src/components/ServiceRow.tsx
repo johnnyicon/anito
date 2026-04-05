@@ -88,10 +88,22 @@ export function ServiceRow({ service: svc, stale, onOpenLogs, onOpenDetail, onRe
         className="px-4 pt-3.5 pb-3 cursor-pointer"
         onClick={() => setExpanded(e => !e)}
       >
-        {/* Top row: status dot + name + status badge */}
+        {/* Top row: status dot + name + badges */}
         <div className="flex items-center gap-2 mb-2">
-          <span className={`size-2.5 rounded-full shrink-0 ${style.dot}`} />
+          <span className={`size-2.5 rounded-full shrink-0 ${style.dot} ${restart.isPending ? 'animate-pulse' : ''}`} />
           <span className="font-semibold text-sm truncate">{svc.name}</span>
+          {/* Watch mode badge */}
+          {svc.watch_paths && svc.watch_paths.length > 0 && (
+            <span className="text-xs font-medium px-1.5 py-0.5 rounded-full text-sky-700 bg-sky-50 border border-sky-200" title={`Watching: ${svc.watch_paths.join(', ')}`}>
+              ⟳ watch
+            </span>
+          )}
+          {/* Restarting indicator */}
+          {restart.isPending && (
+            <span className="text-xs font-medium px-1.5 py-0.5 rounded-full text-amber-700 bg-amber-50 border border-amber-200 animate-pulse">
+              restarting…
+            </span>
+          )}
           <span className={`ml-auto text-xs font-medium px-2 py-0.5 rounded-full ${style.labelColor}`}>
             {style.label}
           </span>

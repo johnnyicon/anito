@@ -22,6 +22,7 @@ import (
 	"github.com/johnnyicon/anito/internal/registry"
 	"github.com/johnnyicon/anito/internal/server"
 	"github.com/johnnyicon/anito/internal/service"
+	"github.com/johnnyicon/anito/internal/sessions"
 	"github.com/johnnyicon/anito/internal/setup"
 	"github.com/johnnyicon/anito/internal/watcher"
 )
@@ -728,6 +729,13 @@ func runDaemon(apiPort, mcpPort int, dataDir string) {
 
 	prx := proxy.NewManager()
 	wtch := watcher.New()
+	iss := issues.New(dataDir)
+	sess := sessions.New(dataDir)
+	if n, err := sess.Cleanup(30 * 24 * time.Hour); err != nil {
+		log.Printf("warn: session cleanup: %v", err)
+	} else if n > 0 {
+		log.Printf("[STARTUP] pruned %d stale MCP sessions", n)
+	}
 
 	// Restore services that were running before the daemon last stopped.
 	for _, svc := range reg.All() {
@@ -752,6 +760,12 @@ func runDaemon(apiPort, mcpPort int, dataDir string) {
 				if err := prx.SwapStatic(svc.Name, svc.BinaryPath); err != nil {
 					log.Printf("[RESTORE_FAILED] name=%s reason=%v", svc.Name, err)
 					_ = reg.UpdateStatus(svc.Name, registry.StatusFailed, 0)
+					_ = iss.Append(issues.Issue{
+						Source:   "daemon:restore_failed",
+						Tool:     "startup",
+						Error:    fmt.Sprintf("service %s: %v", svc.Name, err),
+						Severity: "error",
+					})
 				}
 				continue
 			}
@@ -763,12 +777,24 @@ func runDaemon(apiPort, mcpPort int, dataDir string) {
 			} else if err != nil {
 				log.Printf("[RESTORE_FAILED] name=%s reason=stat error: %v", svc.Name, err)
 				_ = reg.UpdateStatus(svc.Name, registry.StatusFailed, 0)
+				_ = iss.Append(issues.Issue{
+					Source:   "daemon:restore_failed",
+					Tool:     "startup",
+					Error:    fmt.Sprintf("service %s: stat error: %v", svc.Name, err),
+					Severity: "error",
+				})
 				continue
 			}
 			internalPorts, err := mgr.Start(svc)
 			if err != nil {
 				log.Printf("[RESTORE_FAILED] name=%s error=%v", svc.Name, err)
 				_ = reg.UpdateStatus(svc.Name, registry.StatusFailed, 0)
+				_ = iss.Append(issues.Issue{
+					Source:   "daemon:restore_failed",
+					Tool:     "startup",
+					Error:    fmt.Sprintf("service %s: %v", svc.Name, err),
+					Severity: "error",
+				})
 				continue
 			}
 
@@ -791,6 +817,12 @@ func runDaemon(apiPort, mcpPort int, dataDir string) {
 				log.Printf("[RESTORE_FAILED] name=%s health_check=%v", svc.Name, err)
 				_ = mgr.Stop(svc.Name)
 				_ = reg.UpdateStatus(svc.Name, registry.StatusFailed, 0)
+				_ = iss.Append(issues.Issue{
+					Source:   "daemon:restore_failed",
+					Tool:     "startup",
+					Error:    fmt.Sprintf("service %s: health check: %v", svc.Name, err),
+					Severity: "error",
+				})
 				continue
 			}
 
@@ -798,6 +830,12 @@ func runDaemon(apiPort, mcpPort int, dataDir string) {
 				log.Printf("[RESTORE_FAILED] name=%s proxy_swap=%v", svc.Name, err)
 				_ = mgr.Stop(svc.Name)
 				_ = reg.UpdateStatus(svc.Name, registry.StatusFailed, 0)
+				_ = iss.Append(issues.Issue{
+					Source:   "daemon:restore_failed",
+					Tool:     "startup",
+					Error:    fmt.Sprintf("service %s: proxy swap: %v", svc.Name, err),
+					Severity: "error",
+				})
 				continue
 			}
 			newPID := mgr.PID(svc.Name)
@@ -807,19 +845,18 @@ func runDaemon(apiPort, mcpPort int, dataDir string) {
 
 	log.Printf("[STARTUP] version=%s data=%s api=:%d mcp=:%d", version, dataDir, apiPort, mcpPort)
 
-	svc := service.New(reg, mgr, prx, logDir, wtch)
+	svc := service.New(reg, mgr, prx, logDir, wtch, iss)
 	svc.StartWatchers()
 
-	iss := issues.New(dataDir)
 
-	mcpSrv := mcpserver.New(svc, iss, mcpPort)
+	mcpSrv := mcpserver.New(svc, iss, sess, mcpPort)
 	go func() {
 		if err := mcpSrv.Start(); err != nil {
 			log.Printf("MCP server error: %v", err)
 		}
 	}()
 
-	srv := server.New(svc, iss, apiPort, version)
+	srv := server.New(svc, iss, sess, apiPort, version)
 	log.Fatal(srv.Start())
 }
 

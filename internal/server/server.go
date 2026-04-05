@@ -18,6 +18,7 @@ import (
 	"github.com/johnnyicon/anito/internal/issues"
 	"github.com/johnnyicon/anito/internal/registry"
 	"github.com/johnnyicon/anito/internal/service"
+	"github.com/johnnyicon/anito/internal/sessions"
 )
 
 //go:embed ui/dist
@@ -27,12 +28,13 @@ var distFiles embed.FS
 type Server struct {
 	svc     *service.Service
 	iss     *issues.Store
+	sess    *sessions.Store
 	port    int
 	version string
 }
 
-func New(svc *service.Service, iss *issues.Store, port int, version string) *Server {
-	return &Server{svc: svc, iss: iss, port: port, version: version}
+func New(svc *service.Service, iss *issues.Store, sess *sessions.Store, port int, version string) *Server {
+	return &Server{svc: svc, iss: iss, sess: sess, port: port, version: version}
 }
 
 func (s *Server) Start() error {
@@ -69,7 +71,10 @@ func (s *Server) Start() error {
 	e.GET("/logs/:name", s.handleLogs)
 	e.POST("/issues", s.handlePostIssue)
 	e.GET("/issues", s.handleGetIssues)
+	e.DELETE("/issues", s.handleClearIssues)
 	e.GET("/doctor", s.handleDoctor)
+	e.GET("/metrics", s.handleMetrics)
+	e.GET("/sessions", s.handleSessions)
 	e.POST("/teardown", s.handleTeardown)
 
 	// Serve embedded SPA — must be registered last (catch-all)
@@ -171,6 +176,15 @@ func (s *Server) handleDeploy(c echo.Context) error {
 	})
 	if err != nil {
 		log.Printf("[ERROR] deploy name=%s error=%q", req.Name, err)
+		if s.iss != nil {
+			_ = s.iss.Append(issues.Issue{
+				Source:   "cli:deploy",
+				Tool:     "deploy",
+				Input:    req.Name,
+				Error:    err.Error(),
+				Severity: "error",
+			})
+		}
 		return echo.NewHTTPError(http.StatusInternalServerError, err.Error())
 	}
 	return c.JSON(http.StatusOK, svc)
@@ -259,6 +273,21 @@ func (s *Server) handleDoctor(c echo.Context) error {
 	return c.JSON(http.StatusOK, result)
 }
 
+func (s *Server) handleMetrics(c echo.Context) error {
+	return c.JSON(http.StatusOK, s.svc.Metrics())
+}
+
+func (s *Server) handleSessions(c echo.Context) error {
+	if s.sess == nil {
+		return c.JSON(http.StatusOK, map[string]any{"sessions": []any{}, "count": 0})
+	}
+	list, err := s.sess.List()
+	if err != nil {
+		return echo.NewHTTPError(http.StatusInternalServerError, err.Error())
+	}
+	return c.JSON(http.StatusOK, map[string]any{"sessions": list, "count": len(list)})
+}
+
 func (s *Server) handleTeardown(c echo.Context) error {
 	var req struct {
 		RepoPath string `json:"repo_path"`
@@ -312,6 +341,13 @@ func (s *Server) handleGetIssues(c echo.Context) error {
 		list = []issues.Issue{}
 	}
 	return c.JSON(http.StatusOK, map[string]any{"issues": list})
+}
+
+func (s *Server) handleClearIssues(c echo.Context) error {
+	if err := s.iss.Clear(); err != nil {
+		return echo.NewHTTPError(http.StatusInternalServerError, err.Error())
+	}
+	return c.JSON(http.StatusOK, map[string]any{"status": "cleared"})
 }
 
 // setSSEHeaders configures the response for Server-Sent Events streaming.

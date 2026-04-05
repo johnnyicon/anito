@@ -111,8 +111,11 @@ export function RightPanel({
       </div>
 
       {/* Tab content */}
-      <div className="flex-1 min-h-0 overflow-hidden">
-        {active?.type === 'activity' && <ActivityFeed />}
+      <div className="flex-1 min-h-0 overflow-hidden relative">
+        {/* Activity feed stays mounted (SSE stays connected) — hidden when not active */}
+        <div className={`absolute inset-0 ${active?.type === 'activity' ? '' : 'invisible'}`}>
+          <ActivityFeed />
+        </div>
         {active?.type === 'logs' && <LogTab name={active.name} active={true} />}
         {active?.type === 'detail' && (
           <DetailView

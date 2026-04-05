@@ -18,9 +18,11 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/johnnyicon/anito/internal/config"
+	"github.com/johnnyicon/anito/internal/issues"
 	"github.com/johnnyicon/anito/internal/notify"
 	"github.com/johnnyicon/anito/internal/process"
 	"github.com/johnnyicon/anito/internal/proxy"
@@ -29,14 +31,6 @@ import (
 	"github.com/johnnyicon/anito/internal/watcher"
 )
 
-// sseHealthCheckPaths is the set of health check paths that require an SSE
-// readiness probe instead of a plain HTTP 200 check.  The MCP SSE transport
-// binds its HTTP listener before the MCP session is ready to serve tool calls,
-// so a plain 200 on /sse is not sufficient — we must read the first SSE event
-// ("event: endpoint") to confirm the MCP server is fully initialised.
-var sseHealthCheckPaths = map[string]bool{
-	"/sse": true,
-}
 
 const (
 	portRangeStart         = 8100
@@ -73,20 +67,58 @@ type Service struct {
 	prx    *proxy.Manager
 	logDir string
 	wtch   *watcher.Manager
+	iss    *issues.Store // may be nil in tests
 
 	crashMu       sync.Mutex
 	crashAttempts map[string]int // per-service crash attempt counter; reset on successful start
 
 	deployLocks sync.Map // map[string]*sync.Mutex — per-service deploy serialization
+
+	deploysTotal atomic.Int64
+	crashesTotal atomic.Int64
 }
 
-func New(reg *registry.Registry, mgr *process.Manager, prx *proxy.Manager, logDir string, wtch *watcher.Manager) *Service {
+// Metrics holds aggregate health counters for the daemon.
+type Metrics struct {
+	ServicesRunning  int   `json:"services_running"`
+	ServicesStopped  int   `json:"services_stopped"`
+	ServicesFailed   int   `json:"services_failed"`
+	ServicesOrphaned int   `json:"services_orphaned"`
+	ServicesTotal    int   `json:"services_total"`
+	DeploysTotal     int64 `json:"deploys_total"`
+	CrashesTotal     int64 `json:"crashes_total"`
+}
+
+// Metrics returns a snapshot of aggregate daemon health.
+func (s *Service) Metrics() Metrics {
+	m := Metrics{
+		DeploysTotal: s.deploysTotal.Load(),
+		CrashesTotal: s.crashesTotal.Load(),
+	}
+	for _, svc := range s.Services() {
+		m.ServicesTotal++
+		switch svc.Status {
+		case registry.StatusRunning:
+			m.ServicesRunning++
+		case registry.StatusStopped:
+			m.ServicesStopped++
+		case registry.StatusFailed:
+			m.ServicesFailed++
+		case registry.StatusOrphaned:
+			m.ServicesOrphaned++
+		}
+	}
+	return m
+}
+
+func New(reg *registry.Registry, mgr *process.Manager, prx *proxy.Manager, logDir string, wtch *watcher.Manager, iss *issues.Store) *Service {
 	svc := &Service{
 		reg:           reg,
 		mgr:           mgr,
 		prx:           prx,
 		logDir:        logDir,
 		wtch:          wtch,
+		iss:           iss,
 		crashAttempts: make(map[string]int),
 	}
 	mgr.OnCrash = svc.handleCrash
@@ -198,6 +230,7 @@ func (s *Service) Deploy(req DeployRequest) (*registry.Service, error) {
 		_ = s.reg.UpdateLastDeployed(req.Name, time.Now())
 		svc, _ = s.reg.Get(req.Name)
 		log.Printf("[DEPLOY] name=%s port=%d type=static path=%s", svc.Name, svc.StablePort, req.Path)
+		s.deploysTotal.Add(1)
 		writeReceipt(svc)
 		return svc, nil
 	}
@@ -270,6 +303,7 @@ func (s *Service) Deploy(req DeployRequest) (*registry.Service, error) {
 	svc, _ = s.reg.Get(req.Name)
 	log.Printf("[DEPLOY] name=%s port=%d internal=%d pid=%d", svc.Name, svc.StablePort, svc.InternalPort, svc.PID)
 	notify.Send("Anito", fmt.Sprintf("✓ %s deployed on :%d", svc.Name, svc.StablePort))
+	s.deploysTotal.Add(1)
 	s.startWatcher(svc)
 	writeReceipt(svc)
 	return svc, nil
@@ -539,6 +573,7 @@ func (s *Service) StartWatchers() {
 // Restarts use exponential backoff (1s→2s→4s→8s→30s). After all attempts are
 // exhausted the service is left in the failed state and [CRASH_GIVE_UP] is logged.
 func (s *Service) handleCrash(name string) {
+	s.crashesTotal.Add(1)
 	notify.SendWithSound("Anito", fmt.Sprintf("⚠ %s crashed", name))
 	svc, ok := s.reg.Get(name)
 	if !ok {
@@ -575,6 +610,15 @@ func (s *Service) handleCrash(name string) {
 		notify.SendWithSound("Anito", fmt.Sprintf("✕ %s gave up after %d crashes", name, attempt))
 		_ = s.reg.UpdateCrashState(name, attempt, true)
 		_ = s.reg.UpdateStatus(name, registry.StatusFailed, 0)
+		if s.iss != nil {
+			_ = s.iss.Append(issues.Issue{
+				Source:   "daemon:crash_give_up",
+				Tool:     "crash_recovery",
+				Error:    fmt.Sprintf("service %s gave up after %d crash attempts", name, attempt),
+				Context:  tailLog(filepath.Join(s.logDir, name+".log"), 15),
+				Severity: "error",
+			})
+		}
 		return
 	}
 	s.crashAttempts[name] = attempt + 1
@@ -947,14 +991,8 @@ func WaitHealthy(internalPort int, path string, timeout time.Duration) error {
 	return waitHealthy(internalPort, path, timeout)
 }
 
-// waitHealthy polls the health check endpoint until it passes or the deadline
-// is reached.  For SSE endpoints (e.g. /sse), a plain HTTP 200 is not
-// sufficient — we read the first event line to confirm the MCP transport is
-// fully ready to serve tool calls.
+// waitHealthy polls the health check endpoint until it returns 200 OK or the deadline is reached.
 func waitHealthy(internalPort int, path string, timeout time.Duration) error {
-	if sseHealthCheckPaths[path] {
-		return waitSSEReady(internalPort, path, timeout)
-	}
 	return waitHTTPReady(internalPort, path, timeout)
 }
 
@@ -982,55 +1020,131 @@ func waitHTTPReady(internalPort int, path string, timeout time.Duration) error {
 	return fmt.Errorf("%s", msg)
 }
 
-// waitSSEReady connects to an SSE endpoint and waits for the first event line
-// to be emitted.  For the MCP SSE transport this is the "event: endpoint"
-// advertisement, which is only sent once the server is ready to accept
-// initialize handshakes.  We treat any non-empty "event:" or "data:" line as
-// proof of readiness — the exact event type is not important.
-func waitSSEReady(internalPort int, path string, timeout time.Duration) error {
-	rawURL := fmt.Sprintf("http://localhost:%d%s", internalPort, path)
-	deadline := time.Now().Add(timeout)
 
-	for time.Now().Before(deadline) {
-		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-		ready, err := probeSSE(ctx, rawURL)
-		cancel()
-		if err == nil && ready {
-			return nil
-		}
-		time.Sleep(healthCheckInterval)
-	}
-	return fmt.Errorf("health check timed out after %s waiting for SSE readiness on %s\nAnito requires your service to expose GET %s → 200 OK and read PORT from the environment.", timeout, rawURL, path)
+// CaseStudyRequest is the structured input for a consumer case study submission.
+// Fields are deliberately scoped to exclude product names and proprietary details.
+type CaseStudyRequest struct {
+	PainPoint    string   // required — the problem before Anito
+	Workflow     string   // required — how Anito is used day-to-day
+	Outcome      string   // required — measurable or observable result
+	StackContext string   // optional — vague technical context, e.g. "Go monorepo, 5 services"
+	Quote        string   // optional — pull quote for marketing
+	CreditAs     string   // optional — "a fintech team", "solo indie dev", or blank for anonymous
+	FeaturesUsed []string // optional — Anito features that were key, e.g. ["hot-swap", "watch-mode"]
 }
 
-// probeSSE opens an SSE connection to url and returns (true, nil) as soon as
-// it receives a non-empty event or data line.  It returns (false, err) if the
-// connection fails or the context expires before an event is received.
-func probeSSE(ctx context.Context, url string) (bool, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
-	if err != nil {
-		return false, err
-	}
-	req.Header.Set("Accept", "text/event-stream")
-	req.Header.Set("Cache-Control", "no-cache")
-
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return false, err
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return false, fmt.Errorf("SSE probe: unexpected status %d", resp.StatusCode)
+// SubmitCaseStudy writes a structured draft markdown file to
+// <dataDir>/case-studies/ and returns the file path.
+// Submissions are always written as drafts (draft: true in frontmatter).
+// The developer reviews and publishes via Gomanan when ready.
+func (s *Service) SubmitCaseStudy(req CaseStudyRequest) (string, error) {
+	if req.PainPoint == "" || req.Workflow == "" || req.Outcome == "" {
+		return "", fmt.Errorf("pain_point, workflow, and outcome are required")
 	}
 
-	scanner := bufio.NewScanner(resp.Body)
-	for scanner.Scan() {
-		line := scanner.Text()
-		if strings.HasPrefix(line, "event:") || strings.HasPrefix(line, "data:") {
-			return true, nil
+	dir := filepath.Join(filepath.Dir(s.logDir), "case-studies")
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return "", fmt.Errorf("case-studies: mkdir: %w", err)
+	}
+
+	date := time.Now().Format("2006-01-02")
+	slug := caseStudySlug(req.PainPoint)
+	filename := fmt.Sprintf("%s-%s.md", date, slug)
+	path := filepath.Join(dir, filename)
+
+	content := formatCaseStudy(req, date)
+	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+		return "", fmt.Errorf("case-studies: write: %w", err)
+	}
+
+	log.Printf("[CASE_STUDY] draft written path=%s", path)
+	return path, nil
+}
+
+// caseStudySlug turns a string into a short URL-safe slug (max 50 chars).
+func caseStudySlug(s string) string {
+	s = strings.ToLower(s)
+	var b strings.Builder
+	for _, r := range s {
+		switch {
+		case r >= 'a' && r <= 'z' || r >= '0' && r <= '9':
+			b.WriteRune(r)
+		case r == ' ' || r == '-' || r == '_':
+			if b.Len() > 0 && b.String()[b.Len()-1] != '-' {
+				b.WriteByte('-')
+			}
+		}
+		if b.Len() >= 50 {
+			break
 		}
 	}
-	// scanner.Err() returns nil on clean EOF; either way we got no event.
-	return false, fmt.Errorf("SSE connection closed before first event")
+	return strings.TrimRight(b.String(), "-")
+}
+
+// formatCaseStudy renders a case study as draft frontmatter + markdown body.
+func formatCaseStudy(req CaseStudyRequest, date string) string {
+	var sb strings.Builder
+
+	credit := req.CreditAs
+	if credit == "" {
+		credit = "anonymous"
+	}
+
+	features := ""
+	if len(req.FeaturesUsed) > 0 {
+		features = fmt.Sprintf("\nfeatures_used: [%s]", strings.Join(req.FeaturesUsed, ", "))
+	}
+
+	sb.WriteString("---\n")
+	sb.WriteString(fmt.Sprintf("date: %s\n", date))
+	sb.WriteString("draft: true\n")
+	sb.WriteString("type: case-study\n")
+	sb.WriteString("tags: [case-study]\n")
+	sb.WriteString(fmt.Sprintf("credit_as: \"%s\"\n", credit))
+	sb.WriteString(features)
+	if features != "" {
+		sb.WriteString("\n")
+	}
+	sb.WriteString("---\n\n")
+
+	sb.WriteString("## The Problem\n\n")
+	sb.WriteString(req.PainPoint)
+	sb.WriteString("\n\n")
+
+	sb.WriteString("## Workflow with Anito\n\n")
+	sb.WriteString(req.Workflow)
+	sb.WriteString("\n\n")
+
+	sb.WriteString("## The Outcome\n\n")
+	sb.WriteString(req.Outcome)
+	sb.WriteString("\n")
+
+	if req.StackContext != "" {
+		sb.WriteString(fmt.Sprintf("\n*Stack: %s*\n", req.StackContext))
+	}
+
+	if req.Quote != "" {
+		sb.WriteString(fmt.Sprintf("\n> \"%s\" — %s\n", req.Quote, credit))
+	}
+
+	return sb.String()
+}
+
+// tailLog returns the last n lines of the file at path as a single string.
+// Returns an empty string if the file cannot be opened or is empty.
+func tailLog(path string, n int) string {
+	f, err := os.Open(path)
+	if err != nil {
+		return ""
+	}
+	defer f.Close()
+	var lines []string
+	scanner := bufio.NewScanner(f)
+	for scanner.Scan() {
+		lines = append(lines, scanner.Text())
+		if len(lines) > n {
+			lines = lines[1:]
+		}
+	}
+	return strings.Join(lines, "\n")
 }

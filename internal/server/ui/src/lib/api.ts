@@ -103,6 +103,10 @@ async function apiPost<T>(path: string, body?: unknown): Promise<T> {
   })
 }
 
+async function apiDelete<T>(path: string): Promise<T> {
+  return apiFetch<T>(path, { method: 'DELETE' })
+}
+
 // ── Query options (TanStack Query v5) ─────────────────────────────────────
 
 export const healthQuery = queryOptions({
@@ -173,6 +177,14 @@ export function useServiceAction() {
 export function usePostIssue() {
   return useMutation({
     mutationFn: (issue: Partial<Issue>) => apiPost<{ status: string }>('/issues', issue),
+  })
+}
+
+export function useClearIssues() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: () => apiDelete<{ status: string }>('/issues'),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['issues'] }),
   })
 }
 

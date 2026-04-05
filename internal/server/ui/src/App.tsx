@@ -8,6 +8,7 @@ import { CommandPalette } from '@/components/CommandPalette'
 import { IssuesDrawer }   from '@/components/IssuesDrawer'
 import { RemoveModal }    from '@/components/RemoveModal'
 import { RightPanel }     from '@/components/RightPanel'
+import { Toaster }        from '@/components/Toaster'
 import type { CommandAction } from '@/lib/commands'
 
 // ── Panel tab types ─────────────────────────────────────────────────────────
@@ -296,6 +297,9 @@ export default function App() {
           onClose={() => setRemoveService(null)}
         />
       )}
+
+      {/* Toast notifications for service events */}
+      <Toaster />
     </div>
   )
 }
