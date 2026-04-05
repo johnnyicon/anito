@@ -5,8 +5,10 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -44,6 +46,35 @@ func TestHelperFakeService(t *testing.T) {
 		os.Exit(1)
 	}
 	// Block forever — parent will SIGTERM.
+	select {}
+}
+
+// TestHelperAspnetMockService is invoked as a subprocess helper when
+// TEST_HELPER=aspnet_mock_service. It mimics how ASP.NET Core behaves:
+// it reads ASPNETCORE_HTTP_PORTS (not PORT) and serves /health on that port.
+// This lets us verify Anito's env var injection without needing the .NET SDK.
+func TestHelperAspnetMockService(t *testing.T) {
+	if os.Getenv("TEST_HELPER") != "aspnet_mock_service" {
+		t.Skip("not a subprocess helper")
+	}
+	portStr := os.Getenv("ASPNETCORE_HTTP_PORTS")
+	port, err := strconv.Atoi(portStr)
+	if err != nil || port == 0 {
+		fmt.Fprintf(os.Stderr, "TestHelperAspnetMockService: invalid ASPNETCORE_HTTP_PORTS=%q\n", portStr)
+		os.Exit(1)
+	}
+	mux := http.NewServeMux()
+	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+	srv := &http.Server{
+		Addr:    fmt.Sprintf("localhost:%d", port),
+		Handler: mux,
+	}
+	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+		fmt.Fprintf(os.Stderr, "TestHelperAspnetMockService: ListenAndServe: %v\n", err)
+		os.Exit(1)
+	}
 	select {}
 }
 
@@ -155,6 +186,33 @@ func TestStartInjectsPORTEnv(t *testing.T) {
 		time.Sleep(50 * time.Millisecond)
 	}
 	t.Fatalf("process did not bind to injected PORT %d within 5s: %v", internalPort, lastErr)
+}
+
+// TestStartInjectsASPNETEnvVars verifies that Anito injects ASPNETCORE_HTTP_PORTS
+// and ASPNETCORE_URLS alongside PORT. The mock service reads ASPNETCORE_HTTP_PORTS
+// (not PORT), mimicking ASP.NET Core's default behaviour. If the health check
+// succeeds, the env var was injected and used correctly.
+func TestStartInjectsASPNETEnvVars(t *testing.T) {
+	mgr, reg := newTestManager(t)
+	internalPort := registerAndStart(t, mgr, reg, "aspnet", "aspnet_mock_service")
+
+	addr := fmt.Sprintf("http://localhost:%d/health", internalPort)
+	deadline := time.Now().Add(5 * time.Second)
+	var lastErr error
+	for time.Now().Before(deadline) {
+		resp, err := http.Get(addr) //nolint:noctx
+		if err == nil {
+			resp.Body.Close()
+			if resp.StatusCode == http.StatusOK {
+				return // pass — process bound to ASPNETCORE_HTTP_PORTS
+			}
+			lastErr = fmt.Errorf("status %d", resp.StatusCode)
+		} else {
+			lastErr = err
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	t.Fatalf("ASP.NET mock did not bind to ASPNETCORE_HTTP_PORTS %d within 5s: %v", internalPort, lastErr)
 }
 
 // TestCrashSetsOnCrashCallback starts a crashing subprocess and verifies that
@@ -460,6 +518,169 @@ func TestSplitLines(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// --- MarkDraining positive PID ---
+
+func TestMarkDraining_PositivePID(t *testing.T) {
+	mgr, _ := newTestManager(t)
+	mgr.MarkDraining(12345) // arbitrary non-zero PID
+	mgr.mu.RLock()
+	_, ok := mgr.draining[12345]
+	mgr.mu.RUnlock()
+	if !ok {
+		t.Error("MarkDraining(12345) did not set draining[12345]")
+	}
+}
+
+// --- StopPID ---
+
+// TestStopPID_Running verifies StopPID terminates a running process.
+func TestStopPID_Running(t *testing.T) {
+	mgr, reg := newTestManager(t)
+	_ = registerAndStart(t, mgr, reg, "stoppid", "fake_service")
+
+	pid := mgr.PID("stoppid")
+	if pid == 0 {
+		t.Fatal("expected non-zero PID after Start")
+	}
+
+	// Deregister so Stop doesn't also clean up — we want StopPID to be the actor.
+	mgr.Deregister("stoppid")
+	StopPID(pid) // should not block indefinitely
+}
+
+// --- DrainProc (exported wrapper) ---
+
+// TestDrainProc_NilProcess verifies DrainProc is a no-op for an unstarted cmd.
+func TestDrainProc_NilProcess(t *testing.T) {
+	cmd := &exec.Cmd{} // no Process — cmd.Process is nil
+	err := DrainProc(cmd, nil)
+	if err != nil {
+		t.Errorf("DrainProc with nil Process returned error: %v", err)
+	}
+}
+
+// TestDrainProc_NilDone verifies DrainProc does not panic when done is nil.
+// Uses a process that exits quickly so the path exercises the no-done branch
+// only up to the SIGTERM step (the actual sleep+SIGKILL is skipped because
+// the process exits fast and the function returns early on SIGTERM success).
+func TestDrainProc_NilDone(t *testing.T) {
+	// Use a process that exits immediately so cmd.Process is valid but the
+	// process is already gone when DrainProc runs.
+	cmd := exec.Command("true")
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("cmd.Start: %v", err)
+	}
+	_ = cmd.Wait() // let it finish; Process is still non-nil after Wait
+	// drainProc with nil done: sends SIGTERM (ignored since process is gone).
+	// The function returns without sleeping because the process is already dead.
+	_ = DrainProc(cmd, nil)
+}
+
+// TestDrainProc_WithDone verifies DrainProc works when done is provided.
+func TestDrainProc_WithDone(t *testing.T) {
+	mgr, reg := newTestManager(t)
+	_ = registerAndStart(t, mgr, reg, "drainproc2", "fake_service")
+	_, cmd, done := mgr.Deregister("drainproc2")
+	if cmd == nil || cmd.Process == nil {
+		t.Skip("no process to drain")
+	}
+
+	err := DrainProc(cmd, done)
+	if err != nil {
+		t.Errorf("DrainProc returned error: %v", err)
+	}
+}
+
+// --- Manager.Restart ---
+
+// TestManagerRestart verifies that Restart stops then starts the service.
+func TestManagerRestart(t *testing.T) {
+	mgr, reg := newTestManager(t)
+	registerAndStart(t, mgr, reg, "restart-svc", "fake_service")
+
+	svc, ok := reg.Get("restart-svc")
+	if !ok {
+		t.Fatal("service not in registry")
+	}
+
+	_, err := mgr.Restart(svc)
+	if err != nil {
+		t.Fatalf("Restart returned error: %v", err)
+	}
+	t.Cleanup(func() { _ = mgr.Stop("restart-svc") })
+
+	if !mgr.IsRunning("restart-svc") {
+		t.Error("expected service to be running after Restart")
+	}
+}
+
+// --- buildCmd multi-port ---
+
+// TestBuildCmd_MultiPort verifies that multi-port services get PORT_<NAME> env vars.
+func TestBuildCmd_MultiPort(t *testing.T) {
+	mgr, _ := newTestManager(t)
+	svc := &registry.Service{
+		Name:       "multi-port-svc",
+		Type:       registry.TypeBinary,
+		BinaryPath: "/bin/true",
+		StablePorts: map[string]int{"ws": 7172, "http": 7173},
+	}
+	ports := map[string]int{"ws": 58001, "http": 58002}
+	cmd, logFile, err := mgr.buildCmd(svc, ports)
+	if logFile != nil {
+		logFile.Close()
+	}
+	if err != nil {
+		t.Fatalf("buildCmd returned error: %v", err)
+	}
+	envStr := strings.Join(cmd.Env, " ")
+	if !strings.Contains(envStr, "PORT_WS=58001") && !strings.Contains(envStr, "PORT_WS=58002") {
+		if !strings.Contains(envStr, "PORT_WS=") {
+			t.Errorf("expected PORT_WS in env, got: %s", envStr)
+		}
+	}
+}
+
+// TestBuildCmd_StaticReturnsError verifies buildCmd returns error for static services.
+func TestBuildCmd_StaticReturnsError(t *testing.T) {
+	mgr, _ := newTestManager(t)
+	svc := &registry.Service{
+		Name: "static-svc",
+		Type: registry.TypeStatic,
+	}
+	_, _, err := mgr.buildCmd(svc, map[string]int{"default": 8080})
+	if err == nil {
+		t.Error("expected error for static service")
+	}
+}
+
+// TestBuildCmd_WithEnvFile verifies buildCmd includes env vars from an env file.
+func TestBuildCmd_WithEnvFile(t *testing.T) {
+	mgr, _ := newTestManager(t)
+	envFile := filepath.Join(t.TempDir(), ".env")
+	if err := os.WriteFile(envFile, []byte("MY_VAR=hello\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	svc := &registry.Service{
+		Name:        "envfile-svc",
+		Type:        registry.TypeBinary,
+		BinaryPath:  "/bin/true",
+		EnvFile:     envFile,
+		StablePorts: map[string]int{"default": 8080},
+	}
+	cmd, logFile, err := mgr.buildCmd(svc, map[string]int{"default": 58100})
+	if logFile != nil {
+		logFile.Close()
+	}
+	if err != nil {
+		t.Fatalf("buildCmd returned error: %v", err)
+	}
+	envStr := strings.Join(cmd.Env, " ")
+	if !strings.Contains(envStr, "MY_VAR=hello") {
+		t.Errorf("expected MY_VAR=hello in env, got: %s", envStr)
 	}
 }
 

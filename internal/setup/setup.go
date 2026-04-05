@@ -19,6 +19,7 @@ const (
 	Node    Language = "node"
 	Python  Language = "python"
 	Rust    Language = "rust"
+	DotNet  Language = "dotnet"
 	Unknown Language = "unknown"
 )
 
@@ -109,6 +110,14 @@ func detectLanguage(root string) Language {
 		{"setup.py", Python},
 		{"Cargo.toml", Rust},
 	}
+	// .NET: look for any *.csproj file in the root directory.
+	if entries, err := os.ReadDir(root); err == nil {
+		for _, e := range entries {
+			if !e.IsDir() && filepath.Ext(e.Name()) == ".csproj" {
+				return DotNet
+			}
+		}
+	}
 	for _, c := range checks {
 		if _, err := os.Stat(filepath.Join(root, c.file)); err == nil {
 			return c.lang
@@ -135,6 +144,16 @@ func detectPORTUsage(root string, lang Language) bool {
 	case Rust:
 		patterns = []string{`env::var("PORT")`}
 		exts = []string{".rs"}
+	case DotNet:
+		// Accept both the Anito-injected vars and any manual PORT reading.
+		// Anito injects ASPNETCORE_HTTP_PORTS and ASPNETCORE_URLS automatically,
+		// so a .NET service is contract-compliant without source changes.
+		patterns = []string{
+			`ASPNETCORE_HTTP_PORTS`,
+			`ASPNETCORE_URLS`,
+			`GetEnvironmentVariable("PORT")`,
+		}
+		exts = []string{".cs", ".csproj"}
 	default:
 		patterns = []string{"PORT"}
 		exts = []string{".go", ".js", ".ts", ".py", ".rs"}
@@ -155,8 +174,14 @@ func detectHealthRoute(root string, lang Language) bool {
 		exts = []string{".py"}
 	case Rust:
 		exts = []string{".rs"}
+	case DotNet:
+		// MapHealthChecks is the idiomatic ASP.NET health check registration.
+		exts = []string{".cs"}
 	default:
 		exts = []string{".go", ".js", ".ts", ".py", ".rs"}
+	}
+	if lang == DotNet {
+		return searchFiles(root, exts, []string{`MapHealthChecks`, `AddHealthChecks`})
 	}
 	return searchFiles(root, exts, []string{`"/health"`, `'/health'`})
 }

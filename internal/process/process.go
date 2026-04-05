@@ -294,11 +294,21 @@ func (m *Manager) buildCmd(svc *registry.Service, ports map[string]int) (*exec.C
 		// Also set PORT to the health check port for backward compat with
 		// frameworks that read PORT.
 		hcPort := primaryPortFromMap(ports, svc.HealthCheckPort)
-		cmd.Env = append(cmd.Env, "PORT="+strconv.Itoa(hcPort))
+		portStr := strconv.Itoa(hcPort)
+		cmd.Env = append(cmd.Env, "PORT="+portStr)
+		// ASP.NET Core env vars (ignored by non-.NET runtimes).
+		cmd.Env = append(cmd.Env, "ASPNETCORE_HTTP_PORTS="+portStr)
+		cmd.Env = append(cmd.Env, "ASPNETCORE_URLS=http://localhost:"+portStr)
 	} else {
 		// Single-port: PORT=<ephemeral> (classic behavior).
 		for _, p := range ports {
-			cmd.Env = append(cmd.Env, "PORT="+strconv.Itoa(p))
+			portStr := strconv.Itoa(p)
+			cmd.Env = append(cmd.Env, "PORT="+portStr)
+			// ASP.NET Core reads ASPNETCORE_HTTP_PORTS or ASPNETCORE_URLS
+			// instead of PORT. Injecting these unconditionally is harmless
+			// for non-.NET runtimes — the vars are simply ignored.
+			cmd.Env = append(cmd.Env, "ASPNETCORE_HTTP_PORTS="+portStr)
+			cmd.Env = append(cmd.Env, "ASPNETCORE_URLS=http://localhost:"+portStr)
 		}
 	}
 
