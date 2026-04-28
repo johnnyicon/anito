@@ -1,0 +1,23 @@
+# Coverage floors — minimum acceptable coverage per package.
+# Format: package/path = N   (percentage, no % sign needed)
+#
+# These are FLOORS, not targets. Dropping below a floor fails `make coverage-check`.
+# Raising a floor is a deliberate act: only do it after you've verified the
+# new ceiling is genuinely achievable (see docs/test-coverage.md for ceiling notes).
+#
+# Packages with 0% are entry points (cmd/) or integration-only (mcp/) and are
+# excluded from floor enforcement.
+
+internal/client                         = 90
+internal/config                         = 95
+internal/doctor                         = 85
+internal/issues                         = 85
+internal/notify                         = 95
+internal/process                        = 80
+internal/proxy                          = 90
+internal/receipt                        = 85
+internal/registry                       = 90
+internal/server                         = 65
+internal/service                        = 75
+internal/setup                          = 88
+internal/watcher                        = 80

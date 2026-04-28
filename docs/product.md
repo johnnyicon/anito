@@ -84,7 +84,10 @@ Add `watch:` paths to any service config. Any file write in the watched director
 Services with `watch:` paths restart automatically on unexpected exit. Services without watch paths stay `failed` until you intervene — intentional, so crashes are visible.
 
 ### Dev / stable two-tier workflow
-Run a dev-tier service (`go run`, `pnpm dev`) with `watch:` for instant feedback. Run a stable-tier binary at a separate port for integration testing and dependents. `anito promote` cuts a stable build and deploys it with zero downtime.
+Run a dev-tier service (`go run`, `pnpm dev`) with `watch:` for instant feedback. Run a stable-tier binary at a separate port for integration testing and dependents. Deploy the stable build with `anito deploy` for zero downtime.
+
+### Multi-port services
+A single service can expose multiple named ports (e.g. WebSocket + HTTP API). Each named port gets its own reverse proxy and ephemeral internal port. All ports swap atomically on deploy — zero downtime across all ports. WebSocket upgrades are proxied transparently.
 
 ### Composite app coordination
 For multi-service apps (e.g. Go API + Vite frontend), `anito setup` assigns stable ports to all services, writes a shared `ports.env` address map, generates per-service configs, and patches framework config files (Vite proxy, Next.js rewrites) with `[anito:managed]` blocks. Services know each other's addresses from the start.
@@ -100,6 +103,29 @@ Configurable grace period between proxy swap and SIGTERM. SSE clients and WebSoc
 
 ### `[anito:managed]` source blocks
 Framework config patches (Vite proxy config, etc.) are marked with `// [anito:managed start]` / `// [anito:managed end]` delimiters. Anito owns these blocks — running `anito setup` again regenerates them automatically. Developers should not edit them manually.
+
+---
+
+## Supported stacks
+
+Anito is language-agnostic. If it runs a process, Anito can manage it. These stacks have been tested end-to-end:
+
+| Stack | Port convention | Notes |
+|-------|----------------|-------|
+| **Go** | reads `PORT` from `os.Getenv` | Native — no wrappers needed |
+| **Rust (Axum / Actix)** | reads `PORT` from `std::env::var` | Compiles to a binary — cleanest integration |
+| **Node.js** | reads `PORT` from `process.env` | Native — no wrappers needed |
+| **Rails** | Puma reads `PORT` natively | Needs a startup script that exports `PATH` to the correct Ruby (mise/rbenv) |
+| **FastAPI (Python)** | Uvicorn doesn't read `PORT` | Startup script passes `--port "${PORT}"` to uvicorn |
+| **ASP.NET Core (.NET)** | Kestrel uses `ASPNETCORE_HTTP_PORTS` | Anito injects `ASPNETCORE_HTTP_PORTS` and `ASPNETCORE_URLS` automatically |
+
+**Startup scripts for interpreter-based stacks**
+
+Ruby, Python, and other interpreter-based services need a small `.anito/server.sh` because the Anito daemon runs under launchd with a minimal `PATH` — your shell's `$PATH` (mise, rbenv, pyenv, homebrew) is not inherited. The startup script is where you set `PATH` explicitly or use full binary paths. Anito's `anito_setup` generates this file automatically.
+
+**Known gap — Spring Boot (Java/Kotlin)**
+
+Spring Boot uses `SERVER_PORT` instead of `PORT`. Anito will add automatic `SERVER_PORT` injection (same approach as `ASPNETCORE_HTTP_PORTS`) before v1 ships. In the meantime, point Spring Boot at `PORT` manually via `server.port=${PORT:8080}` in `application.properties`.
 
 ---
 
@@ -144,10 +170,10 @@ Current hypothesis: the CLI + daemon is free and open source. A team plan adds s
 
 ## What's not built yet
 
-See [ideas.md](ideas.md) for parked ideas. Current next priorities:
+See [ideas.md](ideas.md) for the full parked ideas list. Current next priorities:
 
-- **Schema versioning + migration log** — setup-state.json versioning for consuming repos
-- **Pre-commit hook** — auto-bumps schema version and updates migration log on schema changes
-- **`anito setup` for composite apps from CLI** — currently MCP-only; CLI needs a manifest format
-- **Admin SPA write operations** — restart/stop/remove from the browser dashboard
+- **`anito init` CLI scaffolding** — `anito_setup` MCP tool is shipped; CLI equivalent is not
+- **Schema versioning pre-commit hook** — auto-bumps schema version and updates migration log on schema changes
+- **Admin SPA v2 write operations** — restart/stop/remove from the browser dashboard (v1 read-only is shipped)
+- **Native macOS .app distribution** — SwiftUI menu bar shell wrapping the Go binary
 - **Self-healing daemon** — error threshold → agent-driven patch → redeploy cycle

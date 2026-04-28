@@ -1,0 +1,143 @@
+#!/usr/bin/env bash
+# scripts/coverage — run tests with coverage, print a per-package table, and
+# append a timestamped snapshot to .coverage/history.txt.
+#
+# Usage:
+#   make coverage              # run and record
+#   make coverage-check        # run, record, and fail if any floor is missed
+#
+# Options (env vars):
+#   CHECK=1    fail if any package is below its floor (used by coverage-check)
+#   TIMEOUT    go test timeout (default: 120s)
+
+set -euo pipefail
+
+TIMEOUT="${TIMEOUT:-120s}"
+PROFILE="/tmp/anito-coverage.out"
+HISTORY=".coverage/history.txt"
+FLOORS_FILE=".coverage/floors.txt"
+CHECK="${CHECK:-0}"
+
+# ── run tests ────────────────────────────────────────────────────────────────
+
+echo "running tests…"
+go test ./... \
+  -count=1 \
+  -coverprofile="$PROFILE" \
+  -covermode=atomic \
+  -timeout "$TIMEOUT" \
+  2>&1 | grep -E '^(ok|FAIL|---)'
+
+echo ""
+
+# ── per-package table + history + floor check ────────────────────────────────
+# Uses Python (always available on macOS) to parse the coverage profile,
+# computing STATEMENT-WEIGHTED coverage (same metric as `go test -cover`).
+
+COMMIT=$(git rev-parse --short HEAD 2>/dev/null || echo "unknown")
+TIMESTAMP=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
+
+python3 - "$PROFILE" "$HISTORY" "$FLOORS_FILE" "$CHECK" "$COMMIT" "$TIMESTAMP" <<'PYEOF'
+import sys, json, os, re
+from collections import defaultdict
+import subprocess
+
+profile_path, history_path, floors_path, check_mode, commit, ts = sys.argv[1:]
+
+# ── parse the coverage profile directly (statement-weighted) ─────────────────
+# Profile format (one block per line after "mode:"):
+#   github.com/owner/repo/pkg/file.go:startline.col,endline.col num_stmts count
+#
+# num_stmts = statements in this block
+# count     = how many times the block was executed (0 = not covered)
+
+module_prefix = "github.com/johnnyicon/anito/"
+
+pkg_covered = defaultdict(int)   # package short name → covered statements
+pkg_total   = defaultdict(int)   # package short name → total statements
+
+with open(profile_path) as f:
+    for line in f:
+        line = line.strip()
+        if not line or line.startswith("mode:"):
+            continue
+        # split on whitespace: "path:start,end num_stmts count"
+        parts = line.split()
+        if len(parts) != 3:
+            continue
+        file_loc, num_stmts_str, count_str = parts
+        try:
+            num_stmts = int(num_stmts_str)
+            count     = int(count_str)
+        except ValueError:
+            continue
+
+        # extract package path from file path (strip filename)
+        file_path = file_loc.split(":")[0]
+        pkg_full  = "/".join(file_path.split("/")[:-1])  # drop filename
+        pkg       = pkg_full.replace(module_prefix, "", 1) if pkg_full.startswith(module_prefix) else pkg_full
+
+        pkg_total[pkg]   += num_stmts
+        if count > 0:
+            pkg_covered[pkg] += num_stmts
+
+# ── compute per-package percentage ───────────────────────────────────────────
+pkg_pct = {}
+for pkg in sorted(pkg_total):
+    total   = pkg_total[pkg]
+    covered = pkg_covered[pkg]
+    pct     = (covered / total * 100) if total else 0.0
+    pkg_pct[pkg] = round(pct, 1)
+
+# ── print table ──────────────────────────────────────────────────────────────
+print("coverage by package (statement-weighted):")
+print(f"{'package':<50} {'coverage':>10}")
+print(f"{'-'*50} {'-'*10}")
+for pkg, pct in sorted(pkg_pct.items()):
+    print(f"{pkg:<50} {pct:>9.1f}%")
+
+all_total   = sum(pkg_total.values())
+all_covered = sum(pkg_covered.values())
+total_pct   = (all_covered / all_total * 100) if all_total else 0.0
+print()
+print(f"{'TOTAL (testable packages only)':<50} {total_pct:>9.1f}%")
+
+# ── append history ───────────────────────────────────────────────────────────
+os.makedirs(os.path.dirname(history_path), exist_ok=True)
+entry = {"ts": ts, "commit": commit, "total": round(total_pct, 1), "pkgs": pkg_pct}
+with open(history_path, "a") as f:
+    f.write(json.dumps(entry) + "\n")
+print(f"\nsnapshot written → {history_path}")
+
+# ── floor check ──────────────────────────────────────────────────────────────
+if check_mode != "1":
+    sys.exit(0)
+
+if not os.path.exists(floors_path):
+    print(f"\nno floors file at {floors_path}, skipping check")
+    sys.exit(0)
+
+print("\nchecking coverage floors…")
+failures = 0
+with open(floors_path) as f:
+    for raw in f:
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        if "=" not in line:
+            continue
+        pkg, floor_str = line.split("=", 1)
+        pkg   = pkg.strip()
+        floor = float(floor_str.strip().rstrip("%"))
+        actual = pkg_pct.get(pkg, 0.0)
+        if actual < floor:
+            print(f"  FAIL {pkg}: {actual:.1f}% < floor {floor:.0f}%")
+            failures += 1
+        else:
+            print(f"  ok   {pkg}: {actual:.1f}% >= floor {floor:.0f}%")
+
+if failures:
+    print(f"\ncoverage floor check failed ({failures} package(s) below floor)")
+    sys.exit(1)
+print("all floors met.")
+PYEOF

@@ -5,7 +5,7 @@ UI_DIR  := internal/server/ui
 
 PLIST := $(HOME)/Library/LaunchAgents/com.anito.daemon.plist
 
-.PHONY: build install reload start stop release test ui-build ui-dev install-hooks
+.PHONY: build install reload start stop release test coverage coverage-check ui-build ui-dev install-hooks
 
 ## ui-build: compile the React SPA into internal/server/ui/dist
 ui-build:
@@ -48,6 +48,14 @@ release:
 ## test: run all tests
 test:
 	go test ./...
+
+## coverage: run tests, print per-package table, append snapshot to .coverage/history.txt
+coverage:
+	@bash scripts/coverage
+
+## coverage-check: same as coverage but fails if any package is below its floor in .coverage/floors.txt
+coverage-check:
+	@CHECK=1 bash scripts/coverage
 
 ## install-hooks: install git hooks from scripts/ into .git/hooks/
 install-hooks:

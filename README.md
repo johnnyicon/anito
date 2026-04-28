@@ -21,37 +21,16 @@ Anito acts as a **reverse proxy**. It owns the stable port. Your process runs on
 
 ## Install
 
-**1. Build and install the binary**
-
 ```bash
 git clone https://github.com/johnnyicon/anito
 cd anito
-go build -o /usr/local/bin/anito ./cmd/anito/
+go build -o ./anito ./cmd/anito/
+./anito install
 ```
 
-**2. Install the launchd agent (macOS)**
+`anito install` copies the binary to `~/.local/bin/anito`, creates the data directory, writes the launchd plist, and starts the daemon. It runs on `localhost:7700` immediately.
 
-Edit `com.anito.daemon.plist` — replace `YOUR_USERNAME` with your macOS username:
-
-```xml
-<string>/Users/YOUR_USERNAME/.anito/logs/anito.log</string>
-```
-
-Then install:
-
-```bash
-cp com.anito.daemon.plist ~/Library/LaunchAgents/
-launchctl load ~/Library/LaunchAgents/com.anito.daemon.plist
-```
-
-The daemon starts immediately and auto-starts on every login.
-
-**3. Verify it's running**
-
-```bash
-curl http://localhost:7700/health
-# {"status":"ok"}
-```
+See [docs/setup.md](docs/setup.md) for the full setup guide, Makefile commands, day-to-day workflow, and troubleshooting.
 
 ---
 
@@ -154,6 +133,7 @@ type: binary              # binary (default) | static
 
 build: go build -o ./dist/my-service .   # shell command to run before deploy
 output: ./dist/my-service               # path to binary (binary) or dir (static)
+args: []                                # optional — arguments passed to the binary
 
 env_file: .env.local      # optional — KEY=VALUE file loaded at service start
                           # PORT is always injected by Anito; do not set it here
@@ -167,6 +147,12 @@ health_check: /health     # optional — path used to gate proxy swaps
 #   http: 7173
 # health_check_port: ws   # which named port to health-check
 ```
+
+---
+
+## Watch mode
+
+Anito can monitor directories and auto-restart services on file changes with zero downtime. Add `watch:` paths to your config and Anito handles debouncing, health-check gating, and proxy swap automatically. See [docs/setup.md](docs/setup.md) for configuration details.
 
 ---
 

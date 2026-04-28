@@ -2,6 +2,9 @@ package doctor
 
 import (
 	"fmt"
+	"net"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"testing"
@@ -1008,3 +1011,131 @@ func findIssue(issues []Issue, field, severity string) *Issue {
 
 // Ensure the test uses the time import to silence unused import warnings.
 var _ = time.Second
+
+// ---------- detectPortConflict: non-HTTP TCP listener ----------
+
+// TestDetectPortConflict_NonHTTP verifies detectPortConflict returns a
+// "non-HTTP process" message when a raw TCP listener (not HTTP) holds the port.
+func TestDetectPortConflict_NonHTTP(t *testing.T) {
+	l, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("net.Listen: %v", err)
+	}
+	defer l.Close()
+	port := l.Addr().(*net.TCPAddr).Port
+
+	// Accept connections but don't speak HTTP.
+	go func() {
+		for {
+			c, err := l.Accept()
+			if err != nil {
+				return
+			}
+			c.Close()
+		}
+	}()
+
+	result := detectPortConflict(port)
+	if result == "" {
+		t.Error("expected conflict message for non-HTTP listener, got empty string")
+	}
+}
+
+// TestDetectPortConflict_ForeignHTTP verifies detectPortConflict returns a
+// "foreign process" message when an HTTP server without the Anito header holds the port.
+func TestDetectPortConflict_ForeignHTTP(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK) // no X-Anito-Proxy header
+	}))
+	defer ts.Close()
+
+	// httptest.NewServer binds on 127.0.0.1; extract the port.
+	addr := ts.Listener.Addr().(*net.TCPAddr)
+	result := detectPortConflict(addr.Port)
+	if result == "" {
+		t.Error("expected conflict message for foreign HTTP server, got empty string")
+	}
+}
+
+// ---------- checkConfig: worktree path with missing node_modules ----------
+
+// TestCheckConfig_WorktreeMissingNodeModules verifies that checkConfig adds an
+// error issue when the config lives in a worktree path and node_modules is absent.
+func TestCheckConfig_WorktreeMissingNodeModules(t *testing.T) {
+	// Build a path that isWorktreePath() recognises (contains "/worktrees/").
+	base := t.TempDir()
+	wtDir := filepath.Join(base, "worktrees", "agent-test", ".anito")
+	if err := os.MkdirAll(wtDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	// Create a real binary so output-not-found doesn't fire.
+	binPath := filepath.Join(base, "svc-bin")
+	if err := os.WriteFile(binPath, []byte("x"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	// Write package.json in the config's parent dir (the service root).
+	serviceDir := filepath.Dir(wtDir)
+	if err := os.WriteFile(filepath.Join(serviceDir, "package.json"), []byte(`{}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// node_modules is intentionally absent.
+
+	cfgPath := filepath.Join(wtDir, "config.yaml")
+	cfg := fmt.Sprintf("name: wt-svc\nport: 0\ntype: binary\noutput: %s\n", binPath)
+	if err := os.WriteFile(cfgPath, []byte(cfg), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cr := checkConfig(cfgPath, ".anito/config.yaml", base, nil)
+	found := findIssue(cr.Issues, "worktree", "error")
+	if found == nil {
+		t.Error("expected 'worktree' error issue for missing node_modules")
+	}
+}
+
+// TestCheckConfig_WorktreeViteCache verifies that checkConfig adds an info
+// issue when node_modules exists but the Vite cache is also present.
+func TestCheckConfig_WorktreeViteCache(t *testing.T) {
+	base := t.TempDir()
+	wtDir := filepath.Join(base, "worktrees", "agent-test2", ".anito")
+	if err := os.MkdirAll(wtDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	binPath := filepath.Join(base, "svc-bin")
+	if err := os.WriteFile(binPath, []byte("x"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	serviceDir := filepath.Dir(wtDir)
+	if err := os.WriteFile(filepath.Join(serviceDir, "package.json"), []byte(`{}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Create node_modules with enough entries and a .vite cache dir.
+	nmDir := filepath.Join(serviceDir, "node_modules")
+	for i := 0; i < 6; i++ {
+		pkgDir := filepath.Join(nmDir, fmt.Sprintf("pkg%d", i))
+		if err := os.MkdirAll(pkgDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	viteDir := filepath.Join(nmDir, ".vite")
+	if err := os.MkdirAll(viteDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	cfgPath := filepath.Join(wtDir, "config.yaml")
+	cfg := fmt.Sprintf("name: wt-svc2\nport: 0\ntype: binary\noutput: %s\n", binPath)
+	if err := os.WriteFile(cfgPath, []byte(cfg), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cr := checkConfig(cfgPath, ".anito/config.yaml", base, nil)
+	found := findIssue(cr.Issues, "worktree", "info")
+	if found == nil {
+		t.Errorf("expected 'worktree' info issue for Vite cache; got issues: %v", cr.Issues)
+	}
+}

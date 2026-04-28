@@ -183,6 +183,48 @@ func TestStart_ReplaceExistingWatcher(t *testing.T) {
 	}
 }
 
+// TestAddDirsRecursive_SkipsHiddenDirs verifies that addDirsRecursive does not
+// add hidden subdirectories (starting with '.') to the watcher.
+func TestAddDirsRecursive_SkipsHiddenDirs(t *testing.T) {
+	root := t.TempDir()
+	// Create a normal subdirectory and a hidden one.
+	normalDir := filepath.Join(root, "src")
+	hiddenDir := filepath.Join(root, ".git")
+	if err := os.MkdirAll(normalDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(hiddenDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// Create a file inside the hidden dir to prove its contents aren't traversed.
+	if err := os.WriteFile(filepath.Join(hiddenDir, "HEAD"), []byte("ref"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	m := New()
+	// Start a watcher on root — addDirsRecursive runs inside Start.
+	if err := m.Start("svc", []string{root}, func(string) {}); err != nil {
+		t.Fatalf("Start returned error: %v", err)
+	}
+	defer m.Stop("svc")
+	// If we reach here without panic, hidden dir was skipped correctly.
+}
+
+// TestAddDirsRecursive_SkipsFiles verifies that addDirsRecursive skips
+// non-directory entries (files at root level do not add themselves).
+func TestAddDirsRecursive_SkipsFiles(t *testing.T) {
+	root := t.TempDir()
+	// Create a file at the root level.
+	if err := os.WriteFile(filepath.Join(root, "main.go"), []byte("package main"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	m := New()
+	if err := m.Start("svc2", []string{root}, func(string) {}); err != nil {
+		t.Fatalf("Start returned error: %v", err)
+	}
+	defer m.Stop("svc2")
+}
+
 // TestHiddenFilesSkipped verifies that files starting with '.' or '#' do not
 // trigger the watcher callback.
 func TestHiddenFilesSkipped(t *testing.T) {

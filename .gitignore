@@ -11,6 +11,9 @@ example/hello-service/hello-service
 *.test
 *.out
 
+# Coverage — keep history.txt and floors.txt, ignore generated profiles
+/tmp/anito-coverage.out
+
 # OS
 .DS_Store
 

@@ -26,11 +26,15 @@ Anito is a local production service manager for macOS. This document describes w
 
 ### What's coming in v1.x
 
-- **Language/framework expansion** — .NET, Rails, Flutter web, and common stacks tested and documented
 - **Admin SPA write operations** — restart, stop, remove from the browser
 - **Sessions panel** — who's connected, last tool called, session age
 - **Native macOS app** — drag-to-Applications install, menu bar status dot, one-button daemon setup
 - **`anito init` CLI** — terminal equivalent of `anito_setup`, for developers who don't use an AI assistant
+- **Spring Boot (Java/Kotlin)** — `SERVER_PORT` injection (parallel to the `ASPNETCORE_HTTP_PORTS` fix already shipped)
+
+### Shipped in v1.x
+
+- **Language/framework expansion** — Go, Node.js, Rust (Axum), Rails, FastAPI (Python), and ASP.NET Core (.NET) tested, deployed, and documented. Each stack's port convention and startup pattern is captured in `docs/product.md`.
 
 ---
 
