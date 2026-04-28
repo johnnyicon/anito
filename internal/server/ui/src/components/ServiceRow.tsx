@@ -35,7 +35,13 @@ function subtitle(svc: Service): string {
 }
 
 function primaryAddress(svc: Service): string {
-  return `http://localhost:${svc.stable_port}`
+  const host = svc.proxy_bind_address || 'localhost'
+  const formattedHost = host.includes(':') && !host.startsWith('[') ? `[${host}]` : host
+  return `http://${formattedHost}:${svc.stable_port}`
+}
+
+function displayAddress(svc: Service): string {
+  return `${svc.proxy_bind_address || 'localhost'}:${svc.stable_port}`
 }
 
 /** Status styling for the card */
@@ -112,7 +118,7 @@ export function ServiceRow({ service: svc, stale, onOpenLogs, onOpenDetail, onRe
         {/* Address — prominent, mono */}
         <div className="flex items-center gap-2 mb-2">
           <span className="font-mono text-sm text-foreground/80">
-            localhost:{svc.stable_port}
+            {displayAddress(svc)}
           </span>
           {svc.version && (
             <span className="font-mono text-xs text-muted-foreground">{svc.version}</span>

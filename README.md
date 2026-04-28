@@ -126,6 +126,8 @@ name: my-service          # required — unique name across all your services
 port: 3000                # stable port consumers connect to (0 = auto-allocate)
                           # Anito holds this port permanently via its proxy
                           # For multi-port services, use ports: instead (see below)
+proxy_bind_address: localhost  # optional — proxy listener address
+                               # use a Tailscale IP for tailnet access
 
 type: binary              # binary (default) | static
                           # binary: a self-contained executable

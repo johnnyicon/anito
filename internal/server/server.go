@@ -113,6 +113,7 @@ type DeployRequest struct {
 	Args               []string             `json:"args,omitempty"`
 	StablePort         int                  `json:"stable_port,omitempty"`
 	StablePorts        map[string]int       `json:"stable_ports,omitempty"`
+	ProxyBindAddress   string               `json:"proxy_bind_address,omitempty"`
 	HealthCheckPort    string               `json:"health_check_port,omitempty"`
 	EnvFile            string               `json:"env_file,omitempty"`
 	HealthCheck        string               `json:"health_check,omitempty"`
@@ -165,6 +166,7 @@ func (s *Server) handleDeploy(c echo.Context) error {
 		Args:               req.Args,
 		StablePort:         req.StablePort,
 		StablePorts:        req.StablePorts,
+		ProxyBindAddress:   req.ProxyBindAddress,
 		HealthCheckPort:    req.HealthCheckPort,
 		EnvFile:            req.EnvFile,
 		HealthCheck:        req.HealthCheck,

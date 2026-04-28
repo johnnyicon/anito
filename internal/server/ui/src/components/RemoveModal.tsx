@@ -53,7 +53,7 @@ export function RemoveModal({ name, services, onClose }: RemoveModalProps) {
               <p>
                 Port <code className="font-mono rounded bg-muted px-1">:{svc.stable_port}</code> will be
                 released. Any service or agent calling{' '}
-                <code className="font-mono rounded bg-muted px-1">http://localhost:{svc.stable_port}</code>{' '}
+                <code className="font-mono rounded bg-muted px-1">http://{svc.proxy_bind_address || 'localhost'}:{svc.stable_port}</code>{' '}
                 will stop receiving responses.
               </p>
             )}

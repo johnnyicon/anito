@@ -32,6 +32,7 @@ type DeployRequest struct {
 	Args               []string             `json:"args,omitempty"`
 	StablePort         int                  `json:"stable_port"`
 	StablePorts        map[string]int       `json:"stable_ports,omitempty"`
+	ProxyBindAddress   string               `json:"proxy_bind_address,omitempty"`
 	HealthCheckPort    string               `json:"health_check_port,omitempty"`
 	EnvFile            string               `json:"env_file,omitempty"`
 	HealthCheck        string               `json:"health_check,omitempty"`

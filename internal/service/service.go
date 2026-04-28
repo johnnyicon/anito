@@ -31,13 +31,12 @@ import (
 	"github.com/johnnyicon/anito/internal/watcher"
 )
 
-
 const (
-	portRangeStart         = 8100
-	portRangeEnd           = 8200
-	healthCheckInterval    = 200 * time.Millisecond
+	portRangeStart            = 8100
+	portRangeEnd              = 8200
+	healthCheckInterval       = 200 * time.Millisecond
 	defaultHealthCheckTimeout = 15 * time.Second
-	defaultDrainWindow     = 2 * time.Second
+	defaultDrainWindow        = 2 * time.Second
 
 	// DaemonLogName is the reserved name for streaming Anito's own daemon log.
 	// Use it with Logs() / LogStream() — no service registry entry is required.
@@ -130,10 +129,11 @@ type DeployRequest struct {
 	Name               string
 	Version            string // optional semver tag, e.g. "v1.2.3"
 	Type               registry.ServiceType
-	Path               string   // binary path or static dir
-	Args               []string // optional arguments passed to the binary at startup
+	Path               string         // binary path or static dir
+	Args               []string       // optional arguments passed to the binary at startup
 	StablePort         int            // 0 = auto-allocate (backward compat, single port)
 	StablePorts        map[string]int // named ports (takes precedence over StablePort if non-nil)
+	ProxyBindAddress   string         // stable proxy listener address (default: localhost)
 	HealthCheckPort    string         // which named port to health-check
 	EnvFile            string
 	HealthCheck        string
@@ -176,7 +176,7 @@ func (s *Service) Deploy(req DeployRequest) (*registry.Service, error) {
 		req.StablePorts = map[string]int{"default": port}
 	}
 
-	stablePorts, err := s.allocatePorts(req.Name, req.StablePorts)
+	stablePorts, err := s.allocatePorts(req.Name, req.StablePorts, req.ProxyBindAddress)
 	if err != nil {
 		return nil, err
 	}
@@ -206,6 +206,7 @@ func (s *Service) Deploy(req DeployRequest) (*registry.Service, error) {
 		BinaryPath:         req.Path,
 		Args:               req.Args,
 		StablePorts:        stablePorts,
+		ProxyBindAddress:   req.ProxyBindAddress,
 		HealthCheckPort:    req.HealthCheckPort,
 		EnvFile:            req.EnvFile,
 		HealthCheck:        req.HealthCheck,
@@ -221,6 +222,9 @@ func (s *Service) Deploy(req DeployRequest) (*registry.Service, error) {
 		return nil, err
 	}
 	svc, _ = s.reg.Get(req.Name)
+	if err := s.prx.RegisterPortsWithBind(svc.Name, svc.StablePorts, svc.ProxyBindAddress); err != nil {
+		return nil, err
+	}
 
 	if req.Type == registry.TypeStatic {
 		if err := s.prx.SwapStatic(req.Name, req.Path); err != nil {
@@ -522,7 +526,7 @@ func writeReceipt(svc *registry.Service) {
 	e := receipt.Entry{
 		Name:       svc.Name,
 		StablePort: svc.StablePort,
-		Address:    fmt.Sprintf("http://localhost:%d", svc.StablePort),
+		Address:    svc.Address(),
 		BinaryPath: svc.BinaryPath,
 		ConfigPath: svc.ConfigPath,
 		Version:    svc.Version,
@@ -531,10 +535,7 @@ func writeReceipt(svc *registry.Service) {
 	// Multi-port: include all named ports and addresses.
 	if len(svc.StablePorts) > 0 {
 		e.StablePorts = svc.StablePorts
-		e.Addresses = make(map[string]string, len(svc.StablePorts))
-		for name, port := range svc.StablePorts {
-			e.Addresses[name] = fmt.Sprintf("http://localhost:%d", port)
-		}
+		e.Addresses = svc.Addresses()
 	}
 	_ = receipt.Write(e)
 }
@@ -858,7 +859,7 @@ func (s *Service) LogStream(ctx context.Context, name string) (<-chan string, er
 // For backward compat, preferredPort allocates a single "default" port.
 // For multi-port, use ReservePorts instead.
 func (s *Service) Reserve(name string, preferredPort int) (int, error) {
-	ports, err := s.allocatePorts(name, map[string]int{"default": preferredPort})
+	ports, err := s.allocatePorts(name, map[string]int{"default": preferredPort}, registry.DefaultProxyBindAddress)
 	if err != nil {
 		return 0, err
 	}
@@ -880,7 +881,7 @@ func (s *Service) Reserve(name string, preferredPort int) (int, error) {
 
 // ReservePorts claims multiple named stable ports for a service without deploying it.
 func (s *Service) ReservePorts(name string, preferred map[string]int) (map[string]int, error) {
-	ports, err := s.allocatePorts(name, preferred)
+	ports, err := s.allocatePorts(name, preferred, registry.DefaultProxyBindAddress)
 	if err != nil {
 		return nil, err
 	}
@@ -904,10 +905,10 @@ func (s *Service) ReservePorts(name string, preferred map[string]int) (map[strin
 //   - Existing services keep their current ports (redeploy preserves stability).
 //   - New services try preferred first; if unavailable, auto-allocate from range.
 //   - On partial failure, all already-registered ports are rolled back.
-func (s *Service) allocatePorts(name string, preferred map[string]int) (map[string]int, error) {
+func (s *Service) allocatePorts(name string, preferred map[string]int, bindAddress string) (map[string]int, error) {
 	// Preserve ports for existing services.
 	if existing, ok := s.reg.Get(name); ok && len(existing.StablePorts) > 0 {
-		_ = s.prx.RegisterPorts(name, existing.StablePorts) // idempotent
+		_ = s.prx.RegisterPortsWithBind(name, existing.StablePorts, existing.ProxyBindAddress) // idempotent
 		return existing.StablePorts, nil
 	}
 
@@ -915,7 +916,7 @@ func (s *Service) allocatePorts(name string, preferred map[string]int) (map[stri
 	used := s.reg.UsedPorts()
 
 	for portName, pref := range preferred {
-		port, err := s.allocateOnePort(name, portName, pref, used)
+		port, err := s.allocateOnePort(name, portName, pref, used, bindAddress)
 		if err != nil {
 			// Roll back: remove all ports registered in this call.
 			s.prx.RemovePorts(name)
@@ -929,13 +930,13 @@ func (s *Service) allocatePorts(name string, preferred map[string]int) (map[stri
 }
 
 // allocateOnePort allocates a single named port for a service.
-func (s *Service) allocateOnePort(name, portName string, preferred int, used map[int]bool) (int, error) {
+func (s *Service) allocateOnePort(name, portName string, preferred int, used map[int]bool, bindAddress string) (int, error) {
 	if preferred != 0 {
 		if reservedPorts[preferred] {
 			return 0, fmt.Errorf("port %d is reserved by Anito and cannot be assigned to a service", preferred)
 		}
 		if !used[preferred] {
-			if err := s.prx.RegisterPorts(name, map[string]int{portName: preferred}); err == nil {
+			if err := s.prx.RegisterPortsWithBind(name, map[string]int{portName: preferred}, bindAddress); err == nil {
 				return preferred, nil
 			}
 		}
@@ -946,7 +947,7 @@ func (s *Service) allocateOnePort(name, portName string, preferred int, used map
 		if used[port] {
 			continue
 		}
-		if err := s.prx.RegisterPorts(name, map[string]int{portName: port}); err == nil {
+		if err := s.prx.RegisterPortsWithBind(name, map[string]int{portName: port}, bindAddress); err == nil {
 			return port, nil
 		}
 	}
@@ -1019,7 +1020,6 @@ func waitHTTPReady(internalPort int, path string, timeout time.Duration) error {
 	msg += "\nAnito requires your service to expose GET " + path + " → 200 OK and read PORT from the environment."
 	return fmt.Errorf("%s", msg)
 }
-
 
 // CaseStudyRequest is the structured input for a consumer case study submission.
 // Fields are deliberately scoped to exclude product names and proprietary details.

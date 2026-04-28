@@ -362,7 +362,7 @@ func runDeploy(cli *client.Client, configPath string) {
 		if len(cfg.Ports) == 1 {
 			for _, p := range cfg.Ports {
 				if p != 0 {
-					portDesc = fmt.Sprintf("localhost:%d", p)
+					portDesc = registry.AddressFor(cfg.ProxyBindAddress, p)
 				}
 			}
 		} else {
@@ -377,6 +377,7 @@ func runDeploy(cli *client.Client, configPath string) {
 		Type:               registry.ServiceType(cfg.Type),
 		Path:               absOutput,
 		Args:               cfg.Args,
+		ProxyBindAddress:   cfg.ProxyBindAddress,
 		EnvFile:            absEnvFile,
 		HealthCheck:        cfg.HealthCheck,
 		HealthCheckPort:    cfg.HealthCheckPort,
@@ -404,7 +405,7 @@ func runDeploy(cli *client.Client, configPath string) {
 	if svc.Version != "" {
 		versionStr = fmt.Sprintf(" (%s)", svc.Version)
 	}
-	fmt.Printf("✓ %s%s running on localhost:%d\n", svc.Name, versionStr, svc.StablePort)
+	fmt.Printf("✓ %s%s running on %s\n", svc.Name, versionStr, svc.Address())
 }
 
 func runServices(cli *client.Client) {
@@ -455,7 +456,7 @@ func runStatus(cli *client.Client, name string) {
 	fmt.Printf("name:          %s\n", svc.Name)
 	fmt.Printf("version:       %s\n", svc.Version)
 	fmt.Printf("type:          %s\n", svc.Type)
-	fmt.Printf("port:          localhost:%d\n", svc.StablePort)
+	fmt.Printf("port:          %s\n", svc.Address())
 	fmt.Printf("status:        %s\n", svc.Status)
 	if svc.PID > 0 {
 		fmt.Printf("pid:           %d (internal :%d)\n", svc.PID, svc.InternalPort)
@@ -744,18 +745,18 @@ func runDaemon(apiPort, mcpPort int, dataDir string) {
 		}
 		// Register all proxy listeners for this service.
 		if len(svc.StablePorts) > 0 {
-			if err := prx.RegisterPorts(svc.Name, svc.StablePorts); err != nil {
+			if err := prx.RegisterPortsWithBind(svc.Name, svc.StablePorts, svc.ProxyBindAddress); err != nil {
 				log.Printf("warn: could not re-register proxy for %s: %v", svc.Name, err)
 				continue
 			}
 		} else {
-			if err := prx.Register(svc.Name, svc.StablePort); err != nil {
+			if err := prx.RegisterWithBind(svc.Name, svc.StablePort, svc.ProxyBindAddress); err != nil {
 				log.Printf("warn: could not re-register proxy for %s: %v", svc.Name, err)
 				continue
 			}
 		}
 		if svc.Status == registry.StatusRunning {
-			log.Printf("restoring %s on localhost:%d", svc.Name, svc.StablePort)
+			log.Printf("restoring %s on %s", svc.Name, svc.Address())
 			if svc.Type == registry.TypeStatic {
 				if err := prx.SwapStatic(svc.Name, svc.BinaryPath); err != nil {
 					log.Printf("[RESTORE_FAILED] name=%s reason=%v", svc.Name, err)
@@ -847,7 +848,6 @@ func runDaemon(apiPort, mcpPort int, dataDir string) {
 
 	svc := service.New(reg, mgr, prx, logDir, wtch, iss)
 	svc.StartWatchers()
-
 
 	mcpSrv := mcpserver.New(svc, iss, sess, mcpPort)
 	go func() {

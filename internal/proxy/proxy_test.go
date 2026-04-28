@@ -201,6 +201,26 @@ func TestRegisterIdempotent(t *testing.T) {
 	}
 }
 
+func TestRegisterWithBindUsesExplicitAddress(t *testing.T) {
+	m := NewManager()
+	port := freePort(t)
+
+	if err := m.RegisterWithBind("svc", port, "127.0.0.1"); err != nil {
+		t.Fatalf("RegisterWithBind: %v", err)
+	}
+	t.Cleanup(func() { m.Remove("svc") })
+
+	time.Sleep(10 * time.Millisecond)
+
+	_, status, err := get(fmt.Sprintf("http://127.0.0.1:%d/", port))
+	if err != nil {
+		t.Fatalf("GET: %v", err)
+	}
+	if status != http.StatusServiceUnavailable {
+		t.Errorf("status = %d, want %d", status, http.StatusServiceUnavailable)
+	}
+}
+
 // TestRemoveReleasesPort verifies that after Remove(), the port is no longer
 // held by the proxy and can be rebound by a new listener.
 func TestRemoveReleasesPort(t *testing.T) {

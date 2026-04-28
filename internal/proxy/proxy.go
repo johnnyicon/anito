@@ -6,9 +6,12 @@ import (
 	"net/http"
 	"net/http/httputil"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
+
+	"github.com/johnnyicon/anito/internal/registry"
 )
 
 // handlerWrapper is stored in an atomic.Value so it can be swapped safely.
@@ -21,11 +24,12 @@ type handlerWrapper struct {
 // connecting via either loopback family always hit Anito's proxy and not a
 // rogue process that grabbed the IPv6 side first.
 type entry struct {
-	stablePort int
-	listener   net.Listener // 127.0.0.1:port
-	listener6  net.Listener // [::1]:port  — nil if IPv6 unavailable
-	server     *http.Server
-	handler    atomic.Value // stores handlerWrapper
+	stablePort  int
+	bindAddress string
+	listener    net.Listener // 127.0.0.1:port
+	listener6   net.Listener // [::1]:port  — nil if IPv6 unavailable
+	server      *http.Server
+	handler     atomic.Value // stores handlerWrapper
 }
 
 // Manager owns one persistent listener per service port and swaps the upstream atomically.
@@ -56,10 +60,22 @@ func (m *Manager) Register(name string, stablePort int) error {
 	return m.RegisterPorts(name, map[string]int{"default": stablePort})
 }
 
+func (m *Manager) RegisterWithBind(name string, stablePort int, bindAddress string) error {
+	return m.RegisterPortsWithBind(name, map[string]int{"default": stablePort}, bindAddress)
+}
+
 // RegisterPorts creates permanent listeners for all named ports of a service.
 // On partial failure, all already-bound listeners are rolled back.
 // Idempotent for ports already registered.
 func (m *Manager) RegisterPorts(name string, ports map[string]int) error {
+	return m.RegisterPortsWithBind(name, ports, registry.DefaultProxyBindAddress)
+}
+
+func (m *Manager) RegisterPortsWithBind(name string, ports map[string]int, bindAddress string) error {
+	if bindAddress == "" {
+		bindAddress = registry.DefaultProxyBindAddress
+	}
+
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -68,11 +84,31 @@ func (m *Manager) RegisterPorts(name string, ports map[string]int) error {
 
 	for portName, stablePort := range ports {
 		key := entryKey(name, portName)
-		if _, ok := m.entries[key]; ok {
-			continue // already registered
+		if e, ok := m.entries[key]; ok {
+			if e.stablePort == stablePort && e.bindAddress == bindAddress {
+				continue // already registered with the requested listener
+			}
+			l, l6, err := listen(bindAddress, stablePort)
+			if err != nil {
+				return fmt.Errorf("proxy: cannot bind port %d for %q (port %s): %w", stablePort, name, portName, err)
+			}
+			_ = e.server.Close()
+			if e.listener6 != nil {
+				_ = e.listener6.Close()
+			}
+			e.stablePort = stablePort
+			e.bindAddress = bindAddress
+			e.listener = l
+			e.listener6 = l6
+			e.server = serverFor(e)
+			go e.server.Serve(l) //nolint:errcheck
+			if l6 != nil {
+				go e.server.Serve(l6) //nolint:errcheck
+			}
+			continue
 		}
 
-		l, err := net.Listen("tcp4", fmt.Sprintf("127.0.0.1:%d", stablePort))
+		l, l6, err := listen(bindAddress, stablePort)
 		if err != nil {
 			// Roll back all entries created in this call.
 			for _, k := range created {
@@ -86,22 +122,15 @@ func (m *Manager) RegisterPorts(name string, ports map[string]int) error {
 			}
 			return fmt.Errorf("proxy: cannot bind port %d for %q (port %s): %w", stablePort, name, portName, err)
 		}
-		// Best-effort IPv6 bind — don't fail if the system has no IPv6 loopback.
-		l6, _ := net.Listen("tcp6", fmt.Sprintf("[::1]:%d", stablePort))
 
-		e := &entry{stablePort: stablePort, listener: l, listener6: l6}
+		e := &entry{stablePort: stablePort, bindAddress: bindAddress, listener: l, listener6: l6}
 
 		// Placeholder handler until Swap is called after a successful health check.
 		e.handler.Store(handlerWrapper{h: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "service starting", http.StatusServiceUnavailable)
 		})})
 
-		e.server = &http.Server{
-			Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				w.Header().Set("X-Anito-Proxy", "1")
-				e.handler.Load().(handlerWrapper).h.ServeHTTP(w, r)
-			}),
-		}
+		e.server = serverFor(e)
 
 		m.entries[key] = e
 		created = append(created, key)
@@ -111,6 +140,30 @@ func (m *Manager) RegisterPorts(name string, ports map[string]int) error {
 		}
 	}
 	return nil
+}
+
+func serverFor(e *entry) *http.Server {
+	return &http.Server{
+		Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("X-Anito-Proxy", "1")
+			e.handler.Load().(handlerWrapper).h.ServeHTTP(w, r)
+		}),
+	}
+}
+
+func listen(bindAddress string, stablePort int) (net.Listener, net.Listener, error) {
+	if bindAddress == "" || bindAddress == registry.DefaultProxyBindAddress {
+		l, err := net.Listen("tcp4", fmt.Sprintf("127.0.0.1:%d", stablePort))
+		if err != nil {
+			return nil, nil, err
+		}
+		// Best-effort IPv6 bind — don't fail if the system has no IPv6 loopback.
+		l6, _ := net.Listen("tcp6", fmt.Sprintf("[::1]:%d", stablePort))
+		return l, l6, nil
+	}
+	addr := net.JoinHostPort(bindAddress, strconv.Itoa(stablePort))
+	l, err := net.Listen("tcp", addr)
+	return l, nil, err
 }
 
 // Swap atomically points the proxy for name at internalPort (default port).
@@ -246,8 +299,8 @@ func (f *flushProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 type flushWriter struct{ w http.ResponseWriter }
 
-func (fw *flushWriter) Header() http.Header        { return fw.w.Header() }
-func (fw *flushWriter) WriteHeader(code int)        { fw.w.WriteHeader(code) }
+func (fw *flushWriter) Header() http.Header  { return fw.w.Header() }
+func (fw *flushWriter) WriteHeader(code int) { fw.w.WriteHeader(code) }
 func (fw *flushWriter) Write(b []byte) (int, error) {
 	n, err := fw.w.Write(b)
 	if f, ok := fw.w.(http.Flusher); ok {

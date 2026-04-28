@@ -657,6 +657,25 @@ func TestNormalizePortsNoOpWhenBothEmpty(t *testing.T) {
 	if s.StablePort != 0 {
 		t.Errorf("StablePort = %d, want 0", s.StablePort)
 	}
+	if s.ProxyBindAddress != DefaultProxyBindAddress {
+		t.Errorf("ProxyBindAddress = %q, want %q", s.ProxyBindAddress, DefaultProxyBindAddress)
+	}
+}
+
+func TestServiceAddressUsesProxyBindAddress(t *testing.T) {
+	s := &Service{StablePort: 5174, ProxyBindAddress: "100.94.58.29"}
+	s.NormalizePorts()
+	if got := s.Address(); got != "http://100.94.58.29:5174" {
+		t.Errorf("Address = %q, want %q", got, "http://100.94.58.29:5174")
+	}
+}
+
+func TestAddressForIPv6(t *testing.T) {
+	got := AddressFor("fd7a:115c:a1e0::1", 5174)
+	want := "http://[fd7a:115c:a1e0::1]:5174"
+	if got != want {
+		t.Errorf("AddressFor IPv6 = %q, want %q", got, want)
+	}
 }
 
 // TestNormalizePortsMapPreservedWhenAlreadySet verifies that when StablePorts

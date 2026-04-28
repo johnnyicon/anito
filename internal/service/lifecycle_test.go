@@ -78,7 +78,7 @@ func TestStop_WritesStoppedStatus(t *testing.T) {
 		t.Fatalf("reg.Register: %v", err)
 	}
 	// Allocate proxy port so Start can proceed.
-	stablePorts, err := svc.allocatePorts("stop-test", map[string]int{"default": 0})
+	stablePorts, err := svc.allocatePorts("stop-test", map[string]int{"default": 0}, registry.DefaultProxyBindAddress)
 	if err != nil {
 		t.Fatalf("allocatePorts: %v", err)
 	}

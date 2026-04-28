@@ -19,6 +19,7 @@ export interface Service {
   binary_path:    string
   args:           string[]
   stable_port:    number
+  proxy_bind_address?: string
   internal_port:  number
   env_file:       string
   health_check:   string

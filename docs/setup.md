@@ -183,6 +183,16 @@ After every successful `anito deploy`, Anito writes a receipt into the repo's `.
 }
 ```
 
+To expose only Anito's stable proxy port on a tailnet address, add
+`proxy_bind_address` to the service config:
+
+```yaml
+proxy_bind_address: 100.94.58.29
+```
+
+The managed process still receives an internal localhost-only `PORT`; only the
+stable proxy listener moves to `100.94.58.29:<port>`.
+
 **Example (multi-port):**
 ```json
 {

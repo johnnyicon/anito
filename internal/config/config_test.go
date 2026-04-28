@@ -100,6 +100,18 @@ func TestHealthCheckDefault(t *testing.T) {
 	}
 }
 
+func TestProxyBindAddressParsed(t *testing.T) {
+	dir := t.TempDir()
+	path := writeConfig(t, dir, "name: svc\noutput: ./bin/svc\nproxy_bind_address: 100.94.58.29\n")
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.ProxyBindAddress != "100.94.58.29" {
+		t.Errorf("ProxyBindAddress = %q, want %q", cfg.ProxyBindAddress, "100.94.58.29")
+	}
+}
+
 // TestHealthCheckTimeoutParsed verifies that health_check_timeout: 30s is
 // parsed as 30 * time.Second.
 func TestHealthCheckTimeoutParsed(t *testing.T) {

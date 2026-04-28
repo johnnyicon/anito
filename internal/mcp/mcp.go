@@ -138,6 +138,7 @@ type deployInput struct {
 	Args               []string       `json:"args"                  jsonschema:"optional arguments passed to the binary at startup"`
 	StablePort         int            `json:"stable_port"           jsonschema:"preferred stable port for single-port services (0 = auto-allocate). For multi-port services, use stable_ports instead."`
 	StablePorts        map[string]int `json:"stable_ports"          jsonschema:"named ports for multi-port services, e.g. {ws: 7172, http: 7173}. Each port gets its own reverse proxy. The service receives PORT_<NAME> env vars. Mutually exclusive with stable_port for new services."`
+	ProxyBindAddress   string         `json:"proxy_bind_address"    jsonschema:"stable proxy listener address. Default: localhost. Use a Tailscale IP for tailnet-only access."`
 	HealthCheckPort    string         `json:"health_check_port"     jsonschema:"which named port to health-check (default: first port). Only relevant for multi-port services."`
 	Type               string         `json:"type"                  jsonschema:"service type: binary (default) or static"`
 	EnvFile            string         `json:"env_file"              jsonschema:"optional path to a KEY=VALUE env file"`
@@ -150,23 +151,24 @@ type deployInput struct {
 }
 
 type serviceView struct {
-	Name            string            `json:"name"`
-	Version         string            `json:"version,omitempty"`
-	Type            string            `json:"type"`
-	StablePort      int               `json:"stable_port"`                 // primary port (backward compat)
-	PinnedAddress   string            `json:"pinned_address"`              // primary address (backward compat)
-	StablePorts     map[string]int    `json:"stable_ports,omitempty"`      // all named ports
-	PinnedAddresses map[string]string `json:"pinned_addresses,omitempty"`  // all named addresses
-	InternalPort    int               `json:"internal_port,omitempty"`     // primary internal port (backward compat)
-	InternalPorts   map[string]int    `json:"internal_ports,omitempty"`    // all named internal ports
-	HealthCheckPort string            `json:"health_check_port,omitempty"` // which named port is health-checked
-	Status          string            `json:"status"`
-	PID             int               `json:"pid,omitempty"`
-	BinaryPath      string            `json:"binary_path"`
-	ConfigPath      string            `json:"config_path,omitempty"`
-	DeployedAt      time.Time         `json:"deployed_at,omitempty"`
-	UpdatedAt       time.Time         `json:"updated_at,omitempty"`
-	LastDeployedAt  time.Time         `json:"last_deployed_at,omitempty"`
+	Name             string            `json:"name"`
+	Version          string            `json:"version,omitempty"`
+	Type             string            `json:"type"`
+	StablePort       int               `json:"stable_port"`                // primary port (backward compat)
+	PinnedAddress    string            `json:"pinned_address"`             // primary address (backward compat)
+	StablePorts      map[string]int    `json:"stable_ports,omitempty"`     // all named ports
+	PinnedAddresses  map[string]string `json:"pinned_addresses,omitempty"` // all named addresses
+	ProxyBindAddress string            `json:"proxy_bind_address,omitempty"`
+	InternalPort     int               `json:"internal_port,omitempty"`     // primary internal port (backward compat)
+	InternalPorts    map[string]int    `json:"internal_ports,omitempty"`    // all named internal ports
+	HealthCheckPort  string            `json:"health_check_port,omitempty"` // which named port is health-checked
+	Status           string            `json:"status"`
+	PID              int               `json:"pid,omitempty"`
+	BinaryPath       string            `json:"binary_path"`
+	ConfigPath       string            `json:"config_path,omitempty"`
+	DeployedAt       time.Time         `json:"deployed_at,omitempty"`
+	UpdatedAt        time.Time         `json:"updated_at,omitempty"`
+	LastDeployedAt   time.Time         `json:"last_deployed_at,omitempty"`
 }
 
 // setupInput is the unified input for anito_setup.
@@ -182,7 +184,7 @@ type setupInput struct {
 // mode is either 'single' (one service inspected) or 'composite' (multi-service coordinated).
 // In both modes, generated_files contains everything to write and instructions is the action list.
 type setupResult struct {
-	Mode    string `json:"mode"`     // "single" | "composite"
+	Mode     string `json:"mode"` // "single" | "composite"
 	RepoPath string `json:"repo_path"`
 
 	// Single-service inspection results (mode: single)
@@ -402,6 +404,7 @@ func (s *Server) registerTools(srv *sdkmcp.Server) {
 			Args:               in.Args,
 			StablePort:         in.StablePort,
 			StablePorts:        in.StablePorts,
+			ProxyBindAddress:   in.ProxyBindAddress,
 			HealthCheckPort:    in.HealthCheckPort,
 			EnvFile:            in.EnvFile,
 			HealthCheck:        in.HealthCheck,
@@ -522,12 +525,12 @@ func (s *Server) registerTools(srv *sdkmcp.Server) {
 				Addresses:   make(map[string]string, len(ports)),
 			}
 			for name, port := range ports {
-				out.Addresses[name] = fmt.Sprintf("http://localhost:%d", port)
+				out.Addresses[name] = registry.AddressFor(registry.DefaultProxyBindAddress, port)
 			}
 			// Set primary port for backward compat.
 			for _, p := range ports {
 				out.StablePort = p
-				out.Address = fmt.Sprintf("http://localhost:%d", p)
+				out.Address = registry.AddressFor(registry.DefaultProxyBindAddress, p)
 				break
 			}
 			return nil, out, nil
@@ -544,7 +547,7 @@ func (s *Server) registerTools(srv *sdkmcp.Server) {
 		return nil, reserveOutput{
 			Name:       in.Name,
 			StablePort: port,
-			Address:    fmt.Sprintf("http://localhost:%d", port),
+			Address:    registry.AddressFor(registry.DefaultProxyBindAddress, port),
 		}, nil
 	})
 
@@ -586,9 +589,9 @@ func (s *Server) registerTools(srv *sdkmcp.Server) {
 				return nil, setupResult{}, err
 			}
 			out := setupResult{
-				Mode:        "composite",
-				RepoPath:    in.Path,
-				Allocations: map[string]int(result.Allocations),
+				Mode:         "composite",
+				RepoPath:     in.Path,
+				Allocations:  map[string]int(result.Allocations),
 				Instructions: result.Instructions,
 			}
 			for _, f := range result.GeneratedFiles {
@@ -804,27 +807,28 @@ func (s *Server) registerTools(srv *sdkmcp.Server) {
 
 func toView(svc *registry.Service) serviceView {
 	v := serviceView{
-		Name:            svc.Name,
-		Version:         svc.Version,
-		Type:            string(svc.Type),
-		StablePort:      svc.StablePort,
-		PinnedAddress:   fmt.Sprintf("http://localhost:%d", svc.StablePort),
-		InternalPort:    svc.InternalPort,
-		HealthCheckPort: svc.HealthCheckPort,
-		Status:          string(svc.Status),
-		PID:             svc.PID,
-		BinaryPath:      svc.BinaryPath,
-		ConfigPath:      svc.ConfigPath,
-		DeployedAt:      svc.DeployedAt,
-		UpdatedAt:       svc.UpdatedAt,
-		LastDeployedAt:  svc.LastDeployedAt,
+		Name:             svc.Name,
+		Version:          svc.Version,
+		Type:             string(svc.Type),
+		StablePort:       svc.StablePort,
+		PinnedAddress:    svc.Address(),
+		ProxyBindAddress: svc.ProxyBindAddress,
+		InternalPort:     svc.InternalPort,
+		HealthCheckPort:  svc.HealthCheckPort,
+		Status:           string(svc.Status),
+		PID:              svc.PID,
+		BinaryPath:       svc.BinaryPath,
+		ConfigPath:       svc.ConfigPath,
+		DeployedAt:       svc.DeployedAt,
+		UpdatedAt:        svc.UpdatedAt,
+		LastDeployedAt:   svc.LastDeployedAt,
 	}
 	// Multi-port: include all named ports and addresses.
 	if len(svc.StablePorts) > 0 {
 		v.StablePorts = svc.StablePorts
 		v.PinnedAddresses = make(map[string]string, len(svc.StablePorts))
 		for name, port := range svc.StablePorts {
-			v.PinnedAddresses[name] = fmt.Sprintf("http://localhost:%d", port)
+			v.PinnedAddresses[name] = registry.AddressFor(svc.ProxyBindAddress, port)
 		}
 	}
 	if len(svc.InternalPorts) > 0 {

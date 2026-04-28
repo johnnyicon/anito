@@ -76,7 +76,7 @@ export function ServiceDetailPanel({ name, services, onClose, onOpenLogs, onRemo
             <Row label="type"    value={live.type} />
             <Row label="status"  value={live.status} />
             <Row label="restart" value={live.restart_policy || 'on-watch'} />
-            <Row label="port"    value={`:${live.stable_port}`} mono />
+            <Row label="port"    value={`${live.proxy_bind_address || 'localhost'}:${live.stable_port}`} mono />
           </Section>
 
           {/* 2. Source */}

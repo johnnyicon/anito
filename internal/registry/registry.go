@@ -3,6 +3,7 @@ package registry
 import (
 	"encoding/json"
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 	"sync"
@@ -17,6 +18,8 @@ const (
 	TypeStatic ServiceType = "static" // SPA / static files; Anito serves them directly
 )
 
+const DefaultProxyBindAddress = "localhost"
+
 // ServiceStatus reflects the current runtime state.
 type ServiceStatus string
 
@@ -30,22 +33,23 @@ const (
 // StartEvent records a single start attempt for a service.
 type StartEvent struct {
 	StartedAt time.Time     `json:"started_at"`
-	ExitCode  int           `json:"exit_code"`  // -1 if still running
-	Duration  time.Duration `json:"duration"`   // 0 if still running
+	ExitCode  int           `json:"exit_code"` // -1 if still running
+	Duration  time.Duration `json:"duration"`  // 0 if still running
 }
 
 // Service is a registered service entry.
 type Service struct {
-	Name         string        `json:"name"`
-	Type         ServiceType   `json:"type"`
-	Version      string        `json:"version,omitempty"`       // optional semantic version tag, e.g. "v1.2.3"
-	ConfigPath   string        `json:"config_path,omitempty"`   // absolute path to the .anito/config.yaml that produced this deploy
-	BinaryPath   string        `json:"binary_path"`             // binary path (TypeBinary) or static dir (TypeStatic)
-	Args         []string      `json:"args,omitempty"`          // optional arguments passed to the binary
-	StablePort   int           `json:"stable_port"`             // primary stable port (backward compat); see StablePorts for multi-port
-	InternalPort int           `json:"internal_port,omitempty"` // primary ephemeral port (backward compat); see InternalPorts for multi-port
-	EnvFile      string        `json:"env_file,omitempty"`
-	HealthCheck  string        `json:"health_check"` // path, e.g. "/health"
+	Name             string      `json:"name"`
+	Type             ServiceType `json:"type"`
+	Version          string      `json:"version,omitempty"`            // optional semantic version tag, e.g. "v1.2.3"
+	ConfigPath       string      `json:"config_path,omitempty"`        // absolute path to the .anito/config.yaml that produced this deploy
+	BinaryPath       string      `json:"binary_path"`                  // binary path (TypeBinary) or static dir (TypeStatic)
+	Args             []string    `json:"args,omitempty"`               // optional arguments passed to the binary
+	StablePort       int         `json:"stable_port"`                  // primary stable port (backward compat); see StablePorts for multi-port
+	InternalPort     int         `json:"internal_port,omitempty"`      // primary ephemeral port (backward compat); see InternalPorts for multi-port
+	ProxyBindAddress string      `json:"proxy_bind_address,omitempty"` // stable proxy listener address (default: localhost)
+	EnvFile          string      `json:"env_file,omitempty"`
+	HealthCheck      string      `json:"health_check"` // path, e.g. "/health"
 
 	// Multi-port support: named ports for services that bind multiple ports.
 	// Single-port services have one entry with key "default".
@@ -54,21 +58,21 @@ type Service struct {
 	InternalPorts   map[string]int `json:"internal_ports,omitempty"`    // name → ephemeral port
 	HealthCheckPort string         `json:"health_check_port,omitempty"` // which named port to health-check (default: "default" or first key)
 
-	WatchPaths          []string      `json:"watch_paths,omitempty"`           // directories to watch for file changes
-	DrainWindow         time.Duration `json:"drain_window,omitempty"`          // grace period between proxy swap and SIGTERM to old process
-	HealthCheckTimeout  time.Duration `json:"health_check_timeout,omitempty"`  // how long to wait for /health → 200 (0 = use default 15s)
-	RestartPolicy       string        `json:"restart_policy,omitempty"`        // "always" | "on-watch" | "never" (default: "on-watch")
-	Status              ServiceStatus `json:"status"`
-	PID          int           `json:"pid,omitempty"`
-	DeployedAt   time.Time     `json:"deployed_at"`
-	UpdatedAt    time.Time     `json:"updated_at"`
-	LastDeployedAt time.Time   `json:"last_deployed_at,omitzero"`
+	WatchPaths         []string      `json:"watch_paths,omitempty"`          // directories to watch for file changes
+	DrainWindow        time.Duration `json:"drain_window,omitempty"`         // grace period between proxy swap and SIGTERM to old process
+	HealthCheckTimeout time.Duration `json:"health_check_timeout,omitempty"` // how long to wait for /health → 200 (0 = use default 15s)
+	RestartPolicy      string        `json:"restart_policy,omitempty"`       // "always" | "on-watch" | "never" (default: "on-watch")
+	Status             ServiceStatus `json:"status"`
+	PID                int           `json:"pid,omitempty"`
+	DeployedAt         time.Time     `json:"deployed_at"`
+	UpdatedAt          time.Time     `json:"updated_at"`
+	LastDeployedAt     time.Time     `json:"last_deployed_at,omitzero"`
 
 	// Runtime observability fields (set by service layer, persisted to registry).
 	LastStartedAt time.Time    `json:"last_started_at,omitzero"` // when the current (or last) process started
-	CrashAttempts int          `json:"crash_attempts,omitempty"`  // number of restart attempts in current crash loop
-	GaveUp        bool         `json:"gave_up,omitempty"`         // true if crash backoff hit max attempts
-	StartHistory  []StartEvent `json:"start_history,omitempty"`   // ring buffer, last 10 starts
+	CrashAttempts int          `json:"crash_attempts,omitempty"` // number of restart attempts in current crash loop
+	GaveUp        bool         `json:"gave_up,omitempty"`        // true if crash backoff hit max attempts
+	StartHistory  []StartEvent `json:"start_history,omitempty"`  // ring buffer, last 10 starts
 }
 
 // NormalizePorts ensures StablePorts/InternalPorts maps are populated from
@@ -84,6 +88,9 @@ func (s *Service) NormalizePorts() {
 	}
 	// Downgrade: map → singular (keep backward compat fields in sync)
 	s.syncSingularFromMap()
+	if s.ProxyBindAddress == "" {
+		s.ProxyBindAddress = DefaultProxyBindAddress
+	}
 }
 
 // syncSingularFromMap keeps StablePort/InternalPort in sync with the maps.
@@ -107,6 +114,28 @@ func (s *Service) PrimaryInternalPort() int {
 // IsMultiPort returns true if the service has more than one named port.
 func (s *Service) IsMultiPort() bool {
 	return len(s.StablePorts) > 1
+}
+
+func (s *Service) Address() string {
+	return AddressFor(s.ProxyBindAddress, s.StablePort)
+}
+
+func (s *Service) Addresses() map[string]string {
+	if len(s.StablePorts) == 0 {
+		return nil
+	}
+	out := make(map[string]string, len(s.StablePorts))
+	for name, port := range s.StablePorts {
+		out[name] = AddressFor(s.ProxyBindAddress, port)
+	}
+	return out
+}
+
+func AddressFor(bindAddress string, port int) string {
+	if bindAddress == "" {
+		bindAddress = DefaultProxyBindAddress
+	}
+	return "http://" + net.JoinHostPort(bindAddress, fmt.Sprint(port))
 }
 
 func primaryPort(ports map[string]int, healthCheckPort string) int {
@@ -208,6 +237,9 @@ func (r *Registry) Register(s *Service) error {
 			s.StablePorts = existing.StablePorts
 		}
 		s.StablePort = existing.StablePort
+		if s.ProxyBindAddress == "" {
+			s.ProxyBindAddress = existing.ProxyBindAddress
+		}
 		s.DeployedAt = existing.DeployedAt
 	} else {
 		s.DeployedAt = time.Now()

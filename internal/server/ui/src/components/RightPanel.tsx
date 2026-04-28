@@ -185,7 +185,7 @@ function DetailView({ name, services, onOpenLogs, onRemove }: {
         <Section title="Identity">
           <Row label="Type" value={live.type} />
           <Row label="Status" value={live.status} />
-          <Row label="Port" value={`:${live.stable_port}`} mono />
+          <Row label="Port" value={`${live.proxy_bind_address || 'localhost'}:${live.stable_port}`} mono />
           {live.stable_ports && Object.keys(live.stable_ports).length > 1 && (
             <Row label="Ports" value={Object.entries(live.stable_ports).map(([n, p]) => `${n}:${p}`).join(', ')} mono />
           )}
