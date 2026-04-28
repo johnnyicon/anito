@@ -149,11 +149,12 @@ Set up a repo for Anito. Works for both single-service repos and composite apps 
 
 **Composite app (multiple services that talk to each other):** also provide `services` and `relationships`. Assigns stable ports to all services, generates `.anito/ports.env` (shared address map), per-service config files, dev wrapper scripts, and `[anito:managed]` source patches for frameworks that need them (Vite proxy config, etc.).
 
-In both modes, `generated_files` contains every file to write and `instructions` is the ordered action list.
+By default this is a dry-run planning tool: `generated_files` contains every file to write and `instructions` is the ordered action list. Pass `apply: true` when you want Anito to write generated files and reserve ports itself.
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
 | `path` | string | yes | Absolute path to the repo root |
+| `apply` | bool | no | Default `false`. If `true`, Anito writes generated files, reserves stable ports in the registry, and safely replaces existing `[anito:managed]` source blocks. |
 | `services` | array | no | **Composite only.** Each: `{ name, path, preferred_port? }`. Omit for single-service repos. |
 | `relationships` | array | no | **Composite only.** Each: `{ from, to, proxy_path? }`. Drives Vite proxy config generation. |
 
@@ -163,12 +164,16 @@ Returns:
 |-------|-------------|-------------|
 | `mode` | always | `"single"` or `"composite"` |
 | `issues` | single | Contract violations: missing PORT, missing /health, etc. |
-| `allocations` | composite | `{ name: port }` — assigned stable port per service |
+| `allocations` | apply or composite | `{ name: port }` — assigned stable port per service |
 | `generated_files` | always | Files to write into the repo (config.yaml, ports.env, wrapper scripts) |
 | `source_patches` | composite | `[anito:managed]` blocks to apply to `vite.config.ts` etc. |
 | `instructions` | always | Ordered action list |
+| `applied` | apply | `true` when files/registry changes were applied |
+| `applied_files` | apply | Relative paths written by Anito |
+| `applied_patches` | apply | Source files where an existing managed block was replaced |
+| `unapplied_patches` | apply | Source patches Anito did not apply because no existing managed block was found |
 
-**`[anito:managed]` blocks** are delimited by `// [anito:managed start]` / `// [anito:managed end]` comments. These blocks are owned by Anito — do not edit them manually. Run `anito setup` again to regenerate.
+**`[anito:managed]` blocks** are delimited by `// [anito:managed start]` / `// [anito:managed end]` comments. These blocks are owned by Anito — do not edit them manually. With `apply: true`, Anito only auto-replaces source patches when those markers already exist. New source integration patches are returned in `unapplied_patches` so the coding agent can apply them with normal code-editing context.
 
 ---
 
@@ -333,10 +338,11 @@ anito_logs(name="~daemon", lines=50)
 
 **Set up a single-service repo:**
 ```
-result = anito_setup(path="/abs/path/to/my-api")
+result = anito_setup(path="/abs/path/to/my-api", apply=true)
 # result.mode == "single"
 # result.issues → any contract violations to fix
-# result.generated_files[0] → .anito/config.yaml content to write
+# result.applied_files → [".anito/config.yaml"]
+# result.allocations → { "my-api": 8100 }
 # follow result.instructions
 ```
 
@@ -344,6 +350,7 @@ result = anito_setup(path="/abs/path/to/my-api")
 ```
 result = anito_setup(
   path="/abs/path/to/my-app",
+  apply=true,
   services=[
     { name="my-api", path="/abs/path/to/my-app" },
     { name="my-web", path="/abs/path/to/my-app/apps/web" }
@@ -354,11 +361,9 @@ result = anito_setup(
 )
 # result.mode == "composite"
 # result.allocations → { "my-api": 8100, "my-web": 8101 }
-# result.generated_files → ports.env, config yamls, wrapper scripts — write them all
-# result.source_patches → [anito:managed] blocks for vite.config.ts etc.
-# follow result.instructions, then:
-anito_reserve(name="my-api", preferred_port=8100)   # lock ports
-anito_reserve(name="my-web", preferred_port=8101)
+# result.applied_files → ports.env, config yamls, wrapper scripts
+# result.unapplied_patches → source patches the agent still needs to apply if no managed block existed
+# ports are already reserved when apply=true
 anito_deploy(name="my-api", path="/abs/path/to/binary", env_file=".anito/ports.env")
 anito_deploy(name="my-web", path=".anito/my-web-dev.sh", env_file=".anito/ports.env")
 # my-api → http://localhost:8100 (permanent)

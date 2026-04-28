@@ -14,6 +14,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"strings"
 	"time"
 
 	sdkmcp "github.com/modelcontextprotocol/go-sdk/mcp"
@@ -176,6 +177,7 @@ type serviceView struct {
 // For a composite app: also provide Services and Relationships.
 type setupInput struct {
 	Path          string          `json:"path"          jsonschema:"absolute path to the repo root to inspect or coordinate"`
+	Apply         bool            `json:"apply"         jsonschema:"if true, Anito writes generated files, safely applies existing managed source blocks, and reserves ports. Default false returns a dry-run plan."`
 	Services      []coordinateSvc `json:"services"      jsonschema:"for composite apps only: list each service with its name, path, and optional preferred_port. Omit for single-service repos — anito_setup will inspect the repo at Path automatically."`
 	Relationships []coordinateRel `json:"relationships" jsonschema:"for composite apps only: which services communicate with each other. Each entry drives proxy config generation (e.g. Vite proxy) and env var injection."`
 }
@@ -199,9 +201,13 @@ type setupResult struct {
 	Allocations map[string]int `json:"allocations,omitempty"` // service name → stable port
 
 	// Shared in both modes: files to write + source patches + action list
-	GeneratedFiles []coordinateFile  `json:"generated_files,omitempty"`
-	SourcePatches  []coordinatePatch `json:"source_patches,omitempty"`
-	Instructions   []string          `json:"instructions"`
+	GeneratedFiles   []coordinateFile  `json:"generated_files,omitempty"`
+	SourcePatches    []coordinatePatch `json:"source_patches,omitempty"`
+	Instructions     []string          `json:"instructions"`
+	Applied          bool              `json:"applied,omitempty"`
+	AppliedFiles     []string          `json:"applied_files,omitempty"`
+	AppliedPatches   []string          `json:"applied_patches,omitempty"`
+	UnappliedPatches []string          `json:"unapplied_patches,omitempty"`
 }
 
 type setupIssue struct {
@@ -560,8 +566,9 @@ func (s *Server) registerTools(srv *sdkmcp.Server) {
 			"Assigns stable ports to all services, generates .anito/ports.env (shared address map), " +
 			"per-service config files, dev wrapper scripts, and [anito:managed] source patches for " +
 			"frameworks that need them (Vite proxy config, Next.js rewrites, etc.). " +
-			"In both modes, generated_files contains every file to write and instructions is the action list. " +
-			"After setup, call anito_reserve for each service to lock ports, then anito_deploy to start them. " +
+			"Default is dry-run: generated_files contains every file to write and instructions is the action list. " +
+			"If apply=true, Anito writes generated files, reserves ports in the registry, and safely replaces existing managed source blocks. " +
+			"After setup, call anito_deploy to start services. " +
 			"One-time scaffolding only. If .anito/config.yaml already exists, call anito_deploy instead.",
 	}, func(ctx context.Context, req *sdkmcp.CallToolRequest, in setupInput) (*sdkmcp.CallToolResult, setupResult, error) {
 		// --- composite mode ---
@@ -569,10 +576,16 @@ func (s *Server) registerTools(srv *sdkmcp.Server) {
 			log.Printf("[MCP] tool=anito_setup mode=composite path=%s services=%d", in.Path, len(in.Services))
 			specs := make([]setup.ServiceSpec, len(in.Services))
 			for i, svc := range in.Services {
+				preferredPort := svc.PreferredPort
+				if preferredPort == 0 {
+					if existing, err := s.svc.Status(svc.Name); err == nil {
+						preferredPort = existing.StablePort
+					}
+				}
 				specs[i] = setup.ServiceSpec{
 					Name:          svc.Name,
 					Path:          svc.Path,
-					PreferredPort: svc.PreferredPort,
+					PreferredPort: preferredPort,
 				}
 			}
 			rels := make([]setup.Relationship, len(in.Relationships))
@@ -602,6 +615,13 @@ func (s *Server) registerTools(srv *sdkmcp.Server) {
 					RelPath: p.RelPath, Marker: p.Marker, Block: p.Block, Instruction: p.Instruction,
 				})
 			}
+			if in.Apply {
+				if err := s.applySetup(&out); err != nil {
+					log.Printf("[MCP] tool=anito_setup mode=composite path=%s apply error=%q", in.Path, err)
+					s.logErr("anito_setup", in, err)
+					return nil, setupResult{}, err
+				}
+			}
 			return nil, out, nil
 		}
 
@@ -610,6 +630,11 @@ func (s *Server) registerTools(srv *sdkmcp.Server) {
 		result, err := setup.Inspect(in.Path)
 		if err != nil {
 			log.Printf("[MCP] tool=anito_setup mode=single path=%s error=%q", in.Path, err)
+			return nil, setupResult{}, err
+		}
+		if in.Apply && result.HasAnitoConfig {
+			err := fmt.Errorf("%s already has .anito/config.yaml; call anito_deploy or anito_doctor instead of applying setup", result.RepoPath)
+			s.logErr("anito_setup", in, err)
 			return nil, setupResult{}, err
 		}
 		issues := make([]setupIssue, len(result.Issues))
@@ -630,10 +655,29 @@ func (s *Server) registerTools(srv *sdkmcp.Server) {
 		// Surface the suggested config as a generated file so the LLM can
 		// write it directly — same pattern as composite mode.
 		if result.SuggestedConfig != "" {
+			content := result.SuggestedConfig
+			if in.Apply {
+				port, err := s.svc.Reserve(result.ServiceName, 0)
+				if err != nil {
+					log.Printf("[MCP] tool=anito_setup mode=single path=%s reserve error=%q", in.Path, err)
+					s.logErr("anito_setup", in, err)
+					return nil, setupResult{}, err
+				}
+				out.Allocations = map[string]int{result.ServiceName: port}
+				content = strings.Replace(content, "# port: 3000  # omit to auto-allocate from 8100-8200", fmt.Sprintf("port: %d", port), 1)
+				out.Instructions = append(out.Instructions, fmt.Sprintf("✓ Reserved stable port %d for %s.", port, result.ServiceName))
+			}
 			out.GeneratedFiles = append(out.GeneratedFiles, coordinateFile{
 				RelPath: ".anito/config.yaml",
-				Content: result.SuggestedConfig,
+				Content: content,
 			})
+		}
+		if in.Apply {
+			if err := s.applySetup(&out); err != nil {
+				log.Printf("[MCP] tool=anito_setup mode=single path=%s apply error=%q", in.Path, err)
+				s.logErr("anito_setup", in, err)
+				return nil, setupResult{}, err
+			}
 		}
 		return nil, out, nil
 	})
