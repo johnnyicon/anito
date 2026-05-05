@@ -28,6 +28,7 @@ import (
 	"github.com/johnnyicon/anito/internal/proxy"
 	"github.com/johnnyicon/anito/internal/receipt"
 	"github.com/johnnyicon/anito/internal/registry"
+	"github.com/johnnyicon/anito/internal/shellcmd"
 	"github.com/johnnyicon/anito/internal/watcher"
 )
 
@@ -662,9 +663,7 @@ func (s *Service) BuildLog(name string) (string, error) {
 	}
 	defer logFile.Close()
 
-	parts := strings.Fields(cfg.Build)
-	cmd := exec.Command(parts[0], parts[1:]...)
-	cmd.Dir = filepath.Dir(svc.ConfigPath)
+	cmd := shellcmd.Command(cfg.Build, shellcmd.BuildDir(svc.ConfigPath))
 	cmd.Stdout = logFile
 	cmd.Stderr = logFile
 

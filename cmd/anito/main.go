@@ -24,6 +24,7 @@ import (
 	"github.com/johnnyicon/anito/internal/service"
 	"github.com/johnnyicon/anito/internal/sessions"
 	"github.com/johnnyicon/anito/internal/setup"
+	"github.com/johnnyicon/anito/internal/shellcmd"
 	"github.com/johnnyicon/anito/internal/watcher"
 )
 
@@ -348,8 +349,7 @@ func runDeploy(cli *client.Client, configPath string) {
 
 	if cfg.Build != "" {
 		fmt.Printf("building %s...\n", cfg.Name)
-		parts := strings.Fields(cfg.Build)
-		cmd := exec.Command(parts[0], parts[1:]...)
+		cmd := shellcmd.Command(cfg.Build, shellcmd.BuildDir(absConfig))
 		cmd.Stdout = os.Stdout
 		cmd.Stderr = os.Stderr
 		if err := cmd.Run(); err != nil {
@@ -372,20 +372,24 @@ func runDeploy(cli *client.Client, configPath string) {
 	fmt.Printf("deploying %s → %s...\n", cfg.Name, portDesc)
 
 	req := client.DeployRequest{
-		Name:               cfg.Name,
-		Version:            cfg.Version,
-		Type:               registry.ServiceType(cfg.Type),
-		Path:               absOutput,
-		Args:               cfg.Args,
-		ProxyBindAddress:   cfg.ProxyBindAddress,
-		EnvFile:            absEnvFile,
-		HealthCheck:        cfg.HealthCheck,
-		HealthCheckPort:    cfg.HealthCheckPort,
-		WatchPaths:         cfg.Watch,
-		DrainWindow:        cfg.DrainWindow,
-		HealthCheckTimeout: cfg.HealthCheckTimeout,
-		RestartPolicy:      cfg.RestartPolicy,
-		ConfigPath:         absConfig,
+		Name:             cfg.Name,
+		Version:          cfg.Version,
+		Type:             registry.ServiceType(cfg.Type),
+		Path:             absOutput,
+		Args:             cfg.Args,
+		ProxyBindAddress: cfg.ProxyBindAddress,
+		EnvFile:          absEnvFile,
+		HealthCheck:      cfg.HealthCheck,
+		HealthCheckPort:  cfg.HealthCheckPort,
+		WatchPaths:       cfg.Watch,
+		RestartPolicy:    cfg.RestartPolicy,
+		ConfigPath:       absConfig,
+	}
+	if cfg.DrainWindow != 0 {
+		req.DrainWindow = cfg.DrainWindow.String()
+	}
+	if cfg.HealthCheckTimeout != 0 {
+		req.HealthCheckTimeout = cfg.HealthCheckTimeout.String()
 	}
 	// Pass ports: multi-port uses StablePorts, single-port uses StablePort.
 	if len(cfg.Ports) > 1 || (len(cfg.Ports) == 1 && !hasSingleDefault(cfg.Ports)) {

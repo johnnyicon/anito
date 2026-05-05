@@ -8,7 +8,6 @@ import (
 	"io"
 	"net/http"
 	"strings"
-	"time"
 
 	"github.com/johnnyicon/anito/internal/issues"
 	"github.com/johnnyicon/anito/internal/registry"
@@ -37,8 +36,8 @@ type DeployRequest struct {
 	EnvFile            string               `json:"env_file,omitempty"`
 	HealthCheck        string               `json:"health_check,omitempty"`
 	WatchPaths         []string             `json:"watch_paths,omitempty"`
-	DrainWindow        time.Duration        `json:"drain_window,omitempty"`
-	HealthCheckTimeout time.Duration        `json:"health_check_timeout,omitempty"`
+	DrainWindow        string               `json:"drain_window,omitempty"`
+	HealthCheckTimeout string               `json:"health_check_timeout,omitempty"`
 	RestartPolicy      string               `json:"restart_policy,omitempty"`
 	ConfigPath         string               `json:"config_path,omitempty"`
 }

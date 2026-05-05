@@ -948,3 +948,35 @@ func TestDeploy_WithWatchPathsAndEnvFile(t *testing.T) {
 		t.Errorf("Deploy response name = %q; want %q", svc.Name, "watch-svc")
 	}
 }
+
+func TestDeploy_WithDurationStrings(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var raw map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&raw); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		if raw["drain_window"] != "5s" {
+			t.Fatalf("drain_window = %#v, want 5s", raw["drain_window"])
+		}
+		if raw["health_check_timeout"] != "30s" {
+			t.Fatalf("health_check_timeout = %#v, want 30s", raw["health_check_timeout"])
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(registry.Service{
+			Name:       "timed-svc",
+			StablePort: 8100,
+			Status:     registry.StatusRunning,
+		})
+	}))
+	defer ts.Close()
+
+	c := newTestClient(ts)
+	if _, err := c.Deploy(DeployRequest{
+		Name:               "timed-svc",
+		Path:               "/tmp/timed-svc",
+		DrainWindow:        "5s",
+		HealthCheckTimeout: "30s",
+	}); err != nil {
+		t.Fatalf("Deploy: unexpected error: %v", err)
+	}
+}
