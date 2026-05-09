@@ -16,9 +16,7 @@ import (
 	"github.com/johnnyicon/anito/internal/registry"
 )
 
-const (
-	drainTimeout = 5 * time.Second // time between SIGTERM and SIGKILL
-)
+var drainTimeout = 5 * time.Second // time between SIGTERM and SIGKILL
 
 // runningProc tracks a live process and the ephemeral port(s) it is on.
 type runningProc struct {
@@ -389,7 +387,11 @@ func drainProc(cmd *exec.Cmd, done <-chan struct{}) error {
 	case <-done:
 	case <-time.After(drainTimeout):
 		_ = cmd.Process.Signal(syscall.SIGKILL)
-		<-done // Start goroutine will handle the actual wait
+		select {
+		case <-done:
+		case <-time.After(drainTimeout):
+			return fmt.Errorf("process pid=%d did not exit after SIGKILL", cmd.Process.Pid)
+		}
 	}
 	return nil
 }

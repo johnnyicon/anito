@@ -594,6 +594,29 @@ func TestDrainProc_WithDone(t *testing.T) {
 	}
 }
 
+func TestDrainProc_ReturnsWhenDoneNeverCloses(t *testing.T) {
+	orig := drainTimeout
+	drainTimeout = 10 * time.Millisecond
+	t.Cleanup(func() { drainTimeout = orig })
+
+	cmd := exec.Command("sleep", "60")
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("cmd.Start: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+	})
+
+	err := DrainProc(cmd, make(chan struct{}))
+	if err == nil {
+		t.Fatal("expected error when done channel never closes")
+	}
+	if !strings.Contains(err.Error(), "did not exit after SIGKILL") {
+		t.Fatalf("error = %q, want SIGKILL timeout", err.Error())
+	}
+}
+
 // --- Manager.Restart ---
 
 // TestManagerRestart verifies that Restart stops then starts the service.
@@ -623,9 +646,9 @@ func TestManagerRestart(t *testing.T) {
 func TestBuildCmd_MultiPort(t *testing.T) {
 	mgr, _ := newTestManager(t)
 	svc := &registry.Service{
-		Name:       "multi-port-svc",
-		Type:       registry.TypeBinary,
-		BinaryPath: "/bin/true",
+		Name:        "multi-port-svc",
+		Type:        registry.TypeBinary,
+		BinaryPath:  "/bin/true",
 		StablePorts: map[string]int{"ws": 7172, "http": 7173},
 	}
 	ports := map[string]int{"ws": 58001, "http": 58002}
