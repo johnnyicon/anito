@@ -36,6 +36,7 @@ var version = "dev"
 const (
 	defaultDaemonPort = 7700
 	defaultMCPPort    = 7701
+	daemonWaitTimeout = 60 * time.Second
 )
 
 func main() {
@@ -557,7 +558,7 @@ func runReload() {
 	}
 
 	fmt.Print("waiting for daemon...")
-	deadline := time.Now().Add(10 * time.Second)
+	deadline := time.Now().Add(daemonWaitTimeout)
 	for time.Now().Before(deadline) {
 		time.Sleep(300 * time.Millisecond)
 		resp, err := http.Get(fmt.Sprintf("http://localhost:%d/health", defaultDaemonPort))
@@ -576,7 +577,7 @@ func runReload() {
 		fmt.Print(".")
 	}
 	fmt.Println()
-	fatal(fmt.Errorf("daemon did not become healthy within 10s — check ~/.anito/logs/anito.log"))
+	fatal(fmt.Errorf("daemon did not become healthy within %s — check ~/.anito/logs/anito.log", daemonWaitTimeout))
 }
 
 // plistTemplate is the launchd plist for Anito.
@@ -687,7 +688,7 @@ func runInstall(binDir string) {
 
 	// Wait for the daemon to become healthy.
 	fmt.Print("waiting for daemon")
-	deadline := time.Now().Add(10 * time.Second)
+	deadline := time.Now().Add(daemonWaitTimeout)
 	healthy := false
 	for time.Now().Before(deadline) {
 		time.Sleep(300 * time.Millisecond)
@@ -703,7 +704,7 @@ func runInstall(binDir string) {
 	}
 	fmt.Println()
 	if !healthy {
-		fatal(fmt.Errorf("daemon did not become healthy within 10s — check %s/anito.log", logDir))
+		fatal(fmt.Errorf("daemon did not become healthy within %s — check %s/anito.log", daemonWaitTimeout, logDir))
 	}
 
 	fmt.Printf("✓ anito installed and running\n\n")
