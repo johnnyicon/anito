@@ -81,7 +81,11 @@ func Load(path string) (*Config, error) {
 	// configs checked into a repo work on any machine without absolute paths.
 	// Relative paths stored in the daemon registry would otherwise be resolved
 	// against the daemon's working directory, not the repo root.
-	configDir := filepath.Dir(path)
+	absPath, err := filepath.Abs(path)
+	if err != nil {
+		return nil, fmt.Errorf("resolving %s: %w", path, err)
+	}
+	configDir := filepath.Dir(absPath)
 	if cfg.EnvFile != "" && !filepath.IsAbs(cfg.EnvFile) {
 		cfg.EnvFile = filepath.Join(configDir, cfg.EnvFile)
 	}
