@@ -73,6 +73,27 @@ type Service struct {
 	CrashAttempts int          `json:"crash_attempts,omitempty"` // number of restart attempts in current crash loop
 	GaveUp        bool         `json:"gave_up,omitempty"`        // true if crash backoff hit max attempts
 	StartHistory  []StartEvent `json:"start_history,omitempty"`  // ring buffer, last 10 starts
+
+	PreviousDeployment *DeploymentSnapshot `json:"previous_deployment,omitempty"`
+}
+
+// DeploymentSnapshot is the prior deploy configuration needed for rollback.
+type DeploymentSnapshot struct {
+	Version            string         `json:"version,omitempty"`
+	Type               ServiceType    `json:"type"`
+	ConfigPath         string         `json:"config_path,omitempty"`
+	BinaryPath         string         `json:"binary_path"`
+	Args               []string       `json:"args,omitempty"`
+	ProxyBindAddress   string         `json:"proxy_bind_address,omitempty"`
+	EnvFile            string         `json:"env_file,omitempty"`
+	HealthCheck        string         `json:"health_check"`
+	StablePorts        map[string]int `json:"stable_ports,omitempty"`
+	HealthCheckPort    string         `json:"health_check_port,omitempty"`
+	WatchPaths         []string       `json:"watch_paths,omitempty"`
+	DrainWindow        time.Duration  `json:"drain_window,omitempty"`
+	HealthCheckTimeout time.Duration  `json:"health_check_timeout,omitempty"`
+	RestartPolicy      string         `json:"restart_policy,omitempty"`
+	DeployedAt         time.Time      `json:"deployed_at"`
 }
 
 // NormalizePorts ensures StablePorts/InternalPorts maps are populated from
@@ -241,6 +262,9 @@ func (r *Registry) Register(s *Service) error {
 			s.ProxyBindAddress = existing.ProxyBindAddress
 		}
 		s.DeployedAt = existing.DeployedAt
+		if s.PreviousDeployment == nil {
+			s.PreviousDeployment = Snapshot(existing)
+		}
 	} else {
 		s.DeployedAt = time.Now()
 	}
@@ -248,6 +272,34 @@ func (r *Registry) Register(s *Service) error {
 	s.UpdatedAt = time.Now()
 	r.services[s.Name] = s
 	return r.save()
+}
+
+// Snapshot captures the deploy configuration needed to restore a service.
+func Snapshot(s *Service) *DeploymentSnapshot {
+	if s == nil {
+		return nil
+	}
+	stablePorts := make(map[string]int, len(s.StablePorts))
+	for name, port := range s.StablePorts {
+		stablePorts[name] = port
+	}
+	return &DeploymentSnapshot{
+		Version:            s.Version,
+		Type:               s.Type,
+		ConfigPath:         s.ConfigPath,
+		BinaryPath:         s.BinaryPath,
+		Args:               append([]string(nil), s.Args...),
+		ProxyBindAddress:   s.ProxyBindAddress,
+		EnvFile:            s.EnvFile,
+		HealthCheck:        s.HealthCheck,
+		StablePorts:        stablePorts,
+		HealthCheckPort:    s.HealthCheckPort,
+		WatchPaths:         append([]string(nil), s.WatchPaths...),
+		DrainWindow:        s.DrainWindow,
+		HealthCheckTimeout: s.HealthCheckTimeout,
+		RestartPolicy:      s.RestartPolicy,
+		DeployedAt:         s.DeployedAt,
+	}
 }
 
 // Get returns a service by name.

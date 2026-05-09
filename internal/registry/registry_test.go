@@ -44,6 +44,15 @@ func TestStablePortPreservedOnRedeploy(t *testing.T) {
 	if got.StablePort != 3000 {
 		t.Errorf("StablePort = %d, want 3000", got.StablePort)
 	}
+	if got.PreviousDeployment == nil {
+		t.Fatal("PreviousDeployment is nil after redeploy")
+	}
+	if got.PreviousDeployment.BinaryPath != "/bin/svc" {
+		t.Errorf("PreviousDeployment.BinaryPath = %q, want /bin/svc", got.PreviousDeployment.BinaryPath)
+	}
+	if got.PreviousDeployment.StablePorts["default"] != 3000 {
+		t.Errorf("PreviousDeployment.StablePorts[default] = %d, want 3000", got.PreviousDeployment.StablePorts["default"])
+	}
 }
 
 // TestDeployedAtNotOverwrittenOnRedeploy verifies that DeployedAt is set on

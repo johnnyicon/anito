@@ -378,7 +378,10 @@ func (s *Service) Stop(name string) error {
 
 func (s *Service) Restart(name string) error {
 	defer s.lockDeploy(name)()
+	return s.restartLocked(name)
+}
 
+func (s *Service) restartLocked(name string) error {
 	svc, ok := s.reg.Get(name)
 	if !ok {
 		return fmt.Errorf("service %q not found", name)
@@ -464,6 +467,86 @@ func (s *Service) Restart(name string) error {
 	log.Printf("[RESTART] name=%s port=%d internal=%d", name, svc.StablePort, svc.InternalPort)
 	notify.Send("Anito", fmt.Sprintf("↺ %s restarted on :%d", name, svc.StablePort))
 	return nil
+}
+
+func (s *Service) Rollback(name string) (*registry.Service, error) {
+	defer s.lockDeploy(name)()
+
+	current, ok := s.reg.Get(name)
+	if !ok {
+		return nil, fmt.Errorf("service %q not found", name)
+	}
+	prev := current.PreviousDeployment
+	if prev == nil {
+		return nil, fmt.Errorf("service %q has no previous deployment", name)
+	}
+
+	restored := &registry.Service{
+		Name:               name,
+		Version:            prev.Version,
+		Type:               prev.Type,
+		ConfigPath:         prev.ConfigPath,
+		BinaryPath:         prev.BinaryPath,
+		Args:               append([]string(nil), prev.Args...),
+		StablePorts:        copyPorts(current.StablePorts),
+		ProxyBindAddress:   fallbackString(prev.ProxyBindAddress, current.ProxyBindAddress),
+		HealthCheckPort:    prev.HealthCheckPort,
+		EnvFile:            prev.EnvFile,
+		HealthCheck:        prev.HealthCheck,
+		WatchPaths:         append([]string(nil), prev.WatchPaths...),
+		DrainWindow:        prev.DrainWindow,
+		HealthCheckTimeout: prev.HealthCheckTimeout,
+		RestartPolicy:      prev.RestartPolicy,
+		Status:             registry.StatusStopped,
+		DeployedAt:         current.DeployedAt,
+		PreviousDeployment: registry.Snapshot(current),
+	}
+	restored.NormalizePorts()
+
+	if err := s.reg.Register(restored); err != nil {
+		return nil, err
+	}
+	svc, _ := s.reg.Get(name)
+	if err := s.prx.RegisterPortsWithBind(svc.Name, svc.StablePorts, svc.ProxyBindAddress); err != nil {
+		return nil, err
+	}
+	if svc.Type == registry.TypeStatic {
+		if err := s.prx.SwapStatic(svc.Name, svc.BinaryPath); err != nil {
+			return nil, err
+		}
+		_ = s.reg.UpdateStatus(name, registry.StatusRunning, 0)
+		_ = s.reg.UpdateLastDeployed(name, time.Now())
+		svc, _ = s.reg.Get(name)
+		writeReceipt(svc)
+		log.Printf("[ROLLBACK] name=%s version=%s", name, svc.Version)
+		return svc, nil
+	}
+	if err := s.restartLocked(name); err != nil {
+		return nil, err
+	}
+	_ = s.reg.UpdateLastDeployed(name, time.Now())
+	svc, _ = s.reg.Get(name)
+	writeReceipt(svc)
+	log.Printf("[ROLLBACK] name=%s version=%s", name, svc.Version)
+	return svc, nil
+}
+
+func copyPorts(in map[string]int) map[string]int {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make(map[string]int, len(in))
+	for name, port := range in {
+		out[name] = port
+	}
+	return out
+}
+
+func fallbackString(value, fallback string) string {
+	if value != "" {
+		return value
+	}
+	return fallback
 }
 
 func (s *Service) Remove(name string) error {

@@ -287,6 +287,46 @@ func TestRestart_Success(t *testing.T) {
 	}
 }
 
+// ---------- Rollback ----------
+
+func TestRollback_Success(t *testing.T) {
+	wantSvc := registry.Service{
+		Name:       "my-svc",
+		Version:    "v1",
+		Type:       registry.TypeStatic,
+		BinaryPath: "/tmp/static-v1",
+		StablePort: 8100,
+		Status:     registry.StatusRunning,
+	}
+
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			t.Errorf("Rollback: method = %s; want POST", r.Method)
+		}
+		if r.URL.Path != "/rollback/my-svc" {
+			t.Errorf("Rollback: path = %s; want /rollback/my-svc", r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(wantSvc)
+	}))
+	defer ts.Close()
+
+	c := newTestClient(ts)
+	svc, err := c.Rollback("my-svc")
+	if err != nil {
+		t.Fatalf("Rollback: unexpected error: %v", err)
+	}
+	if svc.Name != "my-svc" {
+		t.Errorf("Rollback response name = %q; want my-svc", svc.Name)
+	}
+	if svc.Version != "v1" {
+		t.Errorf("Rollback response version = %q; want v1", svc.Version)
+	}
+	if svc.StablePort != 8100 {
+		t.Errorf("Rollback response stable_port = %d; want 8100", svc.StablePort)
+	}
+}
+
 // ---------- Remove ----------
 
 func TestRemove_Success(t *testing.T) {

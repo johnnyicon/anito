@@ -47,8 +47,8 @@ type nonFlusherRW struct {
 }
 
 func (n *nonFlusherRW) Header() http.Header         { return n.rec.Header() }
-func (n *nonFlusherRW) Write(b []byte) (int, error)  { return n.rec.Write(b) }
-func (n *nonFlusherRW) WriteHeader(code int)          { n.rec.WriteHeader(code) }
+func (n *nonFlusherRW) Write(b []byte) (int, error) { return n.rec.Write(b) }
+func (n *nonFlusherRW) WriteHeader(code int)        { n.rec.WriteHeader(code) }
 
 // newNonFlushContext creates an Echo context backed by a ResponseWriter that
 // does NOT implement http.Flusher, triggering the "streaming not supported" path.
@@ -111,6 +111,7 @@ func newTestHarness(t *testing.T) *testHarness {
 	e.POST("/deploy", s.handleDeploy)
 	e.POST("/stop/:name", s.handleStop)
 	e.POST("/restart/:name", s.handleRestart)
+	e.POST("/rollback/:name", s.handleRollback)
 	e.GET("/status/:name", s.handleStatus)
 	e.POST("/remove/:name", s.handleRemove)
 	e.GET("/logs/:name", s.handleLogs)
@@ -299,6 +300,81 @@ func TestHandleRestartNotFound(t *testing.T) {
 	}
 	if he.Code != http.StatusInternalServerError {
 		t.Errorf("expected 500, got %d", he.Code)
+	}
+}
+
+// --- handleRollback ---
+
+func TestHandleRollbackNotFound(t *testing.T) {
+	h := newTestHarness(t)
+	c, _ := h.request(http.MethodPost, "/rollback/nonexistent", "")
+	c.SetParamNames("name")
+	c.SetParamValues("nonexistent")
+
+	err := h.srv.handleRollback(c)
+	he, ok := err.(*echo.HTTPError)
+	if !ok {
+		t.Fatalf("expected echo.HTTPError, got %T (%v)", err, err)
+	}
+	if he.Code != http.StatusInternalServerError {
+		t.Errorf("expected 500, got %d", he.Code)
+	}
+}
+
+func TestHandleRollbackStaticService(t *testing.T) {
+	h := newTestHarness(t)
+	v1 := filepath.Join(h.tmpDir, "static-v1")
+	v2 := filepath.Join(h.tmpDir, "static-v2")
+	if err := os.MkdirAll(v1, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(v2, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(v1, "index.html"), []byte("v1"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(v2, "index.html"), []byte("v2"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := h.srv.svc.Deploy(service.DeployRequest{
+		Name:    "static-svc",
+		Version: "v1",
+		Type:    registry.TypeStatic,
+		Path:    v1,
+	}); err != nil {
+		t.Fatalf("deploy v1: %v", err)
+	}
+	if _, err := h.srv.svc.Deploy(service.DeployRequest{
+		Name:    "static-svc",
+		Version: "v2",
+		Type:    registry.TypeStatic,
+		Path:    v2,
+	}); err != nil {
+		t.Fatalf("deploy v2: %v", err)
+	}
+
+	c, rec := h.request(http.MethodPost, "/rollback/static-svc", "")
+	c.SetParamNames("name")
+	c.SetParamValues("static-svc")
+
+	if err := h.srv.handleRollback(c); err != nil {
+		t.Fatalf("handleRollback returned error: %v", err)
+	}
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rec.Code)
+	}
+
+	var resp registry.Service
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if resp.Version != "v1" {
+		t.Errorf("rollback response version = %q, want v1", resp.Version)
+	}
+	if resp.BinaryPath != v1 {
+		t.Errorf("rollback response binary_path = %q, want %q", resp.BinaryPath, v1)
 	}
 }
 

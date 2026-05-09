@@ -66,6 +66,7 @@ func (s *Server) Start() error {
 	e.POST("/deploy", s.handleDeploy)
 	e.POST("/stop/:name", s.handleStop)
 	e.POST("/restart/:name", s.handleRestart)
+	e.POST("/rollback/:name", s.handleRollback)
 	e.GET("/status/:name", s.handleStatus)
 	e.POST("/remove/:name", s.handleRemove)
 	e.GET("/logs/:name", s.handleLogs)
@@ -209,6 +210,16 @@ func (s *Server) handleRestart(c echo.Context) error {
 	}
 	svc, err := s.svc.Status(name)
 	if err != nil {
+		return echo.NewHTTPError(http.StatusInternalServerError, err.Error())
+	}
+	return c.JSON(http.StatusOK, svc)
+}
+
+func (s *Server) handleRollback(c echo.Context) error {
+	name := c.Param("name")
+	svc, err := s.svc.Rollback(name)
+	if err != nil {
+		log.Printf("[ERROR] rollback name=%s error=%q", name, err)
 		return echo.NewHTTPError(http.StatusInternalServerError, err.Error())
 	}
 	return c.JSON(http.StatusOK, svc)

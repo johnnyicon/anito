@@ -106,6 +106,17 @@ Restart a service with health-check gating. The stable port stays live throughou
 
 ---
 
+### `anito_rollback`
+Restore the previous deployment for a service and restart it behind the same stable port. Use this after a bad deploy when the last known good deployment should become live again.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `name` | string | yes | Service name |
+
+Returns the restored service record. Rollback requires at least one prior redeploy; a service with only one deployment returns an error.
+
+---
+
 ### `anito_stop`
 Stop a running service. The service stays registered in Anito — use `anito_deploy` or `anito_restart` to bring it back.
 

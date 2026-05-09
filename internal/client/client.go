@@ -74,6 +74,14 @@ func (c *Client) Restart(name string) error {
 	return c.postJSON("/restart/"+name, nil, nil)
 }
 
+func (c *Client) Rollback(name string) (*registry.Service, error) {
+	var svc registry.Service
+	if err := c.postJSON("/rollback/"+name, nil, &svc); err != nil {
+		return nil, err
+	}
+	return &svc, nil
+}
+
 func (c *Client) Remove(name string) error {
 	return c.postJSON("/remove/"+name, nil, nil)
 }

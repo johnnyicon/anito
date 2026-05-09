@@ -95,6 +95,7 @@ anito deploy path/to/config     # deploy from a specific file
 anito services                  # list all services, ports, and status
 anito status <name>             # full detail for one service
 anito restart <name>            # restart with health-check gating
+anito rollback <name>           # restore the previous deploy on the same stable port
 anito stop <name>               # stop a service (stays registered)
 anito remove <name>             # stop, remove from registry, close proxy port
 

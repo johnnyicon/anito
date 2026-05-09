@@ -124,6 +124,18 @@ func main() {
 		}
 		fmt.Printf("restarted %s\n", os.Args[2])
 
+	case "rollback":
+		requireArg("rollback", os.Args)
+		svc, err := cli.Rollback(os.Args[2])
+		if err != nil {
+			fatal(err)
+		}
+		fmt.Printf("rolled back %s", svc.Name)
+		if svc.Version != "" {
+			fmt.Printf(" to %s", svc.Version)
+		}
+		fmt.Printf("\n")
+
 	case "remove":
 		requireArg("remove", os.Args)
 		if err := cli.Remove(os.Args[2]); err != nil {
@@ -919,6 +931,7 @@ Usage:
   anito logs <name> [-f|--follow]           print recent log output; -f streams live (use "daemon" for the Anito daemon log)
   anito stop <name>                         stop a service
   anito restart <name>                      restart a service
+  anito rollback <name>                     restore and restart the previous deploy
   anito remove <name>                       stop and remove a service
   anito issues [--lines N] [--source pfx]  show recent logged issues (errors, failures, consumer reports)
   anito report <message> [flags]            manually report an issue (--source name, --context text, --repo path)

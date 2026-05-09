@@ -487,6 +487,20 @@ func (s *Server) registerTools(srv *sdkmcp.Server) {
 	})
 
 	sdkmcp.AddTool(srv, &sdkmcp.Tool{
+		Name:        "anito_rollback",
+		Description: "Restore the previous deployment for a service and restart it behind the same stable port. Use after a bad deploy when the last known good deployment should become live again.",
+	}, func(ctx context.Context, req *sdkmcp.CallToolRequest, in nameInput) (*sdkmcp.CallToolResult, serviceView, error) {
+		log.Printf("[MCP] tool=anito_rollback name=%s", in.Name)
+		svc, err := s.svc.Rollback(in.Name)
+		if err != nil {
+			log.Printf("[MCP] tool=anito_rollback name=%s error=%q", in.Name, err)
+			s.logErr("anito_rollback", in, err)
+			return nil, serviceView{}, err
+		}
+		return nil, toView(svc), nil
+	})
+
+	sdkmcp.AddTool(srv, &sdkmcp.Tool{
 		Name:        "anito_stop",
 		Description: "Stop a running service. The service stays registered; use anito_deploy or anito_restart to bring it back. The port assignment is preserved — the same port is reused on restart. Use this for temporary pauses.",
 	}, func(ctx context.Context, req *sdkmcp.CallToolRequest, in nameInput) (*sdkmcp.CallToolResult, opResult, error) {

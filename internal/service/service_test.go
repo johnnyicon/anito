@@ -288,6 +288,89 @@ func TestDeployResetscrashAttempts(t *testing.T) {
 	}
 }
 
+// --- Rollback tests ---
+
+func writeStaticIndex(t *testing.T, body string) string {
+	t.Helper()
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "index.html"), []byte(body), 0644); err != nil {
+		t.Fatalf("write index.html: %v", err)
+	}
+	return dir
+}
+
+func TestRollbackStaticServiceRestoresPreviousDeployment(t *testing.T) {
+	svc := newTestService(t)
+	v1 := writeStaticIndex(t, "v1")
+	v2 := writeStaticIndex(t, "v2")
+
+	first, err := svc.Deploy(DeployRequest{
+		Name:       "static-svc",
+		Version:    "v1",
+		Type:       registry.TypeStatic,
+		Path:       v1,
+		StablePort: 0,
+	})
+	if err != nil {
+		t.Fatalf("deploy v1: %v", err)
+	}
+
+	second, err := svc.Deploy(DeployRequest{
+		Name:       "static-svc",
+		Version:    "v2",
+		Type:       registry.TypeStatic,
+		Path:       v2,
+		StablePort: 9999,
+	})
+	if err != nil {
+		t.Fatalf("deploy v2: %v", err)
+	}
+	if second.StablePort != first.StablePort {
+		t.Fatalf("redeploy changed stable port: got %d, want %d", second.StablePort, first.StablePort)
+	}
+
+	rolledBack, err := svc.Rollback("static-svc")
+	if err != nil {
+		t.Fatalf("rollback: %v", err)
+	}
+	if rolledBack.Version != "v1" {
+		t.Errorf("rollback version = %q, want v1", rolledBack.Version)
+	}
+	if rolledBack.BinaryPath != v1 {
+		t.Errorf("rollback path = %q, want %q", rolledBack.BinaryPath, v1)
+	}
+	if rolledBack.StablePort != first.StablePort {
+		t.Errorf("rollback stable port = %d, want %d", rolledBack.StablePort, first.StablePort)
+	}
+	if rolledBack.Status != registry.StatusRunning {
+		t.Errorf("rollback status = %q, want running", rolledBack.Status)
+	}
+	if rolledBack.PreviousDeployment == nil {
+		t.Fatal("rollback PreviousDeployment is nil")
+	}
+	if rolledBack.PreviousDeployment.Version != "v2" {
+		t.Errorf("rollback previous version = %q, want v2", rolledBack.PreviousDeployment.Version)
+	}
+}
+
+func TestRollbackRequiresPreviousDeployment(t *testing.T) {
+	svc := newTestService(t)
+	v1 := writeStaticIndex(t, "v1")
+
+	if _, err := svc.Deploy(DeployRequest{
+		Name:    "static-svc",
+		Version: "v1",
+		Type:    registry.TypeStatic,
+		Path:    v1,
+	}); err != nil {
+		t.Fatalf("deploy v1: %v", err)
+	}
+
+	if _, err := svc.Rollback("static-svc"); err == nil {
+		t.Fatal("expected rollback without previous deployment to fail")
+	}
+}
+
 // Ensure fmt is used (it's referenced in the inline server handler indirectly).
 var _ = fmt.Sprintf
 

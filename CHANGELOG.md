@@ -8,6 +8,18 @@ Format: `## [date] — description`, breaking changes marked **BREAKING**.
 
 ---
 
+## 2026-05-09 — Rollback command and deployment snapshot
+
+**CLI:** New `anito rollback <name>` command restores the previous deployment for a service and restarts it behind the same stable port.
+
+**HTTP API:** New `POST /rollback/:name` endpoint returns the restored service record. Rollback requires at least one prior redeploy; services with no previous deployment return an error.
+
+**MCP:** New `anito_rollback` tool accepts `{ "name": "<service>" }` and returns the restored service record.
+
+**Registry:** Service records may now include `previous_deployment`, a snapshot of the prior deploy configuration used by rollback. Stable ports remain pinned to the service name during rollback.
+
+---
+
 ## 2026-04-04 — New MCP tools: `anito_submit_case_study`, `anito_metrics`
 
 **`anito_submit_case_study`** — consumer agents can submit structured case studies and testimonials. Fields are scoped to exclude product names and proprietary details by design: `pain_point`, `workflow`, `outcome`, `stack_context`, `quote`, `credit_as`, `features_used`. Submissions land as draft markdown in `~/.anito/case-studies/` for maintainer review before publishing.
