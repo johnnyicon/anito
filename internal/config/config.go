@@ -13,6 +13,7 @@ import (
 type Config struct {
 	Name               string         `yaml:"name"`
 	Version            string         `yaml:"version"`              // optional — semantic version tag, e.g. "v1.2.3"
+	VersionPath        string         `yaml:"version_path"`         // optional path to hash when version is omitted
 	Port               int            `yaml:"port"`                 // stable port consumers connect to (0 = auto-allocate); mutually exclusive with Ports
 	Ports              map[string]int `yaml:"ports"`                // named ports for multi-port services; mutually exclusive with Port
 	Type               string         `yaml:"type"`                 // "binary" | "static" (default: binary)
@@ -83,6 +84,9 @@ func Load(path string) (*Config, error) {
 	configDir := filepath.Dir(path)
 	if cfg.EnvFile != "" && !filepath.IsAbs(cfg.EnvFile) {
 		cfg.EnvFile = filepath.Join(configDir, cfg.EnvFile)
+	}
+	if cfg.VersionPath != "" && !filepath.IsAbs(cfg.VersionPath) {
+		cfg.VersionPath = filepath.Join(configDir, cfg.VersionPath)
 	}
 	for i, w := range cfg.Watch {
 		if !filepath.IsAbs(w) {

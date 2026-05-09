@@ -327,6 +327,25 @@ version: v1.2.3
 	}
 }
 
+// TestVersionPathResolvedAgainstConfigDir verifies that version_path follows
+// the same repo-relative behavior as env_file and watch paths.
+func TestVersionPathResolvedAgainstConfigDir(t *testing.T) {
+	dir := t.TempDir()
+	path := writeConfig(t, dir, `
+name: svc
+output: ./bin/svc
+version_path: ../dist
+`)
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	want := filepath.Join(dir, "..", "dist")
+	if cfg.VersionPath != want {
+		t.Errorf("VersionPath = %q, want %q", cfg.VersionPath, want)
+	}
+}
+
 // TestArgsFieldPreserved verifies that the args field is loaded into the Config
 // struct.
 func TestArgsFieldPreserved(t *testing.T) {

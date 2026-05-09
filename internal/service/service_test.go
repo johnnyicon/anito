@@ -826,6 +826,45 @@ func TestHashPath_Dir(t *testing.T) {
 	}
 }
 
+func TestDeployUsesVersionPathForGeneratedVersion(t *testing.T) {
+	svc := newTestService(t)
+	staticDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(staticDir, "index.html"), []byte("<html/>"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	versionDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(versionDir, "bundle.js"), []byte("v1"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	first, err := svc.Deploy(DeployRequest{
+		Name:        "svc",
+		Type:        registry.TypeStatic,
+		Path:        staticDir,
+		VersionPath: versionDir,
+	})
+	if err != nil {
+		t.Fatalf("Deploy first: %v", err)
+	}
+
+	if err := os.WriteFile(filepath.Join(versionDir, "bundle.js"), []byte("v2"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	second, err := svc.Deploy(DeployRequest{
+		Name:        "svc",
+		Type:        registry.TypeStatic,
+		Path:        staticDir,
+		VersionPath: versionDir,
+	})
+	if err != nil {
+		t.Fatalf("Deploy second: %v", err)
+	}
+
+	if first.Version == second.Version {
+		t.Fatalf("Version did not change after version_path content changed: %q", first.Version)
+	}
+}
+
 // --- WaitHealthy tests ---
 
 // TestWaitHealthy_HTTP_Passes verifies that WaitHealthy succeeds when the server returns 200.

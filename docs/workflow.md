@@ -115,10 +115,17 @@ Two options:
 version: v1.2.3
 ```
 
-**Auto-hash** — if `version` is omitted, Anito computes a SHA256 of the binary and uses the first 8 characters:
+**Auto-hash** — if `version` is omitted, Anito computes a SHA256 of the deployed output and uses the first 8 characters:
 
 ```
 sha:a3f2c1b0
+```
+
+If the deployed output is a stable wrapper script, set `version_path` to the built artifact file or directory. This keeps the reported version tied to what actually changed:
+
+```yaml
+output: .anito/web-start.sh
+version_path: ./dist
 ```
 
 This is always unique per binary and never collides, but it is not human-readable. Use explicit versions for anything you need to reason about across deploys.

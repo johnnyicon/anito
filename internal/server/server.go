@@ -109,6 +109,7 @@ func (s *Server) Start() error {
 type DeployRequest struct {
 	Name               string               `json:"name"`
 	Version            string               `json:"version,omitempty"`
+	VersionPath        string               `json:"version_path,omitempty"`
 	Type               registry.ServiceType `json:"type"`
 	Path               string               `json:"path"`
 	Args               []string             `json:"args,omitempty"`
@@ -162,6 +163,7 @@ func (s *Server) handleDeploy(c echo.Context) error {
 	svc, err := s.svc.Deploy(service.DeployRequest{
 		Name:               req.Name,
 		Version:            req.Version,
+		VersionPath:        req.VersionPath,
 		Type:               req.Type,
 		Path:               req.Path,
 		Args:               req.Args,

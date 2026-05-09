@@ -75,6 +75,9 @@ func TestDeploy_Success(t *testing.T) {
 		if req.Path != "/usr/local/bin/my-svc" {
 			t.Errorf("Deploy request path = %q; want %q", req.Path, "/usr/local/bin/my-svc")
 		}
+		if req.VersionPath != "/usr/local/share/my-svc/dist" {
+			t.Errorf("Deploy request version_path = %q; want %q", req.VersionPath, "/usr/local/share/my-svc/dist")
+		}
 		if req.StablePort != 3000 {
 			t.Errorf("Deploy request stable_port = %d; want 3000", req.StablePort)
 		}
@@ -86,10 +89,11 @@ func TestDeploy_Success(t *testing.T) {
 
 	c := newTestClient(ts)
 	svc, err := c.Deploy(DeployRequest{
-		Name:       "my-svc",
-		Path:       "/usr/local/bin/my-svc",
-		StablePort: 3000,
-		Type:       registry.TypeBinary,
+		Name:        "my-svc",
+		Path:        "/usr/local/bin/my-svc",
+		VersionPath: "/usr/local/share/my-svc/dist",
+		StablePort:  3000,
+		Type:        registry.TypeBinary,
 	})
 	if err != nil {
 		t.Fatalf("Deploy: unexpected error: %v", err)

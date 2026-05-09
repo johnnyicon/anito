@@ -8,6 +8,14 @@ Format: `## [date] — description`, breaking changes marked **BREAKING**.
 
 ---
 
+## 2026-05-09 — Artifact-based generated versions
+
+**Config:** New optional `version_path` field. When `version` is omitted, Anito hashes `version_path` instead of `output` to generate the `sha:xxxxxxxx` service version. This is intended for services whose `output` is a stable wrapper script while the real deployable artifact is a built file or directory.
+
+**HTTP API / MCP:** Deploy requests now accept `version_path` and pass it through to the service layer. Existing callers can omit it and keep the previous behavior.
+
+---
+
 ## 2026-05-09 — Rollback command and deployment snapshot
 
 **CLI:** New `anito rollback <name>` command restores the previous deployment for a service and restarts it behind the same stable port.

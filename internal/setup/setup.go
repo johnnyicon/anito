@@ -231,6 +231,7 @@ func generateConfig(name, buildCmd, outputPath string) string {
 	sb.WriteString("# .anito/config.yaml\n")
 	sb.WriteString(fmt.Sprintf("name: %s\n", name))
 	sb.WriteString("# version: v0.1.0  # set this — omit to auto-generate a sha: hash\n")
+	sb.WriteString("# version_path: ./dist  # use when output is a stable wrapper script\n")
 	sb.WriteString("type: binary\n")
 	if buildCmd != "" {
 		sb.WriteString(fmt.Sprintf("build: %s\n", buildCmd))
@@ -266,9 +267,10 @@ func generateInstructions(r *Result, buildCmd string) []string {
 	}
 	steps = append(steps,
 		fmt.Sprintf("%d. Set a version: add `version: v0.1.0` to .anito/config.yaml. Bump this on every release. If omitted, Anito auto-generates a SHA hash (sha:xxxxxxxx) which is unique but not human-readable.", n),
-		fmt.Sprintf("%d. Test locally: build the binary and confirm GET /health returns 200", n+1),
-		fmt.Sprintf("%d. Deploy: run `anito deploy` from %s — the stable_port in the response is permanent. Record it. All other services and agents that connect to this service must use that address. It will never change on redeploy.", n+2, r.RepoPath),
-		fmt.Sprintf("%d. Test environment: consider deploying a second instance with a different name (e.g. %s-test) pointing at a test database or config. Give it its own stable port. Keep prod and test ports separate and treat both as permanent.", n+3, r.ServiceName),
+		fmt.Sprintf("%d. If `output` is a stable wrapper script, set `version_path` to the built artifact file or directory so Anito reports changes on every deploy.", n+1),
+		fmt.Sprintf("%d. Test locally: build the binary and confirm GET /health returns 200", n+2),
+		fmt.Sprintf("%d. Deploy: run `anito deploy` from %s — the stable_port in the response is permanent. Record it. All other services and agents that connect to this service must use that address. It will never change on redeploy.", n+3, r.RepoPath),
+		fmt.Sprintf("%d. Test environment: consider deploying a second instance with a different name (e.g. %s-test) pointing at a test database or config. Give it its own stable port. Keep prod and test ports separate and treat both as permanent.", n+4, r.ServiceName),
 	)
 	return steps
 }

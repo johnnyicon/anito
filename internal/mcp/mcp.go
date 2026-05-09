@@ -135,6 +135,7 @@ func extractToolName(r *http.Request) string {
 type deployInput struct {
 	Name               string         `json:"name"                  jsonschema:"service name, must be unique"`
 	Version            string         `json:"version"               jsonschema:"optional semver tag for this build, e.g. v1.2.3"`
+	VersionPath        string         `json:"version_path"          jsonschema:"optional absolute path to hash for the generated version when version is omitted; useful when path is a stable wrapper script"`
 	Path               string         `json:"path"                  jsonschema:"absolute path to the binary or static directory"`
 	Args               []string       `json:"args"                  jsonschema:"optional arguments passed to the binary at startup"`
 	StablePort         int            `json:"stable_port"           jsonschema:"preferred stable port for single-port services (0 = auto-allocate). For multi-port services, use stable_ports instead."`
@@ -404,6 +405,7 @@ func (s *Server) registerTools(srv *sdkmcp.Server) {
 		svc, err := s.svc.Deploy(service.DeployRequest{
 			Name:               in.Name,
 			Version:            in.Version,
+			VersionPath:        in.VersionPath,
 			Type:               registry.ServiceType(in.Type),
 			WatchPaths:         in.WatchPaths,
 			Path:               in.Path,

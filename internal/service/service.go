@@ -129,6 +129,7 @@ func New(reg *registry.Registry, mgr *process.Manager, prx *proxy.Manager, logDi
 type DeployRequest struct {
 	Name               string
 	Version            string // optional semver tag, e.g. "v1.2.3"
+	VersionPath        string // optional file or directory to hash when Version is empty
 	Type               registry.ServiceType
 	Path               string         // binary path or static dir
 	Args               []string       // optional arguments passed to the binary at startup
@@ -184,7 +185,11 @@ func (s *Service) Deploy(req DeployRequest) (*registry.Service, error) {
 
 	version := req.Version
 	if version == "" {
-		version = hashPath(req.Path)
+		versionPath := req.VersionPath
+		if versionPath == "" {
+			versionPath = req.Path
+		}
+		version = hashPath(versionPath)
 	}
 
 	drainWindow := req.DrainWindow

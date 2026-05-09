@@ -386,6 +386,7 @@ func runDeploy(cli *client.Client, configPath string) {
 	req := client.DeployRequest{
 		Name:             cfg.Name,
 		Version:          cfg.Version,
+		VersionPath:      cfg.VersionPath,
 		Type:             registry.ServiceType(cfg.Type),
 		Path:             absOutput,
 		Args:             cfg.Args,

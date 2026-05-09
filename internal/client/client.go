@@ -26,6 +26,7 @@ func New(port int) *Client {
 type DeployRequest struct {
 	Name               string               `json:"name"`
 	Version            string               `json:"version,omitempty"`
+	VersionPath        string               `json:"version_path,omitempty"`
 	Type               registry.ServiceType `json:"type"`
 	Path               string               `json:"path"`
 	Args               []string             `json:"args,omitempty"`
