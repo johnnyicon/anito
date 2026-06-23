@@ -134,6 +134,22 @@ func TestWaitHTTPReady_ErrorMentionsRoute(t *testing.T) {
 	}
 }
 
+func TestDeployRejectsUnsafeProxyBindAddress(t *testing.T) {
+	svc := newTestService(t)
+	_, err := svc.Deploy(DeployRequest{
+		Name:             "unsafe-bind",
+		Type:             registry.TypeStatic,
+		Path:             t.TempDir(),
+		ProxyBindAddress: "0.0.0.0",
+	})
+	if err == nil {
+		t.Fatal("Deploy with wildcard proxy bind address succeeded")
+	}
+	if !strings.Contains(err.Error(), "proxy_bind_address") {
+		t.Fatalf("error = %q, want proxy_bind_address", err.Error())
+	}
+}
+
 func containsAny(s string, subs ...string) bool {
 	for _, sub := range subs {
 		if len(sub) > 0 {

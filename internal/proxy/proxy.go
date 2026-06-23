@@ -2,9 +2,11 @@ package proxy
 
 import (
 	"fmt"
+	"log"
 	"net"
 	"net/http"
 	"net/http/httputil"
+	"net/netip"
 	"net/url"
 	"strconv"
 	"strings"
@@ -12,6 +14,12 @@ import (
 	"sync/atomic"
 
 	"github.com/johnnyicon/anito/internal/registry"
+)
+
+var (
+	tailscaleIPv4Prefix = netip.MustParsePrefix("100.64.0.0/10")
+	tailscaleIPv6Prefix = netip.MustParsePrefix("fd7a:115c:a1e0::/48")
+	interfaceAddrs      = net.InterfaceAddrs
 )
 
 // handlerWrapper is stored in an atomic.Value so it can be swapped safely.
@@ -72,8 +80,12 @@ func (m *Manager) RegisterPorts(name string, ports map[string]int) error {
 }
 
 func (m *Manager) RegisterPortsWithBind(name string, ports map[string]int, bindAddress string) error {
+	bindAddress = strings.TrimSpace(bindAddress)
 	if bindAddress == "" {
 		bindAddress = registry.DefaultProxyBindAddress
+	}
+	if err := ValidateProxyBindAddress(bindAddress); err != nil {
+		return err
 	}
 
 	m.mu.Lock()
@@ -101,6 +113,7 @@ func (m *Manager) RegisterPortsWithBind(name string, ports map[string]int, bindA
 			e.listener = l
 			e.listener6 = l6
 			e.server = serverFor(e)
+			logNonLoopbackBind(name, portName, stablePort, bindAddress)
 			go e.server.Serve(l) //nolint:errcheck
 			if l6 != nil {
 				go e.server.Serve(l6) //nolint:errcheck
@@ -124,6 +137,7 @@ func (m *Manager) RegisterPortsWithBind(name string, ports map[string]int, bindA
 		}
 
 		e := &entry{stablePort: stablePort, bindAddress: bindAddress, listener: l, listener6: l6}
+		logNonLoopbackBind(name, portName, stablePort, bindAddress)
 
 		// Placeholder handler until Swap is called after a successful health check.
 		e.handler.Store(handlerWrapper{h: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -164,6 +178,82 @@ func listen(bindAddress string, stablePort int) (net.Listener, net.Listener, err
 	addr := net.JoinHostPort(bindAddress, strconv.Itoa(stablePort))
 	l, err := net.Listen("tcp", addr)
 	return l, nil, err
+}
+
+func ValidateProxyBindAddress(bindAddress string) error {
+	bindAddress = strings.TrimSpace(bindAddress)
+	if bindAddress == "" || bindAddress == registry.DefaultProxyBindAddress {
+		return nil
+	}
+	addrText := strings.TrimPrefix(strings.TrimSuffix(bindAddress, "]"), "[")
+	addr, err := netip.ParseAddr(addrText)
+	if err != nil {
+		return fmt.Errorf("proxy_bind_address %q must be localhost, a loopback IP, or a local Tailscale IP", bindAddress)
+	}
+	addr = addr.Unmap()
+	if addr.IsLoopback() {
+		return nil
+	}
+	if addr.IsUnspecified() {
+		return fmt.Errorf("proxy_bind_address %q is a wildcard bind; use localhost or this host's actual Tailscale IP", bindAddress)
+	}
+	if !isTailscaleAddress(addr) {
+		return fmt.Errorf("proxy_bind_address %q is not a Tailscale address; use localhost or this host's actual Tailscale IP", bindAddress)
+	}
+	ok, err := localInterfaceHasAddress(addr)
+	if err != nil {
+		return fmt.Errorf("validating proxy_bind_address %q: %w", bindAddress, err)
+	}
+	if !ok {
+		return fmt.Errorf("proxy_bind_address %q is not assigned to a local interface", bindAddress)
+	}
+	return nil
+}
+
+func isTailscaleAddress(addr netip.Addr) bool {
+	addr = addr.Unmap()
+	return tailscaleIPv4Prefix.Contains(addr) || tailscaleIPv6Prefix.Contains(addr)
+}
+
+func localInterfaceHasAddress(want netip.Addr) (bool, error) {
+	addrs, err := interfaceAddrs()
+	if err != nil {
+		return false, err
+	}
+	want = want.Unmap()
+	for _, raw := range addrs {
+		if addr, ok := netAddrToNetIP(raw); ok && addr.Unmap() == want {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+func netAddrToNetIP(raw net.Addr) (netip.Addr, bool) {
+	switch addr := raw.(type) {
+	case *net.IPNet:
+		return netIPToNetIPAddr(addr.IP)
+	case *net.IPAddr:
+		return netIPToNetIPAddr(addr.IP)
+	default:
+		return netip.Addr{}, false
+	}
+}
+
+func netIPToNetIPAddr(ip net.IP) (netip.Addr, bool) {
+	addr, ok := netip.AddrFromSlice(ip)
+	if !ok {
+		return netip.Addr{}, false
+	}
+	return addr.Unmap(), true
+}
+
+func logNonLoopbackBind(name, portName string, stablePort int, bindAddress string) {
+	addr, err := netip.ParseAddr(strings.TrimPrefix(strings.TrimSuffix(bindAddress, "]"), "["))
+	if err != nil || addr.Unmap().IsLoopback() {
+		return
+	}
+	log.Printf("[PROXY] name=%s port=%s stable_port=%d bind_address=%s exposure=tailnet auth=upstream", name, portName, stablePort, bindAddress)
 }
 
 // Swap atomically points the proxy for name at internalPort (default port).

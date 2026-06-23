@@ -171,6 +171,9 @@ func (s *Service) Deploy(req DeployRequest) (*registry.Service, error) {
 	if req.EnvFile == "null" {
 		req.EnvFile = ""
 	}
+	if err := proxy.ValidateProxyBindAddress(req.ProxyBindAddress); err != nil {
+		return nil, err
+	}
 
 	// Normalize: singular StablePort → StablePorts map.
 	if len(req.StablePorts) == 0 {
