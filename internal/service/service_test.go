@@ -38,6 +38,58 @@ func newTestService(t *testing.T) *Service {
 	return New(reg, mgr, prx, logDir, wtch, nil)
 }
 
+func TestValidateServiceName(t *testing.T) {
+	valid := []string{
+		"gomanan-mcp",
+		"svc_1",
+		"api.v2",
+		"A1",
+		strings.Repeat("a", 64),
+	}
+	for _, name := range valid {
+		if err := ValidateServiceName(name); err != nil {
+			t.Fatalf("ValidateServiceName(%q) returned error: %v", name, err)
+		}
+	}
+
+	invalid := []string{
+		"",
+		"../evil",
+		"a/b",
+		"a:b",
+		".hidden",
+		"-dash",
+		"svc..evil",
+		DaemonLogName,
+		DaemonLogName + "-copy",
+		strings.Repeat("a", 65),
+	}
+	for _, name := range invalid {
+		if err := ValidateServiceName(name); err == nil {
+			t.Fatalf("ValidateServiceName(%q) succeeded, want error", name)
+		}
+	}
+}
+
+func TestDeployRejectsUnsafeServiceNameBeforeLogFileCreate(t *testing.T) {
+	svc := newTestService(t)
+
+	_, err := svc.Deploy(DeployRequest{
+		Name:       "../evil",
+		Type:       registry.TypeBinary,
+		Path:       "/definitely/missing/binary",
+		StablePort: 0,
+	})
+	if err == nil || !strings.Contains(err.Error(), "invalid service name") {
+		t.Fatalf("Deploy returned %v, want invalid service name", err)
+	}
+
+	escapePath := filepath.Join(svc.logDir, "..", "evil.log")
+	if _, statErr := os.Stat(escapePath); !os.IsNotExist(statErr) {
+		t.Fatalf("unsafe log path %s exists or stat failed with non-ENOENT: %v", escapePath, statErr)
+	}
+}
+
 // startInlineServer binds a free port, starts an HTTP server in a goroutine,
 // and returns the port. The server is shut down via t.Cleanup.
 func startInlineServer(t *testing.T, status int) int {
@@ -721,6 +773,25 @@ func TestBuildLogs_WithContent(t *testing.T) {
 	}
 }
 
+func TestLogHelpersRejectUnsafeRegisteredServiceName(t *testing.T) {
+	svc := newTestService(t)
+	unsafeName := "../evil"
+	if err := svc.reg.Register(&registry.Service{
+		Name:   unsafeName,
+		Type:   registry.TypeBinary,
+		Status: registry.StatusStopped,
+	}); err != nil {
+		t.Fatalf("register unsafe fixture: %v", err)
+	}
+
+	if _, err := svc.Logs(unsafeName, 10); err == nil || !strings.Contains(err.Error(), "invalid service name") {
+		t.Fatalf("Logs returned %v, want invalid service name", err)
+	}
+	if _, err := svc.BuildLogs(unsafeName, 10); err == nil || !strings.Contains(err.Error(), "invalid service name") {
+		t.Fatalf("BuildLogs returned %v, want invalid service name", err)
+	}
+}
+
 // --- Reserve() tests ---
 
 // TestReserve_AllocatesPort verifies that Reserve claims a stable port and
@@ -766,6 +837,17 @@ func TestReserve_ExistingServicePreservesPort(t *testing.T) {
 	}
 
 	svc.prx.Remove("stable-svc")
+}
+
+func TestReserveRejectsUnsafeServiceName(t *testing.T) {
+	svc := newTestService(t)
+
+	if _, err := svc.Reserve("a/b", 0); err == nil || !strings.Contains(err.Error(), "invalid service name") {
+		t.Fatalf("Reserve returned %v, want invalid service name", err)
+	}
+	if _, err := svc.ReservePorts("../evil", map[string]int{"api": 0}); err == nil || !strings.Contains(err.Error(), "invalid service name") {
+		t.Fatalf("ReservePorts returned %v, want invalid service name", err)
+	}
 }
 
 // --- ReservePorts() tests ---
