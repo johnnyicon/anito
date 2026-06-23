@@ -14,6 +14,7 @@ import (
 	"github.com/labstack/echo/v4"
 	echomiddleware "github.com/labstack/echo/v4/middleware"
 
+	"github.com/johnnyicon/anito/internal/auth"
 	"github.com/johnnyicon/anito/internal/doctor"
 	"github.com/johnnyicon/anito/internal/issues"
 	"github.com/johnnyicon/anito/internal/registry"
@@ -31,13 +32,28 @@ type Server struct {
 	sess    *sessions.Store
 	port    int
 	version string
+
+	capabilityToken string
 }
 
 func New(svc *service.Service, iss *issues.Store, sess *sessions.Store, port int, version string) *Server {
 	return &Server{svc: svc, iss: iss, sess: sess, port: port, version: version}
 }
 
+func (s *Server) SetCapabilityToken(token string) {
+	s.capabilityToken = token
+}
+
 func (s *Server) Start() error {
+	if s.capabilityToken == "" {
+		token, source, err := auth.LoadOrCreateToken()
+		if err != nil {
+			return fmt.Errorf("capability auth: %w", err)
+		}
+		s.capabilityToken = token
+		log.Printf("[STARTUP] management API capability auth source=%s", source)
+	}
+
 	e := echo.New()
 	e.HideBanner = true
 	e.HidePort = true
@@ -59,6 +75,7 @@ func (s *Server) Start() error {
 
 	// Recover from panics
 	e.Use(echomiddleware.Recover())
+	e.Use(s.capabilityMiddleware())
 
 	// API routes
 	e.GET("/health", s.handleHealth)
@@ -103,6 +120,44 @@ func (s *Server) Start() error {
 	addr := fmt.Sprintf("localhost:%d", s.port)
 	log.Printf("[STARTUP] management API listening on %s", addr)
 	return e.Start(addr)
+}
+
+func (s *Server) capabilityMiddleware() echo.MiddlewareFunc {
+	return func(next echo.HandlerFunc) echo.HandlerFunc {
+		return func(c echo.Context) error {
+			if !requiresCapability(c.Request().Method, c.Request().URL.Path) {
+				return next(c)
+			}
+			if auth.Authorized(c.Request(), s.capabilityToken) {
+				return next(c)
+			}
+			c.Response().Header().Set("WWW-Authenticate", `Bearer realm="anito"`)
+			return echo.NewHTTPError(http.StatusUnauthorized, "anito capability token required")
+		}
+	}
+}
+
+func requiresCapability(method, path string) bool {
+	switch {
+	case method == http.MethodPost && path == "/deploy":
+		return true
+	case method == http.MethodPost && strings.HasPrefix(path, "/stop/"):
+		return true
+	case method == http.MethodPost && strings.HasPrefix(path, "/restart/"):
+		return true
+	case method == http.MethodPost && strings.HasPrefix(path, "/rollback/"):
+		return true
+	case method == http.MethodPost && strings.HasPrefix(path, "/remove/"):
+		return true
+	case method == http.MethodPost && path == "/issues":
+		return true
+	case method == http.MethodDelete && path == "/issues":
+		return true
+	case method == http.MethodPost && path == "/teardown":
+		return true
+	default:
+		return false
+	}
 }
 
 // DeployRequest is the payload for POST /deploy.

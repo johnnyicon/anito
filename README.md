@@ -32,6 +32,12 @@ go build -o ./anito ./cmd/anito/
 
 See [docs/setup.md](docs/setup.md) for the full setup guide, Makefile commands, day-to-day workflow, and troubleshooting.
 
+## Local control-plane token
+
+Anito treats its localhost control plane as privileged. On daemon startup it creates `~/.anito/capability-token` with `0600` permissions unless `ANITO_CAPABILITY_TOKEN` is already set. Mutating HTTP and MCP operations such as deploy, restart, remove, reserve, setup, issue report, and teardown require that token via `X-Anito-Capability-Token` or `Authorization: Bearer <token>`.
+
+The `anito` CLI reads the token automatically. Do not commit the token or pass it in URLs.
+
 ---
 
 ## Deploying your first service
