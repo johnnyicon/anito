@@ -44,6 +44,21 @@ If that also fails, start the daemon:
 launchctl load ~/Library/LaunchAgents/com.anito.daemon.plist
 ```
 
+## Capability token
+
+The MCP endpoint is bound to localhost, but mutating control-plane tools still require a local capability token. The daemon creates `~/.anito/capability-token` with `0600` permissions on startup unless `ANITO_CAPABILITY_TOKEN` is set.
+
+Clients that call privileged tools must send one of these headers:
+
+```http
+X-Anito-Capability-Token: <token>
+Authorization: Bearer <token>
+```
+
+Privileged MCP tools are `anito_deploy`, `anito_restart`, `anito_rollback`, `anito_stop`, `anito_remove`, `anito_reserve`, `anito_setup`, `anito_teardown`, `anito_report`, and `anito_submit_case_study`. Read-only discovery and status tools remain available on localhost without the token.
+
+The `anito` CLI attaches the token automatically for HTTP management API calls. MCP hosts need equivalent header configuration before they can call privileged tools.
+
 ---
 
 ## Available tools

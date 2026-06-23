@@ -1,11 +1,13 @@
 package mcp
 
 import (
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 
+	"github.com/johnnyicon/anito/internal/auth"
 	"github.com/johnnyicon/anito/internal/sessions"
 )
 
@@ -161,6 +163,111 @@ func TestExtractToolName(t *testing.T) {
 				if string(buf[:n]) != tc.body {
 					t.Errorf("body not restored: got %q, want %q", string(buf[:n]), tc.body)
 				}
+			}
+		})
+	}
+}
+
+func TestCapabilityMiddlewareProtectsPrivilegedTools(t *testing.T) {
+	cases := []struct {
+		name     string
+		body     string
+		token    string
+		bearer   string
+		wantCode int
+		wantCall bool
+	}{
+		{
+			name:     "initialize remains open",
+			body:     `{"method":"initialize","params":{}}`,
+			wantCode: http.StatusNoContent,
+			wantCall: true,
+		},
+		{
+			name:     "read tool remains open",
+			body:     `{"method":"tools/call","params":{"name":"anito_status"}}`,
+			wantCode: http.StatusNoContent,
+			wantCall: true,
+		},
+		{
+			name:     "privileged deploy requires token",
+			body:     `{"method":"tools/call","params":{"name":"anito_deploy"}}`,
+			wantCode: http.StatusUnauthorized,
+			wantCall: false,
+		},
+		{
+			name:     "privileged teardown accepts header token",
+			body:     `{"method":"tools/call","params":{"name":"anito_teardown"}}`,
+			token:    "secret",
+			wantCode: http.StatusNoContent,
+			wantCall: true,
+		},
+		{
+			name:     "privileged remove accepts bearer token",
+			body:     `{"method":"tools/call","params":{"name":"anito_remove"}}`,
+			bearer:   "secret",
+			wantCode: http.StatusNoContent,
+			wantCall: true,
+		},
+		{
+			name:     "batch with privileged tool requires token",
+			body:     `[{"method":"tools/call","params":{"name":"anito_status"}},{"method":"tools/call","params":{"name":"anito_deploy"}}]`,
+			wantCode: http.StatusUnauthorized,
+			wantCall: false,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			called := false
+			handler := capabilityMiddleware("secret", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				called = true
+				gotBody, _ := io.ReadAll(r.Body)
+				if string(gotBody) != tc.body {
+					t.Fatalf("body = %q, want %q", string(gotBody), tc.body)
+				}
+				w.WriteHeader(http.StatusNoContent)
+			}))
+
+			req := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(tc.body))
+			if tc.token != "" {
+				req.Header.Set(auth.HeaderName, tc.token)
+			}
+			if tc.bearer != "" {
+				req.Header.Set("Authorization", "Bearer "+tc.bearer)
+			}
+			rr := httptest.NewRecorder()
+			handler.ServeHTTP(rr, req)
+
+			if rr.Code != tc.wantCode {
+				t.Fatalf("status = %d, want %d; body=%s", rr.Code, tc.wantCode, rr.Body.String())
+			}
+			if called != tc.wantCall {
+				t.Fatalf("downstream called = %v, want %v", called, tc.wantCall)
+			}
+		})
+	}
+}
+
+func TestRPCBodyNeedsCapability(t *testing.T) {
+	cases := []struct {
+		name string
+		body string
+		want bool
+	}{
+		{name: "empty", body: "", want: false},
+		{name: "initialize", body: `{"method":"initialize"}`, want: false},
+		{name: "read tool", body: `{"method":"tools/call","params":{"name":"anito_services"}}`, want: false},
+		{name: "deploy tool", body: `{"method":"tools/call","params":{"name":"anito_deploy"}}`, want: true},
+		{name: "batch read only", body: `[{"method":"tools/call","params":{"name":"anito_services"}}]`, want: false},
+		{name: "batch privileged", body: `[{"method":"tools/call","params":{"name":"anito_status"}},{"method":"tools/call","params":{"name":"anito_remove"}}]`, want: true},
+		{name: "invalid json", body: `{not-json`, want: false},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := rpcBodyNeedsCapability([]byte(tc.body)); got != tc.want {
+				t.Fatalf("rpcBodyNeedsCapability = %v, want %v", got, tc.want)
 			}
 		})
 	}

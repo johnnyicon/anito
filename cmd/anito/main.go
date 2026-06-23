@@ -13,6 +13,7 @@ import (
 	"text/tabwriter"
 	"time"
 
+	"github.com/johnnyicon/anito/internal/auth"
 	"github.com/johnnyicon/anito/internal/client"
 	"github.com/johnnyicon/anito/internal/config"
 	"github.com/johnnyicon/anito/internal/issues"
@@ -864,10 +865,17 @@ func runDaemon(apiPort, mcpPort int, dataDir string) {
 
 	log.Printf("[STARTUP] version=%s data=%s api=:%d mcp=:%d", version, dataDir, apiPort, mcpPort)
 
+	capabilityToken, capabilitySource, err := auth.LoadOrCreateToken()
+	if err != nil {
+		log.Fatalf("capability auth: %v", err)
+	}
+	log.Printf("[STARTUP] capability auth source=%s", capabilitySource)
+
 	svc := service.New(reg, mgr, prx, logDir, wtch, iss)
 	svc.StartWatchers()
 
 	mcpSrv := mcpserver.New(svc, iss, sess, mcpPort)
+	mcpSrv.SetCapabilityToken(capabilityToken)
 	go func() {
 		if err := mcpSrv.Start(); err != nil {
 			log.Printf("MCP server error: %v", err)
@@ -875,6 +883,7 @@ func runDaemon(apiPort, mcpPort int, dataDir string) {
 	}()
 
 	srv := server.New(svc, iss, sess, apiPort, version)
+	srv.SetCapabilityToken(capabilityToken)
 	log.Fatal(srv.Start())
 }
 

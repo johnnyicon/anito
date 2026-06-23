@@ -61,6 +61,7 @@ make reload
 | Binary | `~/.local/bin/anito` |
 | Plist | `~/Library/LaunchAgents/com.anito.daemon.plist` |
 | Data + registry | `~/.anito/registry.json` |
+| Capability token | `~/.anito/capability-token` (`0600`; override with `ANITO_CAPABILITY_TOKEN`) |
 | Issue log | `~/.anito/issues.jsonl` |
 | Daemon log | `~/.anito/logs/anito.log` |
 | Service logs | `~/.anito/logs/<service-name>.log` |

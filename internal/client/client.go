@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/johnnyicon/anito/internal/auth"
 	"github.com/johnnyicon/anito/internal/issues"
 	"github.com/johnnyicon/anito/internal/registry"
 )
@@ -108,7 +109,11 @@ func (c *Client) Logs(name string, lines int) ([]string, error) {
 // It blocks until the connection is closed or an error occurs.
 func (c *Client) LogsFollow(name string, backlog int, w io.Writer) error {
 	url := fmt.Sprintf("%s/logs/%s?lines=%d&follow=true", c.base, name, backlog)
-	resp, err := http.Get(url) //nolint:noctx
+	req, err := http.NewRequest(http.MethodGet, url, nil) //nolint:noctx
+	if err != nil {
+		return err
+	}
+	resp, err := c.do(req)
 	if err != nil {
 		return fmt.Errorf("daemon unreachable — is anito running? (try: anito daemon): %w", err)
 	}
@@ -127,7 +132,11 @@ func (c *Client) LogsFollow(name string, backlog int, w io.Writer) error {
 }
 
 func (c *Client) getJSON(path string, out any) error {
-	resp, err := http.Get(c.base + path)
+	req, err := http.NewRequest(http.MethodGet, c.base+path, nil) //nolint:noctx
+	if err != nil {
+		return err
+	}
+	resp, err := c.do(req)
 	if err != nil {
 		return fmt.Errorf("daemon unreachable — is anito running? (try: anito daemon): %w", err)
 	}
@@ -148,7 +157,12 @@ func (c *Client) postJSON(path string, body any, out any) error {
 			return err
 		}
 	}
-	resp, err := http.Post(c.base+path, "application/json", &buf)
+	req, err := http.NewRequest(http.MethodPost, c.base+path, &buf) //nolint:noctx
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := c.do(req)
 	if err != nil {
 		return fmt.Errorf("daemon unreachable — is anito running? (try: anito daemon): %w", err)
 	}
@@ -160,6 +174,15 @@ func (c *Client) postJSON(path string, body any, out any) error {
 		return json.NewDecoder(resp.Body).Decode(out)
 	}
 	return nil
+}
+
+func (c *Client) do(req *http.Request) (*http.Response, error) {
+	token, _, err := auth.LoadClientToken()
+	if err != nil {
+		return nil, err
+	}
+	auth.AttachToken(req, token)
+	return http.DefaultClient.Do(req)
 }
 
 func (c *Client) Issues(n int, source string) ([]issues.Issue, error) {

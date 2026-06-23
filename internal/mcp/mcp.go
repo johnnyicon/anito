@@ -19,6 +19,7 @@ import (
 
 	sdkmcp "github.com/modelcontextprotocol/go-sdk/mcp"
 
+	"github.com/johnnyicon/anito/internal/auth"
 	"github.com/johnnyicon/anito/internal/doctor"
 	"github.com/johnnyicon/anito/internal/issues"
 	"github.com/johnnyicon/anito/internal/registry"
@@ -33,10 +34,16 @@ type Server struct {
 	iss  *issues.Store
 	sess *sessions.Store
 	port int
+
+	capabilityToken string
 }
 
 func New(svc *service.Service, iss *issues.Store, sess *sessions.Store, port int) *Server {
 	return &Server{svc: svc, iss: iss, sess: sess, port: port}
+}
+
+func (s *Server) SetCapabilityToken(token string) {
+	s.capabilityToken = token
 }
 
 // logErr auto-logs a tool error to the issue store. Called in each tool handler
@@ -60,6 +67,15 @@ func (s *Server) logErr(tool string, input any, err error) {
 
 // Start begins serving the MCP StreamableHTTP endpoint. Blocks until error.
 func (s *Server) Start() error {
+	if s.capabilityToken == "" {
+		token, source, err := auth.LoadOrCreateToken()
+		if err != nil {
+			return fmt.Errorf("capability auth: %w", err)
+		}
+		s.capabilityToken = token
+		log.Printf("[STARTUP] MCP capability auth source=%s", source)
+	}
+
 	srv := sdkmcp.NewServer(&sdkmcp.Implementation{
 		Name:    "anito",
 		Version: "v1.0.0",
@@ -77,7 +93,7 @@ func (s *Server) Start() error {
 		return srv
 	}, &sdkmcp.StreamableHTTPOptions{Stateless: true})
 
-	handler := sessionMiddleware(s.sess, mcpHandler)
+	handler := capabilityMiddleware(s.capabilityToken, sessionMiddleware(s.sess, mcpHandler))
 
 	addr := fmt.Sprintf("localhost:%d", s.port)
 	log.Printf("[STARTUP] MCP server listening on http://%s", addr)
@@ -128,6 +144,86 @@ func extractToolName(r *http.Request) string {
 		return ""
 	}
 	return rpc.Params.Name
+}
+
+func capabilityMiddleware(token string, next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !requestNeedsCapability(r) {
+			next.ServeHTTP(w, r)
+			return
+		}
+		if auth.Authorized(r, token) {
+			next.ServeHTTP(w, r)
+			return
+		}
+		w.Header().Set("WWW-Authenticate", `Bearer realm="anito"`)
+		http.Error(w, "anito capability token required", http.StatusUnauthorized)
+	})
+}
+
+func requestNeedsCapability(r *http.Request) bool {
+	if r.Method != http.MethodPost || r.Body == nil {
+		return false
+	}
+	body, err := io.ReadAll(r.Body)
+	r.Body = io.NopCloser(bytes.NewReader(body))
+	if err != nil {
+		return false
+	}
+	return rpcBodyNeedsCapability(body)
+}
+
+func rpcBodyNeedsCapability(body []byte) bool {
+	body = bytes.TrimSpace(body)
+	if len(body) == 0 {
+		return false
+	}
+	if body[0] == '[' {
+		var batch []rpcToolCall
+		if json.Unmarshal(body, &batch) != nil {
+			return false
+		}
+		for _, rpc := range batch {
+			if rpc.needsCapability() {
+				return true
+			}
+		}
+		return false
+	}
+	var rpc rpcToolCall
+	if json.Unmarshal(body, &rpc) != nil {
+		return false
+	}
+	return rpc.needsCapability()
+}
+
+type rpcToolCall struct {
+	Method string `json:"method"`
+	Params struct {
+		Name string `json:"name"`
+	} `json:"params"`
+}
+
+func (r rpcToolCall) needsCapability() bool {
+	return r.Method == "tools/call" && isPrivilegedTool(r.Params.Name)
+}
+
+func isPrivilegedTool(name string) bool {
+	switch name {
+	case "anito_deploy",
+		"anito_restart",
+		"anito_rollback",
+		"anito_stop",
+		"anito_remove",
+		"anito_reserve",
+		"anito_setup",
+		"anito_teardown",
+		"anito_report",
+		"anito_submit_case_study":
+		return true
+	default:
+		return false
+	}
 }
 
 // --- input/output types ---

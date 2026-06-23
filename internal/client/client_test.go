@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/johnnyicon/anito/internal/auth"
 	"github.com/johnnyicon/anito/internal/issues"
 	"github.com/johnnyicon/anito/internal/registry"
 )
@@ -35,6 +36,24 @@ func TestNew_DifferentPort(t *testing.T) {
 	want := "http://localhost:9999"
 	if c.base != want {
 		t.Fatalf("New(9999).base = %q; want %q", c.base, want)
+	}
+}
+
+func TestClientAttachesCapabilityToken(t *testing.T) {
+	t.Setenv(auth.EnvToken, "secret")
+
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get(auth.HeaderName); got != "secret" {
+			t.Fatalf("%s = %q, want secret", auth.HeaderName, got)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(registry.Service{Name: "my-svc"})
+	}))
+	defer ts.Close()
+
+	c := newTestClient(ts)
+	if _, err := c.Deploy(DeployRequest{Name: "my-svc", Path: "/tmp/my-svc"}); err != nil {
+		t.Fatalf("Deploy: %v", err)
 	}
 }
 
