@@ -50,7 +50,7 @@ func New(logDir string, reg *registry.Registry) (*Manager, error) {
 }
 
 // MarkDraining registers pid as an intentional kill so the crash monitor ignores it.
-// Call this before StopPID when draining a process that is no longer in m.procs.
+// Call this before draining a process that is no longer in m.procs.
 func (m *Manager) MarkDraining(pid int) {
 	if pid <= 0 {
 		return
@@ -175,28 +175,6 @@ func (m *Manager) Stop(name string) error {
 	}
 
 	return drainProc(rp.cmd, rp.done)
-}
-
-// Deprecated: StopPID has a goroutine leak — proc.Wait() races with the
-// cmd.Wait() goroutine from Start(). Use Deregister() + DrainProc() instead,
-// which reuses the Start goroutine's done channel and avoids the double-wait.
-// Kept temporarily for backward compatibility; will be removed before v1.0.
-func StopPID(pid int) {
-	proc, err := os.FindProcess(pid)
-	if err != nil {
-		return
-	}
-	_ = proc.Signal(syscall.SIGTERM)
-	done := make(chan struct{})
-	go func() {
-		_, _ = proc.Wait()
-		close(done)
-	}()
-	select {
-	case <-done:
-	case <-time.After(drainTimeout):
-		_ = proc.Signal(syscall.SIGKILL)
-	}
 }
 
 // Restart stops the old process (if running) then starts a new one.

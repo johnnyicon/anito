@@ -309,66 +309,6 @@ func TestUpdateLastDeployedErrorForUnknown(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// UpdateInternalPort
-// ---------------------------------------------------------------------------
-
-// TestUpdateInternalPortSetsPortAndPersists verifies that UpdateInternalPort
-// records the ephemeral port. When InternalPorts map is populated (via
-// NormalizePorts at registration), save() round-trips correctly because
-// syncSingularFromMap reads from the map.
-func TestUpdateInternalPortSetsPortAndPersists(t *testing.T) {
-	dir := t.TempDir()
-	r, err := New(dir)
-	if err != nil {
-		t.Fatalf("New: %v", err)
-	}
-	// Register with a non-zero InternalPort so NormalizePorts creates
-	// InternalPorts={"default": <port>}, enabling the save round-trip.
-	if err := r.Register(&Service{
-		Name:         "svc",
-		StablePort:   3000,
-		InternalPort: 49000,
-		Status:       StatusRunning,
-	}); err != nil {
-		t.Fatalf("Register: %v", err)
-	}
-
-	if err := r.UpdateInternalPort("svc", 58000); err != nil {
-		t.Fatalf("UpdateInternalPort: %v", err)
-	}
-
-	// Note: UpdateInternalPort sets the singular field, but save() calls
-	// syncSingularFromMap which reads from InternalPorts map (still has the
-	// old value from Register). The singular field is overwritten by the
-	// map value. This is expected — callers should use UpdateInternalPorts
-	// (plural) for correct behavior. This test exercises the code path.
-	got, _ := r.Get("svc")
-	if got.InternalPort != 49000 {
-		t.Errorf("InternalPort = %d, want 49000 (map takes precedence via syncSingularFromMap)", got.InternalPort)
-	}
-
-	r2, err := New(dir)
-	if err != nil {
-		t.Fatalf("New (reload): %v", err)
-	}
-	got2, _ := r2.Get("svc")
-	if got2.InternalPort != 49000 {
-		t.Errorf("after reload: InternalPort = %d, want 49000", got2.InternalPort)
-	}
-}
-
-// TestUpdateInternalPortErrorForUnknown verifies error on unknown service.
-func TestUpdateInternalPortErrorForUnknown(t *testing.T) {
-	r, err := New(t.TempDir())
-	if err != nil {
-		t.Fatalf("New: %v", err)
-	}
-	if err := r.UpdateInternalPort("ghost", 58000); err == nil {
-		t.Fatal("expected error for unknown service, got nil")
-	}
-}
-
-// ---------------------------------------------------------------------------
 // UpdateStartHistory
 // ---------------------------------------------------------------------------
 
