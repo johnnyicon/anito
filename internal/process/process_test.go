@@ -589,9 +589,15 @@ func TestStopPID_Running(t *testing.T) {
 		t.Fatal("expected non-zero PID after Start")
 	}
 
-	// Deregister so Stop doesn't also clean up — we want StopPID to be the actor.
-	mgr.Deregister("stoppid")
+	// Deregister so Stop doesn't also clean up; wait on the Start goroutine so
+	// it can close the log file before t.TempDir cleanup runs.
+	_, _, done := mgr.Deregister("stoppid")
 	StopPID(pid) // should not block indefinitely
+	select {
+	case <-done:
+	case <-time.After(drainTimeout):
+		t.Fatal("StopPID did not terminate the process before drain timeout")
+	}
 }
 
 // --- DrainProc (exported wrapper) ---
