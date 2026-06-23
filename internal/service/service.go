@@ -60,6 +60,38 @@ var reservedPorts = map[int]bool{
 	7701: true, // MCP server
 }
 
+// ValidateServiceName rejects names that would be unsafe as registry/proxy keys
+// or log-file path segments.
+func ValidateServiceName(name string) error {
+	if name == "" {
+		return fmt.Errorf("invalid service name: name is required")
+	}
+	if strings.HasPrefix(name, DaemonLogName) {
+		return fmt.Errorf("invalid service name %q: %s is reserved", name, DaemonLogName)
+	}
+	if len(name) > 64 {
+		return fmt.Errorf("invalid service name %q: must be 64 characters or fewer", name)
+	}
+	if strings.Contains(name, "..") {
+		return fmt.Errorf("invalid service name %q: must not contain '..'", name)
+	}
+	if !isServiceNameAlphaNum(name[0]) {
+		return fmt.Errorf("invalid service name %q: must start with a letter or digit", name)
+	}
+	for i := 1; i < len(name); i++ {
+		c := name[i]
+		if isServiceNameAlphaNum(c) || c == '.' || c == '_' || c == '-' {
+			continue
+		}
+		return fmt.Errorf("invalid service name %q: only letters, digits, '.', '_' and '-' are allowed", name)
+	}
+	return nil
+}
+
+func isServiceNameAlphaNum(c byte) bool {
+	return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9')
+}
+
 // Service owns the core Anito operations. Create one per daemon via New.
 type Service struct {
 	reg    *registry.Registry
@@ -160,6 +192,9 @@ func (s *Service) lockDeploy(name string) func() {
 //   - If StablePorts is nil and StablePort == 0, a port is auto-allocated.
 //   - Re-deploying an existing service always preserves its stable port(s).
 func (s *Service) Deploy(req DeployRequest) (*registry.Service, error) {
+	if err := ValidateServiceName(req.Name); err != nil {
+		return nil, err
+	}
 	defer s.lockDeploy(req.Name)()
 
 	if req.HealthCheck == "" {
@@ -385,6 +420,9 @@ func (s *Service) Stop(name string) error {
 }
 
 func (s *Service) Restart(name string) error {
+	if err := ValidateServiceName(name); err != nil {
+		return err
+	}
 	defer s.lockDeploy(name)()
 	return s.restartLocked(name)
 }
@@ -704,11 +742,15 @@ func (s *Service) handleCrash(name string) {
 		_ = s.reg.UpdateCrashState(name, attempt, true)
 		_ = s.reg.UpdateStatus(name, registry.StatusFailed, 0)
 		if s.iss != nil {
+			logContext := ""
+			if logPath, err := s.logFilePath(name); err == nil {
+				logContext = tailLog(logPath, 15)
+			}
 			_ = s.iss.Append(issues.Issue{
 				Source:   "daemon:crash_give_up",
 				Tool:     "crash_recovery",
 				Error:    fmt.Sprintf("service %s gave up after %d crash attempts", name, attempt),
-				Context:  tailLog(filepath.Join(s.logDir, name+".log"), 15),
+				Context:  logContext,
 				Severity: "error",
 			})
 		}
@@ -747,6 +789,9 @@ func (s *Service) BuildLog(name string) (string, error) {
 		return "", fmt.Errorf("service %q config has no build command", name)
 	}
 
+	if err := ValidateServiceName(name); err != nil {
+		return "", err
+	}
 	buildLogPath := filepath.Join(s.logDir, name+"-build.log")
 	logFile, err := os.Create(buildLogPath)
 	if err != nil {
@@ -767,6 +812,9 @@ func (s *Service) BuildLog(name string) (string, error) {
 // buildLogFilePath returns the path to the build log for a service.
 // Returns an error if the service is not registered.
 func (s *Service) buildLogFilePath(name string) (string, error) {
+	if err := ValidateServiceName(name); err != nil {
+		return "", err
+	}
 	if _, ok := s.reg.Get(name); !ok {
 		return "", fmt.Errorf("service %q not found", name)
 	}
@@ -856,6 +904,9 @@ func (s *Service) BuildLogStream(ctx context.Context, name string) (<-chan strin
 func (s *Service) logFilePath(name string) (string, error) {
 	if name == DaemonLogName {
 		return filepath.Join(s.logDir, "anito.log"), nil
+	}
+	if err := ValidateServiceName(name); err != nil {
+		return "", err
 	}
 	if _, ok := s.reg.Get(name); !ok {
 		return "", fmt.Errorf("service %q not found", name)
@@ -949,6 +1000,9 @@ func (s *Service) LogStream(ctx context.Context, name string) (<-chan string, er
 // For backward compat, preferredPort allocates a single "default" port.
 // For multi-port, use ReservePorts instead.
 func (s *Service) Reserve(name string, preferredPort int) (int, error) {
+	if err := ValidateServiceName(name); err != nil {
+		return 0, err
+	}
 	ports, err := s.allocatePorts(name, map[string]int{"default": preferredPort}, registry.DefaultProxyBindAddress)
 	if err != nil {
 		return 0, err
@@ -971,6 +1025,9 @@ func (s *Service) Reserve(name string, preferredPort int) (int, error) {
 
 // ReservePorts claims multiple named stable ports for a service without deploying it.
 func (s *Service) ReservePorts(name string, preferred map[string]int) (map[string]int, error) {
+	if err := ValidateServiceName(name); err != nil {
+		return nil, err
+	}
 	ports, err := s.allocatePorts(name, preferred, registry.DefaultProxyBindAddress)
 	if err != nil {
 		return nil, err
