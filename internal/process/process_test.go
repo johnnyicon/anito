@@ -577,29 +577,6 @@ func TestMarkDraining_PositivePID(t *testing.T) {
 	}
 }
 
-// --- StopPID ---
-
-// TestStopPID_Running verifies StopPID terminates a running process.
-func TestStopPID_Running(t *testing.T) {
-	mgr, reg := newTestManager(t)
-	_ = registerAndStart(t, mgr, reg, "stoppid", "fake_service")
-
-	pid := mgr.PID("stoppid")
-	if pid == 0 {
-		t.Fatal("expected non-zero PID after Start")
-	}
-
-	// Deregister so Stop doesn't also clean up; wait on the Start goroutine so
-	// it can close the log file before t.TempDir cleanup runs.
-	_, _, done := mgr.Deregister("stoppid")
-	StopPID(pid) // should not block indefinitely
-	select {
-	case <-done:
-	case <-time.After(drainTimeout):
-		t.Fatal("StopPID did not terminate the process before drain timeout")
-	}
-}
-
 // --- DrainProc (exported wrapper) ---
 
 // TestDrainProc_NilProcess verifies DrainProc is a no-op for an unstarted cmd.

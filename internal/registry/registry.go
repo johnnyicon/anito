@@ -348,24 +348,6 @@ func (r *Registry) UpdateLastDeployed(name string, t time.Time) error {
 	return r.save()
 }
 
-// UpdateInternalPort records the ephemeral port the process is running on.
-//
-// Deprecated: This method sets s.InternalPort directly, but save() calls
-// syncSingularFromMap() which overwrites it from the InternalPorts map.
-// The singular field is effectively derived — use UpdateInternalPorts instead.
-// Kept for backward compatibility; will be removed before v1.0.
-func (r *Registry) UpdateInternalPort(name string, port int) error {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	s, ok := r.services[name]
-	if !ok {
-		return fmt.Errorf("service %q not found", name)
-	}
-	s.InternalPort = port
-	s.UpdatedAt = time.Now()
-	return r.save()
-}
-
 // UpdateStartHistory records a new start event in the ring buffer (last 10 entries).
 // Call with exitCode=-1, duration=0 when the process is starting.
 // Call again with the actual exit code and duration when it exits.
