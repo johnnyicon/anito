@@ -221,6 +221,77 @@ func TestRegisterWithBindUsesExplicitAddress(t *testing.T) {
 	}
 }
 
+func TestValidateProxyBindAddressAllowsLoopback(t *testing.T) {
+	for _, bindAddress := range []string{"", "localhost", "127.0.0.1", "::1", "[::1]"} {
+		t.Run(bindAddress, func(t *testing.T) {
+			if err := ValidateProxyBindAddress(bindAddress); err != nil {
+				t.Fatalf("ValidateProxyBindAddress(%q): %v", bindAddress, err)
+			}
+		})
+	}
+}
+
+func TestValidateProxyBindAddressRejectsWildcardAndLAN(t *testing.T) {
+	for _, bindAddress := range []string{"0.0.0.0", "::", "192.168.1.10", "10.0.0.5", "example.test"} {
+		t.Run(bindAddress, func(t *testing.T) {
+			if err := ValidateProxyBindAddress(bindAddress); err == nil {
+				t.Fatalf("ValidateProxyBindAddress(%q) succeeded, want rejection", bindAddress)
+			}
+		})
+	}
+}
+
+func TestValidateProxyBindAddressAllowsLocalTailscaleIP(t *testing.T) {
+	restoreInterfaceAddrs(t, []net.Addr{mustCIDRAddr(t, "100.94.58.29/32")})
+	if err := ValidateProxyBindAddress("100.94.58.29"); err != nil {
+		t.Fatalf("ValidateProxyBindAddress(local tailscale): %v", err)
+	}
+}
+
+func TestValidateProxyBindAddressRejectsUnassignedTailscaleIP(t *testing.T) {
+	restoreInterfaceAddrs(t, []net.Addr{mustCIDRAddr(t, "100.94.58.29/32")})
+	err := ValidateProxyBindAddress("100.94.58.30")
+	if err == nil {
+		t.Fatal("expected unassigned Tailscale IP to be rejected")
+	}
+	if !strings.Contains(err.Error(), "not assigned") {
+		t.Fatalf("error = %q, want not assigned", err.Error())
+	}
+}
+
+func TestRegisterWithBindRejectsUnsafeAddress(t *testing.T) {
+	m := NewManager()
+	port := freePort(t)
+
+	err := m.RegisterWithBind("svc", port, "0.0.0.0")
+	if err == nil {
+		t.Fatal("RegisterWithBind with wildcard address succeeded")
+	}
+	if !strings.Contains(err.Error(), "proxy_bind_address") {
+		t.Fatalf("error = %q, want proxy_bind_address", err.Error())
+	}
+}
+
+func restoreInterfaceAddrs(t *testing.T, addrs []net.Addr) {
+	t.Helper()
+	orig := interfaceAddrs
+	interfaceAddrs = func() ([]net.Addr, error) {
+		return addrs, nil
+	}
+	t.Cleanup(func() {
+		interfaceAddrs = orig
+	})
+}
+
+func mustCIDRAddr(t *testing.T, cidr string) net.Addr {
+	t.Helper()
+	_, ipNet, err := net.ParseCIDR(cidr)
+	if err != nil {
+		t.Fatalf("ParseCIDR(%q): %v", cidr, err)
+	}
+	return ipNet
+}
+
 // TestRemoveReleasesPort verifies that after Remove(), the port is no longer
 // held by the proxy and can be rebound by a new listener.
 func TestRemoveReleasesPort(t *testing.T) {
