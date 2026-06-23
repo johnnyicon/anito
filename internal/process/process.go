@@ -396,20 +396,51 @@ func drainProc(cmd *exec.Cmd, done <-chan struct{}) error {
 	return nil
 }
 
-// loadEnvFile reads a simple KEY=VALUE env file.
+// loadEnvFile reads a KEY=VALUE env file.
 func loadEnvFile(path string) ([]string, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, err
 	}
 	var vars []string
-	for _, line := range splitLines(string(data)) {
-		if line == "" || line[0] == '#' {
+	for i, line := range splitLines(string(data)) {
+		envLine, ok, err := parseEnvLine(line)
+		if err != nil {
+			return nil, fmt.Errorf("%s:%d: %w", path, i+1, err)
+		}
+		if !ok {
 			continue
 		}
-		vars = append(vars, line)
+		vars = append(vars, envLine)
 	}
 	return vars, nil
+}
+
+func parseEnvLine(line string) (string, bool, error) {
+	trimmed := strings.TrimSpace(line)
+	if trimmed == "" || strings.HasPrefix(trimmed, "#") {
+		return "", false, nil
+	}
+	if strings.HasPrefix(trimmed, "export ") || strings.HasPrefix(trimmed, "export\t") {
+		trimmed = strings.TrimSpace(strings.TrimPrefix(strings.TrimPrefix(trimmed, "export "), "export\t"))
+	}
+
+	eq := strings.Index(trimmed, "=")
+	if eq <= 0 {
+		return "", false, fmt.Errorf("invalid env entry %q: expected KEY=VALUE", line)
+	}
+	key := strings.TrimSpace(trimmed[:eq])
+	value := strings.TrimSpace(trimmed[eq+1:])
+	if key == "" || strings.ContainsAny(key, " \t\r\n=") {
+		return "", false, fmt.Errorf("invalid env key %q", key)
+	}
+	if len(value) >= 2 {
+		if (value[0] == '"' && value[len(value)-1] == '"') ||
+			(value[0] == '\'' && value[len(value)-1] == '\'') {
+			value = value[1 : len(value)-1]
+		}
+	}
+	return key + "=" + value, true, nil
 }
 
 func splitLines(s string) []string {
