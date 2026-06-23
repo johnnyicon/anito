@@ -470,6 +470,49 @@ func TestLoadEnvFile(t *testing.T) {
 	}
 }
 
+// TestLoadEnvFile_NormalizesEnvSyntax verifies supported dotenv-style syntax.
+func TestLoadEnvFile_NormalizesEnvSyntax(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, ".env")
+	content := strings.Join([]string{
+		"  # indented comment",
+		" export FOO = \"bar baz\" ",
+		"BAZ='qux'",
+		"EMPTY=",
+		"PORT = 3000",
+		"",
+	}, "\n")
+	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	vars, err := loadEnvFile(path)
+	if err != nil {
+		t.Fatalf("loadEnvFile: %v", err)
+	}
+	want := []string{"FOO=bar baz", "BAZ=qux", "EMPTY=", "PORT=3000"}
+	if strings.Join(vars, "|") != strings.Join(want, "|") {
+		t.Fatalf("vars = %v, want %v", vars, want)
+	}
+}
+
+func TestLoadEnvFile_RejectsMalformedLines(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, ".env")
+	content := "GOOD=value\nnot-an-env-line\n"
+	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := loadEnvFile(path)
+	if err == nil {
+		t.Fatal("expected malformed env line error")
+	}
+	if !strings.Contains(err.Error(), ".env:2") || !strings.Contains(err.Error(), "expected KEY=VALUE") {
+		t.Fatalf("error = %q, want file line and parse reason", err.Error())
+	}
+}
+
 // TestLoadEnvFile_Missing returns error for nonexistent file.
 func TestLoadEnvFile_Missing(t *testing.T) {
 	_, err := loadEnvFile("/nonexistent/file")
