@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -157,6 +158,39 @@ func TestAppendMultipleIssuesAsSeparateLines(t *testing.T) {
 		var iss Issue
 		if err := json.Unmarshal([]byte(line), &iss); err != nil {
 			t.Errorf("line %d: invalid JSON: %v", i, err)
+		}
+	}
+}
+
+func TestAppendCompactsLogWhenOverLimit(t *testing.T) {
+	origMaxBytes := maxIssueLogBytes
+	origMaxLines := maxIssueLogLines
+	maxIssueLogBytes = 1
+	maxIssueLogLines = 3
+	t.Cleanup(func() {
+		maxIssueLogBytes = origMaxBytes
+		maxIssueLogLines = origMaxLines
+	})
+
+	dir := t.TempDir()
+	s := New(dir)
+	for i := 0; i < 5; i++ {
+		id := strconv.Itoa(i)
+		if err := s.Append(Issue{ID: id, Error: "err"}); err != nil {
+			t.Fatalf("Append %d: %v", i, err)
+		}
+	}
+
+	issues, err := s.Recent(0, "")
+	if err != nil {
+		t.Fatalf("Recent: %v", err)
+	}
+	if len(issues) != 3 {
+		t.Fatalf("got %d issues after compaction, want 3", len(issues))
+	}
+	for i, want := range []string{"2", "3", "4"} {
+		if issues[i].ID != want {
+			t.Fatalf("issues[%d].ID = %q, want %q", i, issues[i].ID, want)
 		}
 	}
 }

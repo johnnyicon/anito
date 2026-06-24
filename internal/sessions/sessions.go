@@ -22,26 +22,31 @@ type Session struct {
 
 // Store is a thread-safe persistent session registry.
 type Store struct {
-	mu   sync.Mutex
-	path string
+	mu       sync.Mutex
+	path     string
+	sessions map[string]Session
+	loaded   bool
+	lastSave time.Time
+	now      func() time.Time
 }
+
+var touchSaveInterval = 2 * time.Second
 
 // New returns a Store backed by <dataDir>/sessions.json.
 func New(dataDir string) *Store {
-	return &Store{path: dataDir + "/sessions.json"}
+	return &Store{path: dataDir + "/sessions.json", now: time.Now}
 }
 
 // Create records a newly initialised session.
 func (s *Store) Create(id string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	m, _ := s.load()
-	if m == nil {
-		m = make(map[string]Session)
+	if err := s.loadCached(); err != nil {
+		return err
 	}
-	now := time.Now()
-	m[id] = Session{ID: id, CreatedAt: now, LastSeenAt: now}
-	return s.save(m)
+	now := s.now()
+	s.sessions[id] = Session{ID: id, CreatedAt: now, LastSeenAt: now}
+	return s.save(s.sessions)
 }
 
 // Touch updates the last-seen timestamp and increments the call counter.
@@ -49,34 +54,37 @@ func (s *Store) Create(id string) error {
 func (s *Store) Touch(id, tool string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	m, _ := s.load()
-	if m == nil {
-		m = make(map[string]Session)
+	if err := s.loadCached(); err != nil {
+		return err
 	}
-	sess := m[id]
-	if sess.ID == "" {
+	now := s.now()
+	sess := s.sessions[id]
+	isNew := sess.ID == ""
+	if isNew {
 		// First touch for an unknown session — create it now.
-		sess = Session{ID: id, CreatedAt: time.Now()}
+		sess = Session{ID: id, CreatedAt: now}
 	}
-	sess.LastSeenAt = time.Now()
+	sess.LastSeenAt = now
 	sess.CallCount++
 	if tool != "" {
 		sess.LastTool = tool
 	}
-	m[id] = sess
-	return s.save(m)
+	s.sessions[id] = sess
+	if isNew || now.Sub(s.lastSave) >= touchSaveInterval {
+		return s.save(s.sessions)
+	}
+	return nil
 }
 
 // List returns all sessions sorted by LastSeenAt descending (most recent first).
 func (s *Store) List() ([]Session, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	m, err := s.load()
-	if err != nil {
+	if err := s.loadCached(); err != nil {
 		return nil, err
 	}
-	out := make([]Session, 0, len(m))
-	for _, sess := range m {
+	out := make([]Session, 0, len(s.sessions))
+	for _, sess := range s.sessions {
 		out = append(out, sess)
 	}
 	sort.Slice(out, func(i, j int) bool {
@@ -90,20 +98,19 @@ func (s *Store) List() ([]Session, error) {
 func (s *Store) Cleanup(maxAge time.Duration) (int, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	m, err := s.load()
-	if err != nil {
+	if err := s.loadCached(); err != nil {
 		return 0, err
 	}
-	cutoff := time.Now().Add(-maxAge)
+	cutoff := s.now().Add(-maxAge)
 	removed := 0
-	for id, sess := range m {
+	for id, sess := range s.sessions {
 		if sess.LastSeenAt.Before(cutoff) {
-			delete(m, id)
+			delete(s.sessions, id)
 			removed++
 		}
 	}
 	if removed > 0 {
-		if err := s.save(m); err != nil {
+		if err := s.save(s.sessions); err != nil {
 			return 0, err
 		}
 	}
@@ -112,6 +119,23 @@ func (s *Store) Cleanup(maxAge time.Duration) (int, error) {
 
 type storeFile struct {
 	Sessions map[string]Session `json:"sessions"`
+}
+
+func (s *Store) loadCached() error {
+	if s.loaded {
+		return nil
+	}
+	m, err := s.load()
+	if err != nil {
+		return err
+	}
+	s.sessions = m
+	s.loaded = true
+	if s.now == nil {
+		s.now = time.Now
+	}
+	s.lastSave = s.now()
+	return nil
 }
 
 func (s *Store) load() (map[string]Session, error) {
@@ -137,5 +161,14 @@ func (s *Store) save(m map[string]Session) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(s.path, data, 0644)
+	if err := os.WriteFile(s.path, data, 0644); err != nil {
+		return err
+	}
+	s.sessions = m
+	s.loaded = true
+	if s.now == nil {
+		s.now = time.Now
+	}
+	s.lastSave = s.now()
+	return nil
 }
