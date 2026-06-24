@@ -34,6 +34,11 @@ type Store struct {
 	path string
 }
 
+var (
+	maxIssueLogBytes int64 = 1 << 20
+	maxIssueLogLines       = 1000
+)
+
 // New returns a Store backed by <dataDir>/issues.jsonl.
 // The file is created on first write; the directory must already exist.
 func New(dataDir string) *Store {
@@ -65,9 +70,14 @@ func (s *Store) Append(iss Issue) error {
 	if err != nil {
 		return fmt.Errorf("issues: open %s: %w", s.path, err)
 	}
-	defer f.Close()
-	_, err = fmt.Fprintf(f, "%s\n", b)
-	return err
+	if _, err = fmt.Fprintf(f, "%s\n", b); err != nil {
+		_ = f.Close()
+		return err
+	}
+	if err := f.Close(); err != nil {
+		return err
+	}
+	return s.compactIfNeededLocked()
 }
 
 // Clear removes all issues from the log.
@@ -94,6 +104,9 @@ func (s *Store) Recent(n int, source string) ([]Issue, error) {
 	defer f.Close()
 
 	var all []Issue
+	if n > 0 {
+		all = make([]Issue, 0, n)
+	}
 	scanner := bufio.NewScanner(f)
 	for scanner.Scan() {
 		line := scanner.Bytes()
@@ -104,6 +117,10 @@ func (s *Store) Recent(n int, source string) ([]Issue, error) {
 		if err := json.Unmarshal(line, &iss); err == nil {
 			if source == "" || strings.HasPrefix(iss.Source, source) {
 				all = append(all, iss)
+				if n > 0 && len(all) > n {
+					copy(all, all[len(all)-n:])
+					all = all[:n]
+				}
 			}
 		}
 	}
@@ -111,8 +128,53 @@ func (s *Store) Recent(n int, source string) ([]Issue, error) {
 		return nil, fmt.Errorf("issues: scan: %w", err)
 	}
 
-	if n <= 0 || n >= len(all) {
-		return all, nil
+	return all, nil
+}
+
+func (s *Store) compactIfNeededLocked() error {
+	if maxIssueLogBytes <= 0 || maxIssueLogLines <= 0 {
+		return nil
 	}
-	return all[len(all)-n:], nil
+	info, err := os.Stat(s.path)
+	if err != nil {
+		return err
+	}
+	if info.Size() <= maxIssueLogBytes {
+		return nil
+	}
+	lines, err := lastIssueLines(s.path, maxIssueLogLines)
+	if err != nil {
+		return err
+	}
+	data := strings.Join(lines, "\n")
+	if data != "" {
+		data += "\n"
+	}
+	return os.WriteFile(s.path, []byte(data), 0644)
+}
+
+func lastIssueLines(path string, n int) ([]string, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+
+	lines := make([]string, 0, n)
+	scanner := bufio.NewScanner(f)
+	for scanner.Scan() {
+		line := scanner.Text()
+		if line == "" {
+			continue
+		}
+		lines = append(lines, line)
+		if len(lines) > n {
+			copy(lines, lines[len(lines)-n:])
+			lines = lines[:n]
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		return nil, err
+	}
+	return lines, nil
 }

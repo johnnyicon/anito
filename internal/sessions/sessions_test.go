@@ -91,6 +91,50 @@ func TestTouch_EmptyToolDoesNotClearLastTool(t *testing.T) {
 	}
 }
 
+func TestTouchThrottlesPersistence(t *testing.T) {
+	dir := t.TempDir()
+	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	s := New(dir)
+	s.now = func() time.Time { return now }
+
+	if err := s.Create("abc"); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if err := s.Touch("abc", "anito_status"); err != nil {
+		t.Fatalf("Touch: %v", err)
+	}
+
+	inMemory, err := s.List()
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if inMemory[0].CallCount != 1 {
+		t.Fatalf("in-memory CallCount = %d, want 1", inMemory[0].CallCount)
+	}
+
+	persisted := New(dir)
+	onDisk, err := persisted.List()
+	if err != nil {
+		t.Fatalf("persisted List: %v", err)
+	}
+	if onDisk[0].CallCount != 0 {
+		t.Fatalf("on-disk CallCount after throttled touch = %d, want 0", onDisk[0].CallCount)
+	}
+
+	now = now.Add(touchSaveInterval + time.Millisecond)
+	if err := s.Touch("abc", "anito_status"); err != nil {
+		t.Fatalf("Touch after interval: %v", err)
+	}
+	persisted = New(dir)
+	onDisk, err = persisted.List()
+	if err != nil {
+		t.Fatalf("persisted List after interval: %v", err)
+	}
+	if onDisk[0].CallCount != 2 {
+		t.Fatalf("on-disk CallCount after interval = %d, want 2", onDisk[0].CallCount)
+	}
+}
+
 func TestList_SortedByLastSeenAt(t *testing.T) {
 	s := newTempStore(t)
 	_ = s.Create("first")
