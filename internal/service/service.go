@@ -21,12 +21,14 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/johnnyicon/anito/internal/config"
 	"github.com/johnnyicon/anito/internal/issues"
 	"github.com/johnnyicon/anito/internal/notify"
 	"github.com/johnnyicon/anito/internal/process"
 	"github.com/johnnyicon/anito/internal/proxy"
 	"github.com/johnnyicon/anito/internal/receipt"
 	"github.com/johnnyicon/anito/internal/registry"
+	"github.com/johnnyicon/anito/internal/shellcmd"
 	"github.com/johnnyicon/anito/internal/watcher"
 )
 
@@ -656,13 +658,69 @@ func (s *Service) startWatcher(svc *registry.Service) {
 		return
 	}
 	err := s.wtch.Start(svc.Name, svc.WatchPaths, func(trigger string) {
-		if err := s.Restart(svc.Name); err != nil {
-			log.Printf("[ERROR] name=%s watch restart failed: %v", svc.Name, err)
+		if err := s.handleWatchTrigger(svc.Name, trigger); err != nil {
+			log.Printf("[ERROR] name=%s watch trigger=%q failed: %v", svc.Name, trigger, err)
 		}
 	})
 	if err != nil {
 		log.Printf("[ERROR] name=%s could not start watcher: %v", svc.Name, err)
 	}
+}
+
+func (s *Service) handleWatchTrigger(name string, trigger string) error {
+	if err := ValidateServiceName(name); err != nil {
+		return err
+	}
+	defer s.lockDeploy(name)()
+	if err := s.runWatchBuild(name, trigger); err != nil {
+		return err
+	}
+	return s.restartLocked(name)
+}
+
+func (s *Service) runWatchBuild(name string, trigger string) error {
+	svc, ok := s.reg.Get(name)
+	if !ok {
+		return fmt.Errorf("service %q not found", name)
+	}
+	if svc.ConfigPath == "" {
+		return nil
+	}
+
+	configPath, err := filepath.Abs(svc.ConfigPath)
+	if err != nil {
+		return fmt.Errorf("resolving config path for %q: %w", name, err)
+	}
+	cfg, err := config.Load(configPath)
+	if err != nil {
+		return fmt.Errorf("loading config for watch build %q: %w", name, err)
+	}
+	if cfg.Build == "" {
+		return nil
+	}
+
+	logPath, err := s.buildLogFilePath(name)
+	if err != nil {
+		return err
+	}
+	logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+	if err != nil {
+		return fmt.Errorf("opening build log for %q: %w", name, err)
+	}
+	defer logFile.Close()
+
+	now := time.Now().Format(time.RFC3339)
+	_, _ = fmt.Fprintf(logFile, "\n[%s] watch build started trigger=%q\n", now, trigger)
+	cmd := shellcmd.Command(cfg.Build, shellcmd.BuildDir(configPath))
+	cmd.Stdout = logFile
+	cmd.Stderr = logFile
+	if err := cmd.Run(); err != nil {
+		_, _ = fmt.Fprintf(logFile, "[%s] watch build failed: %v\n", time.Now().Format(time.RFC3339), err)
+		return fmt.Errorf("watch build failed for %q: %w", name, err)
+	}
+	_, _ = fmt.Fprintf(logFile, "[%s] watch build completed\n", time.Now().Format(time.RFC3339))
+	log.Printf("[WATCH_BUILD] name=%s trigger=%q", name, trigger)
+	return nil
 }
 
 // StartWatchers starts file watchers for all registered services that have WatchPaths.

@@ -1019,6 +1019,117 @@ func TestStartWatcher_InvalidPath(t *testing.T) {
 	svc.startWatcher(reg)
 }
 
+func writeWatchBuildConfig(t *testing.T, repo string, body string) string {
+	t.Helper()
+	configDir := filepath.Join(repo, ".anito")
+	if err := os.MkdirAll(configDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	outputDir := filepath.Join(repo, "public")
+	if err := os.MkdirAll(outputDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	configPath := filepath.Join(configDir, "config.yaml")
+	if err := os.WriteFile(configPath, []byte(body), 0644); err != nil {
+		t.Fatal(err)
+	}
+	return configPath
+}
+
+func registerStaticWatchService(t *testing.T, svc *Service, name string, repo string, configPath string) {
+	t.Helper()
+	if err := svc.reg.Register(&registry.Service{
+		Name:       name,
+		Type:       registry.TypeStatic,
+		BinaryPath: filepath.Join(repo, "public"),
+		ConfigPath: configPath,
+		WatchPaths: []string{repo},
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestRunWatchBuild_RunsConfigBuildFromRepoRoot(t *testing.T) {
+	svc := newTestService(t)
+	repo := t.TempDir()
+	configPath := writeWatchBuildConfig(t, repo, `
+name: watch-build-svc
+type: static
+output: public
+build: "printf watch-built > built.txt"
+`)
+	registerStaticWatchService(t, svc, "watch-build-svc", repo, configPath)
+
+	if err := svc.handleWatchTrigger("watch-build-svc", filepath.Join(repo, "main.go")); err != nil {
+		t.Fatalf("handleWatchTrigger returned error: %v", err)
+	}
+
+	data, err := os.ReadFile(filepath.Join(repo, "built.txt"))
+	if err != nil {
+		t.Fatalf("expected build output: %v", err)
+	}
+	if got := string(data); got != "watch-built" {
+		t.Fatalf("built.txt = %q, want watch-built", got)
+	}
+	logData, err := os.ReadFile(filepath.Join(svc.logDir, "watch-build-svc-build.log"))
+	if err != nil {
+		t.Fatalf("expected build log: %v", err)
+	}
+	logText := string(logData)
+	if !strings.Contains(logText, "watch build started") || !strings.Contains(logText, "watch build completed") {
+		t.Fatalf("build log did not contain watch build markers:\n%s", logText)
+	}
+}
+
+func TestRunWatchBuild_NoBuildCommandIsNoop(t *testing.T) {
+	svc := newTestService(t)
+	repo := t.TempDir()
+	configPath := writeWatchBuildConfig(t, repo, `
+name: watch-nobuild-svc
+type: static
+output: public
+`)
+	registerStaticWatchService(t, svc, "watch-nobuild-svc", repo, configPath)
+
+	if err := svc.handleWatchTrigger("watch-nobuild-svc", filepath.Join(repo, "main.go")); err != nil {
+		t.Fatalf("handleWatchTrigger returned error: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(svc.logDir, "watch-nobuild-svc-build.log")); !os.IsNotExist(err) {
+		t.Fatalf("build log exists or stat failed with non-ENOENT: %v", err)
+	}
+}
+
+func TestRunWatchBuild_FailureStopsRestart(t *testing.T) {
+	svc := newTestService(t)
+	repo := t.TempDir()
+	configPath := writeWatchBuildConfig(t, repo, `
+name: watch-fail-svc
+type: static
+output: public
+build: "printf failed-build > failed.txt; exit 7"
+`)
+	registerStaticWatchService(t, svc, "watch-fail-svc", repo, configPath)
+
+	err := svc.handleWatchTrigger("watch-fail-svc", filepath.Join(repo, "main.go"))
+	if err == nil || !strings.Contains(err.Error(), "watch build failed") {
+		t.Fatalf("handleWatchTrigger returned %v, want watch build failed", err)
+	}
+	data, readErr := os.ReadFile(filepath.Join(repo, "failed.txt"))
+	if readErr != nil {
+		t.Fatalf("expected failed build output: %v", readErr)
+	}
+	if got := string(data); got != "failed-build" {
+		t.Fatalf("failed.txt = %q, want failed-build", got)
+	}
+	logData, readErr := os.ReadFile(filepath.Join(svc.logDir, "watch-fail-svc-build.log"))
+	if readErr != nil {
+		t.Fatalf("expected build log: %v", readErr)
+	}
+	if !strings.Contains(string(logData), "watch build failed") {
+		t.Fatalf("build log did not contain failure marker:\n%s", string(logData))
+	}
+}
+
 // --- Logs daemon path ---
 
 // TestLogs_DaemonLog verifies that Logs("~daemon", n) reads the Anito daemon
