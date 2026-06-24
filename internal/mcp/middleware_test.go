@@ -116,6 +116,20 @@ func TestSessionMiddleware_TouchCreatesUnknownSession(t *testing.T) {
 	}
 }
 
+func TestMCPHTTPServerConfiguresTimeouts(t *testing.T) {
+	srv := newMCPHTTPServer("localhost:0", http.NewServeMux())
+
+	if srv.ReadHeaderTimeout != mcpReadHeaderTimeout {
+		t.Fatalf("ReadHeaderTimeout = %s, want %s", srv.ReadHeaderTimeout, mcpReadHeaderTimeout)
+	}
+	if srv.IdleTimeout != mcpIdleTimeout {
+		t.Fatalf("IdleTimeout = %s, want %s", srv.IdleTimeout, mcpIdleTimeout)
+	}
+	if srv.WriteTimeout != 0 {
+		t.Fatalf("WriteTimeout = %s, want unset for streaming compatibility", srv.WriteTimeout)
+	}
+}
+
 // TestExtractToolName covers the JSON-RPC body parser.
 func TestExtractToolName(t *testing.T) {
 	cases := []struct {
@@ -165,6 +179,25 @@ func TestExtractToolName(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestCapabilityMiddlewareRejectsOversizedRequestBody(t *testing.T) {
+	called := false
+	handler := capabilityMiddleware("secret", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		called = true
+		w.WriteHeader(http.StatusNoContent)
+	}))
+
+	req := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(strings.Repeat("x", int(maxMCPRequestBodySize)+1)))
+	rr := httptest.NewRecorder()
+	handler.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("status = %d, want %d", rr.Code, http.StatusRequestEntityTooLarge)
+	}
+	if called {
+		t.Fatal("downstream handler was called for oversized body")
 	}
 }
 

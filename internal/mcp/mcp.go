@@ -10,6 +10,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -27,6 +28,14 @@ import (
 	"github.com/johnnyicon/anito/internal/sessions"
 	"github.com/johnnyicon/anito/internal/setup"
 )
+
+const (
+	mcpReadHeaderTimeout  = 5 * time.Second
+	mcpIdleTimeout        = 60 * time.Second
+	maxMCPRequestBodySize = int64(1 << 20)
+)
+
+var errMCPRequestBodyTooLarge = errors.New("mcp request body too large")
 
 // Server wraps the MCP SDK server and registers Anito tools.
 type Server struct {
@@ -94,10 +103,20 @@ func (s *Server) Start() error {
 	}, &sdkmcp.StreamableHTTPOptions{Stateless: true})
 
 	handler := capabilityMiddleware(s.capabilityToken, sessionMiddleware(s.sess, mcpHandler))
+	handler = http.MaxBytesHandler(handler, maxMCPRequestBodySize)
 
 	addr := fmt.Sprintf("localhost:%d", s.port)
 	log.Printf("[STARTUP] MCP server listening on http://%s", addr)
-	return http.ListenAndServe(addr, handler)
+	return newMCPHTTPServer(addr, handler).ListenAndServe()
+}
+
+func newMCPHTTPServer(addr string, handler http.Handler) *http.Server {
+	return &http.Server{
+		Addr:              addr,
+		Handler:           handler,
+		ReadHeaderTimeout: mcpReadHeaderTimeout,
+		IdleTimeout:       mcpIdleTimeout,
+	}
 }
 
 // sessionMiddleware records session activity in the persistent store.
@@ -129,8 +148,7 @@ func extractToolName(r *http.Request) string {
 	if r.Body == nil {
 		return ""
 	}
-	body, err := io.ReadAll(r.Body)
-	r.Body = io.NopCloser(bytes.NewReader(body))
+	body, err := readMCPInspectionBody(r)
 	if err != nil {
 		return ""
 	}
@@ -148,7 +166,12 @@ func extractToolName(r *http.Request) string {
 
 func capabilityMiddleware(token string, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if !requestNeedsCapability(r) {
+		needsCapability, err := requestNeedsCapability(r)
+		if err != nil {
+			http.Error(w, "mcp request body too large", http.StatusRequestEntityTooLarge)
+			return
+		}
+		if !needsCapability {
 			next.ServeHTTP(w, r)
 			return
 		}
@@ -161,16 +184,27 @@ func capabilityMiddleware(token string, next http.Handler) http.Handler {
 	})
 }
 
-func requestNeedsCapability(r *http.Request) bool {
+func requestNeedsCapability(r *http.Request) (bool, error) {
 	if r.Method != http.MethodPost || r.Body == nil {
-		return false
+		return false, nil
 	}
-	body, err := io.ReadAll(r.Body)
+	body, err := readMCPInspectionBody(r)
+	if err != nil {
+		return false, err
+	}
+	return rpcBodyNeedsCapability(body), nil
+}
+
+func readMCPInspectionBody(r *http.Request) ([]byte, error) {
+	body, err := io.ReadAll(io.LimitReader(r.Body, maxMCPRequestBodySize+1))
 	r.Body = io.NopCloser(bytes.NewReader(body))
 	if err != nil {
-		return false
+		return nil, err
 	}
-	return rpcBodyNeedsCapability(body)
+	if int64(len(body)) > maxMCPRequestBodySize {
+		return nil, errMCPRequestBodyTooLarge
+	}
+	return body, nil
 }
 
 func rpcBodyNeedsCapability(body []byte) bool {
