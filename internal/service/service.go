@@ -611,7 +611,16 @@ func (s *Service) Teardown(repoPath string) ([]string, error) {
 
 	var removed []string
 	var errs []string
-	for name := range f.Services {
+	repoRoot, err := filepath.Abs(repoPath)
+	if err != nil {
+		return nil, fmt.Errorf("teardown: resolve repo path: %w", err)
+	}
+
+	for name, entry := range f.Services {
+		if !s.teardownEntryBelongsToRepo(repoRoot, name, entry) {
+			log.Printf("[TEARDOWN] skip name=%s repo=%s reason=receipt ownership mismatch", name, repoRoot)
+			continue
+		}
 		if rmErr := s.Remove(name); rmErr != nil {
 			errs = append(errs, fmt.Sprintf("%s: %v", name, rmErr))
 		} else {
@@ -626,6 +635,47 @@ func (s *Service) Teardown(repoPath string) ([]string, error) {
 		return removed, fmt.Errorf("teardown partial failure: %s", strings.Join(errs, "; "))
 	}
 	return removed, nil
+}
+
+func (s *Service) teardownEntryBelongsToRepo(repoRoot, name string, entry receipt.Entry) bool {
+	svc, ok := s.reg.Get(name)
+	if !ok {
+		return pathWithinRepo(repoRoot, entry.ConfigPath)
+	}
+	if !pathWithinRepo(repoRoot, svc.ConfigPath) {
+		return false
+	}
+	if entry.ConfigPath == "" {
+		return true
+	}
+	return sameCleanPath(entry.ConfigPath, svc.ConfigPath)
+}
+
+func pathWithinRepo(repoRoot, candidate string) bool {
+	if strings.TrimSpace(candidate) == "" {
+		return false
+	}
+	candidateAbs, err := filepath.Abs(candidate)
+	if err != nil {
+		return false
+	}
+	rel, err := filepath.Rel(filepath.Clean(repoRoot), filepath.Clean(candidateAbs))
+	if err != nil {
+		return false
+	}
+	return rel == "." || (rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) && !filepath.IsAbs(rel))
+}
+
+func sameCleanPath(a, b string) bool {
+	aAbs, err := filepath.Abs(a)
+	if err != nil {
+		return false
+	}
+	bAbs, err := filepath.Abs(b)
+	if err != nil {
+		return false
+	}
+	return filepath.Clean(aAbs) == filepath.Clean(bAbs)
 }
 
 // writeReceipt writes a deployment receipt into the consuming repo's
