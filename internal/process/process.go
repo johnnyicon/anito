@@ -74,30 +74,22 @@ func (m *Manager) Start(svc *registry.Service) (map[string]int, error) {
 		return nil, fmt.Errorf("service %q is already running", svc.Name)
 	}
 
-	// Allocate one ephemeral port per named port.
-	ports := make(map[string]int, len(svc.StablePorts))
-	if len(svc.StablePorts) > 0 {
-		for name := range svc.StablePorts {
-			p, err := freePort()
-			if err != nil {
-				return nil, fmt.Errorf("could not find free port for %q (port %s): %w", svc.Name, name, err)
-			}
-			ports[name] = p
-		}
-	} else {
-		// Fallback for services without StablePorts set (shouldn't happen after normalization).
-		p, err := freePort()
-		if err != nil {
-			return nil, fmt.Errorf("could not find free port for %q: %w", svc.Name, err)
-		}
-		ports["default"] = p
+	ports, reservations, err := reserveInternalPorts(svc)
+	if err != nil {
+		return nil, err
 	}
+	releaseReservations := func() {
+		closePortReservations(reservations)
+		reservations = nil
+	}
+	defer releaseReservations()
 
 	cmd, logFile, err := m.buildCmd(svc, ports)
 	if err != nil {
 		return nil, err
 	}
 
+	releaseReservations()
 	if err := cmd.Start(); err != nil {
 		if logFile != nil {
 			_ = logFile.Close()
@@ -342,15 +334,49 @@ func primaryPortFromMap(ports map[string]int, healthCheckPort string) int {
 	return 0
 }
 
-// freePort asks the OS for an available TCP port.
-func freePort() (int, error) {
+func reserveInternalPorts(svc *registry.Service) (map[string]int, []net.Listener, error) {
+	ports := make(map[string]int, len(svc.StablePorts))
+	var reservations []net.Listener
+	reserve := func(name string) error {
+		port, listener, err := reserveFreePort()
+		if err != nil {
+			return err
+		}
+		ports[name] = port
+		reservations = append(reservations, listener)
+		return nil
+	}
+	if len(svc.StablePorts) > 0 {
+		for name := range svc.StablePorts {
+			if err := reserve(name); err != nil {
+				closePortReservations(reservations)
+				return nil, nil, fmt.Errorf("could not reserve free port for %q (port %s): %w", svc.Name, name, err)
+			}
+		}
+		return ports, reservations, nil
+	}
+	if err := reserve("default"); err != nil {
+		closePortReservations(reservations)
+		return nil, nil, fmt.Errorf("could not reserve free port for %q: %w", svc.Name, err)
+	}
+	return ports, reservations, nil
+}
+
+// reserveFreePort asks the OS for an available TCP port and keeps the listener
+// open until the caller is ready for the child process to bind it.
+func reserveFreePort() (int, net.Listener, error) {
 	l, err := net.Listen("tcp", "localhost:0")
 	if err != nil {
-		return 0, err
+		return 0, nil, err
 	}
 	port := l.Addr().(*net.TCPAddr).Port
-	_ = l.Close()
-	return port, nil
+	return port, l, nil
+}
+
+func closePortReservations(reservations []net.Listener) {
+	for _, listener := range reservations {
+		_ = listener.Close()
+	}
 }
 
 // drainProc gracefully terminates a process started by Start().
