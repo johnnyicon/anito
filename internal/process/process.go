@@ -222,6 +222,15 @@ func (m *Manager) PID(name string) int {
 	return 0
 }
 
+// PIDAlive reports whether pid currently resolves to a live process.
+func PIDAlive(pid int) bool {
+	if pid <= 0 {
+		return false
+	}
+	err := syscall.Kill(pid, 0)
+	return err == nil || err == syscall.EPERM
+}
+
 // DrainProc sends SIGTERM to cmd and waits for it to exit via done (closed by
 // the Start goroutine). Falls back to SIGKILL after drainTimeout.
 // Exported so the service layer can drain a cmd returned by Deregister.

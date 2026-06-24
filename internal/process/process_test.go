@@ -372,6 +372,27 @@ func TestPID(t *testing.T) {
 	}
 }
 
+func TestPIDAlive(t *testing.T) {
+	if !PIDAlive(os.Getpid()) {
+		t.Fatal("PIDAlive(current pid) = false, want true")
+	}
+	if PIDAlive(0) || PIDAlive(-1) {
+		t.Fatal("PIDAlive should reject non-positive PIDs")
+	}
+
+	cmd := exec.Command("true")
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("cmd.Start: %v", err)
+	}
+	pid := cmd.Process.Pid
+	if err := cmd.Wait(); err != nil {
+		t.Fatalf("cmd.Wait: %v", err)
+	}
+	if PIDAlive(pid) {
+		t.Fatalf("PIDAlive(exited pid %d) = true, want false", pid)
+	}
+}
+
 // TestInternalPort returns port after Start, 0 for unknown.
 func TestInternalPort(t *testing.T) {
 	mgr, reg := newTestManager(t)
