@@ -1204,6 +1204,7 @@ func TestTeardown_WithServiceInReceipt(t *testing.T) {
 		Name:       "teardown-svc",
 		Type:       registry.TypeBinary,
 		BinaryPath: "/bin/true",
+		ConfigPath: filepath.Join(anitoDir, "config.yaml"),
 		Status:     registry.StatusStopped,
 	})
 
@@ -1219,6 +1220,47 @@ func TestTeardown_WithServiceInReceipt(t *testing.T) {
 	}
 	if len(removed) != 1 || removed[0] != "teardown-svc" {
 		t.Errorf("expected removed=[teardown-svc], got %v", removed)
+	}
+}
+
+func TestTeardownSkipsReceiptEntryOutsideRepo(t *testing.T) {
+	svc := newTestService(t)
+
+	repoDir := t.TempDir()
+	anitoDir := filepath.Join(repoDir, ".anito")
+	if err := os.MkdirAll(anitoDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	otherRepoDir := t.TempDir()
+	otherConfigPath := filepath.Join(otherRepoDir, ".anito", "config.yaml")
+	if err := os.MkdirAll(filepath.Dir(otherConfigPath), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := svc.reg.Register(&registry.Service{
+		Name:       "critical-svc",
+		Type:       registry.TypeBinary,
+		BinaryPath: "/bin/true",
+		ConfigPath: otherConfigPath,
+		Status:     registry.StatusStopped,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	deployedJSON := `{"services":{"critical-svc":{"name":"critical-svc","stable_port":9111,"address":"http://localhost:9111","binary_path":"/bin/true","config_path":"` + filepath.Join(anitoDir, "config.yaml") + `","deployed_at":"2026-01-01T00:00:00Z"}}}`
+	if err := os.WriteFile(filepath.Join(anitoDir, "deployed.json"), []byte(deployedJSON), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	removed, err := svc.Teardown(repoDir)
+	if err != nil {
+		t.Fatalf("Teardown returned error: %v", err)
+	}
+	if len(removed) != 0 {
+		t.Fatalf("removed = %v, want none", removed)
+	}
+	if _, ok := svc.reg.Get("critical-svc"); !ok {
+		t.Fatal("critical-svc was removed despite registry ConfigPath outside repo")
 	}
 }
 
