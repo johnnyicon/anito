@@ -22,6 +22,11 @@ import (
 	"github.com/johnnyicon/anito/internal/sessions"
 )
 
+const (
+	managementReadHeaderTimeout = 5 * time.Second
+	managementIdleTimeout       = 60 * time.Second
+)
+
 //go:embed ui/dist
 var distFiles embed.FS
 
@@ -57,6 +62,7 @@ func (s *Server) Start() error {
 	e := echo.New()
 	e.HideBanner = true
 	e.HidePort = true
+	configureManagementHTTPServer(e.Server)
 
 	// Request logging middleware
 	e.Use(func(next echo.HandlerFunc) echo.HandlerFunc {
@@ -120,6 +126,11 @@ func (s *Server) Start() error {
 	addr := fmt.Sprintf("localhost:%d", s.port)
 	log.Printf("[STARTUP] management API listening on %s", addr)
 	return e.Start(addr)
+}
+
+func configureManagementHTTPServer(srv *http.Server) {
+	srv.ReadHeaderTimeout = managementReadHeaderTimeout
+	srv.IdleTimeout = managementIdleTimeout
 }
 
 func (s *Server) capabilityMiddleware() echo.MiddlewareFunc {

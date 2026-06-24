@@ -164,6 +164,21 @@ func TestHandleHealth(t *testing.T) {
 	}
 }
 
+func TestConfigureManagementHTTPServerSetsTimeouts(t *testing.T) {
+	srv := &http.Server{}
+	configureManagementHTTPServer(srv)
+
+	if srv.ReadHeaderTimeout != managementReadHeaderTimeout {
+		t.Fatalf("ReadHeaderTimeout = %s, want %s", srv.ReadHeaderTimeout, managementReadHeaderTimeout)
+	}
+	if srv.IdleTimeout != managementIdleTimeout {
+		t.Fatalf("IdleTimeout = %s, want %s", srv.IdleTimeout, managementIdleTimeout)
+	}
+	if srv.WriteTimeout != 0 {
+		t.Fatalf("WriteTimeout = %s, want unset for SSE compatibility", srv.WriteTimeout)
+	}
+}
+
 // --- handleServices ---
 
 func TestHandleServicesEmpty(t *testing.T) {

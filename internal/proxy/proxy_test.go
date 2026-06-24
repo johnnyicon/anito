@@ -221,6 +221,22 @@ func TestRegisterWithBindUsesExplicitAddress(t *testing.T) {
 	}
 }
 
+func TestServerForConfiguresHTTPTimeouts(t *testing.T) {
+	e := &entry{}
+	e.handler.Store(handlerWrapper{h: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {})})
+
+	srv := serverFor(e)
+	if srv.ReadHeaderTimeout != proxyReadHeaderTimeout {
+		t.Fatalf("ReadHeaderTimeout = %s, want %s", srv.ReadHeaderTimeout, proxyReadHeaderTimeout)
+	}
+	if srv.IdleTimeout != proxyIdleTimeout {
+		t.Fatalf("IdleTimeout = %s, want %s", srv.IdleTimeout, proxyIdleTimeout)
+	}
+	if srv.WriteTimeout != 0 {
+		t.Fatalf("WriteTimeout = %s, want unset for streaming compatibility", srv.WriteTimeout)
+	}
+}
+
 func TestValidateProxyBindAddressAllowsLoopback(t *testing.T) {
 	for _, bindAddress := range []string{"", "localhost", "127.0.0.1", "::1", "[::1]"} {
 		t.Run(bindAddress, func(t *testing.T) {

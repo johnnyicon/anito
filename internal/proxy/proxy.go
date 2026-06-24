@@ -12,6 +12,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/johnnyicon/anito/internal/registry"
 )
@@ -20,6 +21,11 @@ var (
 	tailscaleIPv4Prefix = netip.MustParsePrefix("100.64.0.0/10")
 	tailscaleIPv6Prefix = netip.MustParsePrefix("fd7a:115c:a1e0::/48")
 	interfaceAddrs      = net.InterfaceAddrs
+)
+
+const (
+	proxyReadHeaderTimeout = 5 * time.Second
+	proxyIdleTimeout       = 60 * time.Second
 )
 
 // handlerWrapper is stored in an atomic.Value so it can be swapped safely.
@@ -162,6 +168,8 @@ func serverFor(e *entry) *http.Server {
 			w.Header().Set("X-Anito-Proxy", "1")
 			e.handler.Load().(handlerWrapper).h.ServeHTTP(w, r)
 		}),
+		ReadHeaderTimeout: proxyReadHeaderTimeout,
+		IdleTimeout:       proxyIdleTimeout,
 	}
 }
 
