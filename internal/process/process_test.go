@@ -295,11 +295,19 @@ func TestStopPreventsOnCrash(t *testing.T) {
 // Tests for uncovered functions
 // ---------------------------------------------------------------------------
 
-// TestMarkDraining_ZeroPIDIsNoOp verifies that MarkDraining with pid=0 does nothing.
-func TestMarkDraining_ZeroPIDIsNoOp(t *testing.T) {
+// TestMarkDrainingProcess_RequiresStartedCommand verifies that callers cannot
+// create stale draining entries from nil or unstarted commands.
+func TestMarkDrainingProcess_RequiresStartedCommand(t *testing.T) {
 	mgr, _ := newTestManager(t)
-	mgr.MarkDraining(0)  // should not panic or add an entry
-	mgr.MarkDraining(-1) // negative pid also no-op
+	if got := mgr.MarkDrainingProcess(nil); got != 0 {
+		t.Fatalf("MarkDrainingProcess(nil) = %d, want 0", got)
+	}
+	if got := mgr.MarkDrainingProcess(&exec.Cmd{}); got != 0 {
+		t.Fatalf("MarkDrainingProcess(unstarted) = %d, want 0", got)
+	}
+	if len(mgr.draining) != 0 {
+		t.Fatalf("draining entries = %+v, want none", mgr.draining)
+	}
 }
 
 // TestIsRunning returns true after Start, false after Stop.
@@ -585,16 +593,27 @@ func TestSplitLines(t *testing.T) {
 	}
 }
 
-// --- MarkDraining positive PID ---
+// --- MarkDrainingProcess positive command ---
 
-func TestMarkDraining_PositivePID(t *testing.T) {
+func TestMarkDrainingProcess_StartedCommand(t *testing.T) {
 	mgr, _ := newTestManager(t)
-	mgr.MarkDraining(12345) // arbitrary non-zero PID
+	cmd := exec.Command("sleep", "60")
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("cmd.Start: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+	})
+	pid := mgr.MarkDrainingProcess(cmd)
+	if pid == 0 {
+		t.Fatal("MarkDrainingProcess returned pid=0 for started command")
+	}
 	mgr.mu.RLock()
-	_, ok := mgr.draining[12345]
+	_, ok := mgr.draining[pid]
 	mgr.mu.RUnlock()
 	if !ok {
-		t.Error("MarkDraining(12345) did not set draining[12345]")
+		t.Fatalf("MarkDrainingProcess did not set draining[%d]", pid)
 	}
 }
 
