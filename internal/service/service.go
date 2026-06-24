@@ -283,9 +283,6 @@ func (s *Service) Deploy(req DeployRequest) (*registry.Service, error) {
 
 	// Binary: start new process, health-check it, swap proxy, drain old process.
 	oldPID, oldCmd, oldDone := s.mgr.Deregister(svc.Name)
-	if oldPID == 0 {
-		oldPID = svc.PID
-	}
 
 	startedAt := time.Now()
 	internalPorts, err := s.mgr.Start(svc)
@@ -311,17 +308,11 @@ func (s *Service) Deploy(req DeployRequest) (*registry.Service, error) {
 
 	if err := waitHealthy(hcInternalPort, req.HealthCheck, hcTimeout); err != nil {
 		_ = s.mgr.Stop(req.Name)
-		if oldPID > 0 {
-			s.mgr.MarkDraining(oldPID)
-		}
 		return nil, err
 	}
 
 	if err := s.prx.SwapPorts(req.Name, internalPorts); err != nil {
 		_ = s.mgr.Stop(req.Name)
-		if oldPID > 0 {
-			s.mgr.MarkDraining(oldPID)
-		}
 		return nil, err
 	}
 
@@ -335,9 +326,9 @@ func (s *Service) Deploy(req DeployRequest) (*registry.Service, error) {
 	_ = s.reg.UpdateCrashState(req.Name, 0, false)
 
 	if oldCmd != nil {
-		pid := oldPID
-		if pid > 0 {
-			s.mgr.MarkDraining(pid)
+		pid := s.mgr.MarkDrainingProcess(oldCmd)
+		if pid == 0 {
+			pid = oldPID
 		}
 		go func(cmd *exec.Cmd, done <-chan struct{}, p int, window time.Duration) {
 			log.Printf("[DRAIN] name=%s pid=%d waiting %s for in-flight requests", req.Name, p, window)
@@ -436,9 +427,6 @@ func (s *Service) restartLocked(name string) error {
 	}
 
 	oldPID, oldCmd, oldDone := s.mgr.Deregister(name)
-	if oldPID == 0 {
-		oldPID = svc.PID
-	}
 
 	startedAt := time.Now()
 	internalPorts, err := s.mgr.Start(svc)
@@ -470,17 +458,11 @@ func (s *Service) restartLocked(name string) error {
 	if err := waitHealthy(hcInternalPort, svc.HealthCheck, hcTimeout); err != nil {
 		log.Printf("[RESTART] name=%s error=%q", name, err)
 		_ = s.mgr.Stop(name)
-		if oldPID > 0 {
-			s.mgr.MarkDraining(oldPID)
-		}
 		return err
 	}
 
 	if err := s.prx.SwapPorts(name, internalPorts); err != nil {
 		_ = s.mgr.Stop(name)
-		if oldPID > 0 {
-			s.mgr.MarkDraining(oldPID)
-		}
 		return err
 	}
 
@@ -497,9 +479,9 @@ func (s *Service) restartLocked(name string) error {
 		drainWindow = defaultDrainWindow
 	}
 	if oldCmd != nil {
-		pid := oldPID
-		if pid > 0 {
-			s.mgr.MarkDraining(pid)
+		pid := s.mgr.MarkDrainingProcess(oldCmd)
+		if pid == 0 {
+			pid = oldPID
 		}
 		go func(cmd *exec.Cmd, done <-chan struct{}, p int, window time.Duration) {
 			log.Printf("[DRAIN] name=%s pid=%d waiting %s for in-flight requests", name, p, window)

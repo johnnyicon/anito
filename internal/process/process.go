@@ -49,15 +49,18 @@ func New(logDir string, reg *registry.Registry) (*Manager, error) {
 	}, nil
 }
 
-// MarkDraining registers pid as an intentional kill so the crash monitor ignores it.
-// Call this before draining a process that is no longer in m.procs.
-func (m *Manager) MarkDraining(pid int) {
-	if pid <= 0 {
-		return
+// MarkDrainingProcess registers cmd's process as an intentional kill so the
+// crash monitor ignores it. The command must come from this Manager's current
+// daemon incarnation; callers must not mark raw registry PIDs.
+func (m *Manager) MarkDrainingProcess(cmd *exec.Cmd) int {
+	if cmd == nil || cmd.Process == nil || cmd.Process.Pid <= 0 {
+		return 0
 	}
+	pid := cmd.Process.Pid
 	m.mu.Lock()
 	m.draining[pid] = true
 	m.mu.Unlock()
+	return pid
 }
 
 // Start launches a service process on free ephemeral port(s) and returns them.
