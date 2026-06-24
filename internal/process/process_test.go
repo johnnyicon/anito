@@ -215,6 +215,42 @@ func TestStartInjectsASPNETEnvVars(t *testing.T) {
 	t.Fatalf("ASP.NET mock did not bind to ASPNETCORE_HTTP_PORTS %d within 5s: %v", internalPort, lastErr)
 }
 
+func TestReserveInternalPortsHoldsListenersUntilReleased(t *testing.T) {
+	svc := &registry.Service{
+		Name:        "multi",
+		StablePorts: map[string]int{"http": 8080, "ws": 8081},
+	}
+
+	ports, reservations, err := reserveInternalPorts(svc)
+	if err != nil {
+		t.Fatalf("reserveInternalPorts: %v", err)
+	}
+	defer closePortReservations(reservations)
+	if len(ports) != 2 {
+		t.Fatalf("ports len = %d, want 2", len(ports))
+	}
+	if ports["http"] == ports["ws"] {
+		t.Fatalf("reserved duplicate internal ports: %v", ports)
+	}
+	for name, port := range ports {
+		listener, err := net.Listen("tcp", fmt.Sprintf("localhost:%d", port))
+		if err == nil {
+			_ = listener.Close()
+			t.Fatalf("port %s=%d was rebindable while reservation was held", name, port)
+		}
+	}
+
+	closePortReservations(reservations)
+	reservations = nil
+	for name, port := range ports {
+		listener, err := net.Listen("tcp", fmt.Sprintf("localhost:%d", port))
+		if err != nil {
+			t.Fatalf("port %s=%d was not rebindable after release: %v", name, port, err)
+		}
+		_ = listener.Close()
+	}
+}
+
 // TestCrashSetsOnCrashCallback starts a crashing subprocess and verifies that
 // OnCrash is called with the service name within 2 seconds.
 func TestCrashSetsOnCrashCallback(t *testing.T) {
