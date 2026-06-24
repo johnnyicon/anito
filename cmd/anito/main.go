@@ -805,6 +805,17 @@ func runDaemon(apiPort, mcpPort int, dataDir string) {
 				})
 				continue
 			}
+			if reason := restoreStartBlockedReason(svc); reason != "" {
+				log.Printf("[RESTORE_BLOCKED] name=%s %s", svc.Name, reason)
+				_ = reg.UpdateStatus(svc.Name, registry.StatusFailed, svc.PID)
+				_ = iss.Append(issues.Issue{
+					Source:   "daemon:restore_blocked",
+					Tool:     "startup",
+					Error:    fmt.Sprintf("service %s: %s", svc.Name, reason),
+					Severity: "error",
+				})
+				continue
+			}
 			internalPorts, err := mgr.Start(svc)
 			if err != nil {
 				log.Printf("[RESTORE_FAILED] name=%s error=%v", svc.Name, err)
@@ -885,6 +896,16 @@ func runDaemon(apiPort, mcpPort int, dataDir string) {
 	srv := server.New(svc, iss, sess, apiPort, version)
 	srv.SetCapabilityToken(capabilityToken)
 	log.Fatal(srv.Start())
+}
+
+func restoreStartBlockedReason(svc *registry.Service) string {
+	if svc == nil || svc.PID <= 0 {
+		return ""
+	}
+	if process.PIDAlive(svc.PID) {
+		return fmt.Sprintf("recorded pid %d is still alive; refusing to start duplicate", svc.PID)
+	}
+	return ""
 }
 
 func launchdPlistPath() string {
