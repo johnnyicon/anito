@@ -645,55 +645,55 @@ func TestNormalizePortsMapPreservedWhenAlreadySet(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// primaryPort
+// PickPort
 // ---------------------------------------------------------------------------
 
-// TestPrimaryPortEmptyMap verifies primaryPort returns 0 for an empty map.
+// TestPickPortEmptyMap verifies PickPort returns 0 for an empty map.
 func TestPrimaryPortEmptyMap(t *testing.T) {
-	got := primaryPort(nil, "")
+	got := PickPort(nil, "")
 	if got != 0 {
-		t.Errorf("primaryPort(nil, '') = %d, want 0", got)
+		t.Errorf("PickPort(nil, '') = %d, want 0", got)
 	}
 }
 
-// TestPrimaryPortHealthCheckPortMatching verifies primaryPort prefers the
+// TestPickPortHealthCheckPortMatching verifies PickPort prefers the
 // health check port when it exists in the map.
 func TestPrimaryPortHealthCheckPortMatching(t *testing.T) {
 	ports := map[string]int{"ws": 7172, "http": 7173}
-	got := primaryPort(ports, "ws")
+	got := PickPort(ports, "ws")
 	if got != 7172 {
-		t.Errorf("primaryPort with healthCheckPort=ws: got %d, want 7172", got)
+		t.Errorf("PickPort with healthCheckPort=ws: got %d, want 7172", got)
 	}
 }
 
-// TestPrimaryPortHealthCheckPortMissing verifies primaryPort falls through
+// TestPickPortHealthCheckPortMissing verifies PickPort falls through
 // when the health check port name is not in the map.
 func TestPrimaryPortHealthCheckPortMissing(t *testing.T) {
 	ports := map[string]int{"ws": 7172, "http": 7173}
 	// "grpc" not in map — should fall through to alphabetical.
-	got := primaryPort(ports, "grpc")
+	got := PickPort(ports, "grpc")
 	// "http" < "ws" alphabetically.
 	if got != 7173 {
-		t.Errorf("primaryPort with missing healthCheckPort: got %d, want 7173 (http first)", got)
+		t.Errorf("PickPort with missing healthCheckPort: got %d, want 7173 (http first)", got)
 	}
 }
 
-// TestPrimaryPortDefaultKey verifies primaryPort prefers the "default" key
+// TestPickPortDefaultKey verifies PickPort prefers the "default" key
 // when no health check port is specified.
 func TestPrimaryPortDefaultKey(t *testing.T) {
 	ports := map[string]int{"default": 3000, "metrics": 9090}
-	got := primaryPort(ports, "")
+	got := PickPort(ports, "")
 	if got != 3000 {
-		t.Errorf("primaryPort with default key: got %d, want 3000", got)
+		t.Errorf("PickPort with default key: got %d, want 3000", got)
 	}
 }
 
-// TestPrimaryPortAlphabeticalFallback verifies primaryPort falls back to the
+// TestPickPortAlphabeticalFallback verifies PickPort falls back to the
 // first key alphabetically when there is no health check port or "default" key.
 func TestPrimaryPortAlphabeticalFallback(t *testing.T) {
 	ports := map[string]int{"zebra": 1111, "alpha": 2222, "beta": 3333}
-	got := primaryPort(ports, "")
+	got := PickPort(ports, "")
 	if got != 2222 {
-		t.Errorf("primaryPort alphabetical fallback: got %d, want 2222 (alpha)", got)
+		t.Errorf("PickPort alphabetical fallback: got %d, want 2222 (alpha)", got)
 	}
 }

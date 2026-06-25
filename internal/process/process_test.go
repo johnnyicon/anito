@@ -488,8 +488,8 @@ func TestHasDefaultOnly(t *testing.T) {
 	}
 }
 
-// TestPrimaryPortFromMap verifies port selection logic.
-func TestPrimaryPortFromMap(t *testing.T) {
+// TestPickPort verifies process startup uses the shared port selection logic.
+func TestPickPort(t *testing.T) {
 	cases := []struct {
 		name            string
 		ports           map[string]int
@@ -504,8 +504,8 @@ func TestPrimaryPortFromMap(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := primaryPortFromMap(tc.ports, tc.healthCheckPort); got != tc.want {
-				t.Errorf("primaryPortFromMap = %d, want %d", got, tc.want)
+			if got := registry.PickPort(tc.ports, tc.healthCheckPort); got != tc.want {
+				t.Errorf("registry.PickPort = %d, want %d", got, tc.want)
 			}
 		})
 	}

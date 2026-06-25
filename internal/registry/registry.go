@@ -124,12 +124,12 @@ func (s *Service) syncSingularFromMap() {
 // PrimaryStablePort returns the stable port that should be used for health checks
 // and backward-compat display. Prefers HealthCheckPort, then "default", then first key.
 func (s *Service) PrimaryStablePort() int {
-	return primaryPort(s.StablePorts, s.HealthCheckPort)
+	return PickPort(s.StablePorts, s.HealthCheckPort)
 }
 
 // PrimaryInternalPort returns the internal port for the health check port.
 func (s *Service) PrimaryInternalPort() int {
-	return primaryPort(s.InternalPorts, s.HealthCheckPort)
+	return PickPort(s.InternalPorts, s.HealthCheckPort)
 }
 
 // IsMultiPort returns true if the service has more than one named port.
@@ -159,7 +159,10 @@ func AddressFor(bindAddress string, port int) string {
 	return "http://" + net.JoinHostPort(bindAddress, fmt.Sprint(port))
 }
 
-func primaryPort(ports map[string]int, healthCheckPort string) int {
+// PickPort selects the named port Anito should use for health checks and
+// backward-compatible single-port fields. It prefers HealthCheckPort, then
+// "default", then the first key alphabetically for deterministic fallback.
+func PickPort(ports map[string]int, healthCheckPort string) int {
 	if len(ports) == 0 {
 		return 0
 	}

@@ -100,14 +100,7 @@ func (m *Manager) Start(svc *registry.Service) (map[string]int, error) {
 		return nil, fmt.Errorf("failed to start %q: %w", svc.Name, err)
 	}
 
-	primaryPort := svc.PrimaryInternalPort()
-	if primaryPort == 0 {
-		// Use the first port from our allocated set.
-		for _, p := range ports {
-			primaryPort = p
-			break
-		}
-	}
+	primaryPort := registry.PickPort(ports, svc.HealthCheckPort)
 
 	done := make(chan struct{})
 	rp := &runningProc{cmd: cmd, internalPort: primaryPort, internalPorts: ports, logFile: logFile, done: done}
@@ -273,7 +266,7 @@ func (m *Manager) buildCmd(svc *registry.Service, ports map[string]int) (*exec.C
 		}
 		// Also set PORT to the health check port for backward compat with
 		// frameworks that read PORT.
-		hcPort := primaryPortFromMap(ports, svc.HealthCheckPort)
+		hcPort := registry.PickPort(ports, svc.HealthCheckPort)
 		portStr := strconv.Itoa(hcPort)
 		cmd.Env = append(cmd.Env, "PORT="+portStr)
 		// ASP.NET Core env vars (ignored by non-.NET runtimes).
@@ -317,21 +310,6 @@ func hasDefaultOnly(ports map[string]int) bool {
 	}
 	_, ok := ports["default"]
 	return ok
-}
-
-func primaryPortFromMap(ports map[string]int, healthCheckPort string) int {
-	if healthCheckPort != "" {
-		if p, ok := ports[healthCheckPort]; ok {
-			return p
-		}
-	}
-	if p, ok := ports["default"]; ok {
-		return p
-	}
-	for _, p := range ports {
-		return p
-	}
-	return 0
 }
 
 func reserveInternalPorts(svc *registry.Service) (map[string]int, []net.Listener, error) {

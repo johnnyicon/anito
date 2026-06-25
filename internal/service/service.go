@@ -295,18 +295,7 @@ func (s *Service) Deploy(req DeployRequest) (*registry.Service, error) {
 	_ = s.reg.UpdateStartHistory(req.Name, registry.StartEvent{StartedAt: startedAt, ExitCode: -1})
 
 	// Health-check on the designated port.
-	hcPortName := req.HealthCheckPort
-	if hcPortName == "" {
-		hcPortName = "default"
-	}
-	hcInternalPort := internalPorts[hcPortName]
-	if hcInternalPort == 0 {
-		// Fall back to primary port if the named port doesn't exist.
-		for _, p := range internalPorts {
-			hcInternalPort = p
-			break
-		}
-	}
+	hcInternalPort := registry.PickPort(internalPorts, req.HealthCheckPort)
 
 	if err := waitHealthy(hcInternalPort, req.HealthCheck, hcTimeout); err != nil {
 		_ = s.mgr.Stop(req.Name)
@@ -445,17 +434,7 @@ func (s *Service) restartLocked(name string) error {
 	}
 
 	// Health-check on the designated port.
-	hcInternalPort := svc.PrimaryInternalPort()
-	if p, ok := internalPorts[svc.HealthCheckPort]; ok && svc.HealthCheckPort != "" {
-		hcInternalPort = p
-	} else if p, ok := internalPorts["default"]; ok {
-		hcInternalPort = p
-	} else {
-		for _, p := range internalPorts {
-			hcInternalPort = p
-			break
-		}
-	}
+	hcInternalPort := registry.PickPort(internalPorts, svc.HealthCheckPort)
 
 	if err := waitHealthy(hcInternalPort, svc.HealthCheck, hcTimeout); err != nil {
 		log.Printf("[RESTART] name=%s error=%q", name, err)

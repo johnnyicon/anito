@@ -833,17 +833,7 @@ func runDaemon(apiPort, mcpPort int, dataDir string) {
 			if hcTimeout == 0 {
 				hcTimeout = 15 * time.Second
 			}
-			hcPort := svc.PrimaryInternalPort()
-			if p, ok := internalPorts[svc.HealthCheckPort]; ok && svc.HealthCheckPort != "" {
-				hcPort = p
-			} else if p, ok := internalPorts["default"]; ok {
-				hcPort = p
-			} else {
-				for _, p := range internalPorts {
-					hcPort = p
-					break
-				}
-			}
+			hcPort := registry.PickPort(internalPorts, svc.HealthCheckPort)
 			if err := service.WaitHealthy(hcPort, svc.HealthCheck, hcTimeout); err != nil {
 				log.Printf("[RESTORE_FAILED] name=%s health_check=%v", svc.Name, err)
 				_ = mgr.Stop(svc.Name)
