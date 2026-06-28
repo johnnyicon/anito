@@ -2,9 +2,8 @@
 
 Date: 2026-06-28
 
-This report records the Anito-owned AWF import for the 10 FABLE Anito/ETO
-handoff rows. It creates planning/execution records only; it does not implement
-or prove any remediation.
+This report records the Anito-owned AWF import, implementation, and closeout
+for the 10 FABLE Anito/ETO handoff rows.
 
 ## Source
 
@@ -35,8 +34,9 @@ or prove any remediation.
 | ANITS-7 | `019f0978-e737-7aad-b40c-8903d0a8f067` | `019f0c73-c10a-7714-bd22-3ea0bf1f32c7` | Lifecycle, Proxy, and Restart Correctness |
 
 Each brief includes owner `Anito/ETO`, the FABLE row ID, the source
-maykapal-os handoff brief ID, remediation intent, verification expectations,
-and the no-go that this import pass does not implement or prove remediation.
+maykapal-os handoff brief ID, remediation intent, and verification
+expectations. The initial import pass was planning-only; the implementation
+closeout below records the later code, test, and Tracker evidence.
 
 ## Verification
 
@@ -89,6 +89,12 @@ count=10
 ## Implementation Evidence
 
 Implemented on 2026-06-28 in the Anito repo.
+
+Decision documentation:
+
+- ADR: `docs/adr/2026-06-28-redeploy-replacement-must-restore-previous-serving-process.md`
+- Decision journal: `docs/decision-journals/2026-06-28-fable-lifecycle-hardening.md`
+- Blog-style explainer: `docs/blog/2026-06-28-making-anito-redeploys-boring.md`
 
 Summary:
 
