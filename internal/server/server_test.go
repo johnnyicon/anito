@@ -171,6 +171,9 @@ func TestConfigureManagementHTTPServerSetsTimeouts(t *testing.T) {
 	if srv.ReadHeaderTimeout != managementReadHeaderTimeout {
 		t.Fatalf("ReadHeaderTimeout = %s, want %s", srv.ReadHeaderTimeout, managementReadHeaderTimeout)
 	}
+	if srv.ReadTimeout != managementReadTimeout {
+		t.Fatalf("ReadTimeout = %s, want %s", srv.ReadTimeout, managementReadTimeout)
+	}
 	if srv.IdleTimeout != managementIdleTimeout {
 		t.Fatalf("IdleTimeout = %s, want %s", srv.IdleTimeout, managementIdleTimeout)
 	}

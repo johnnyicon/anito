@@ -31,6 +31,7 @@ import (
 
 const (
 	mcpReadHeaderTimeout  = 5 * time.Second
+	mcpReadTimeout        = 30 * time.Second
 	mcpIdleTimeout        = 60 * time.Second
 	maxMCPRequestBodySize = int64(1 << 20)
 )
@@ -115,6 +116,7 @@ func newMCPHTTPServer(addr string, handler http.Handler) *http.Server {
 		Addr:              addr,
 		Handler:           handler,
 		ReadHeaderTimeout: mcpReadHeaderTimeout,
+		ReadTimeout:       mcpReadTimeout,
 		IdleTimeout:       mcpIdleTimeout,
 	}
 }

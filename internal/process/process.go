@@ -16,6 +16,11 @@ import (
 	"github.com/johnnyicon/anito/internal/registry"
 )
 
+var (
+	listenerPIDsForPort = defaultListenerPIDsForPort
+	childPIDsOf         = defaultChildPIDsOf
+)
+
 var drainTimeout = 5 * time.Second // time between SIGTERM and SIGKILL
 
 // runningProc tracks a live process and the ephemeral port(s) it is on.
@@ -25,6 +30,37 @@ type runningProc struct {
 	internalPorts map[string]int // all named ephemeral ports
 	logFile       *os.File
 	done          chan struct{} // closed by the Start goroutine when the process exits
+}
+
+// DetachedProcess is a temporarily untracked running process. The service layer
+// uses this while trying a replacement process; if the replacement fails before
+// proxy swap, the old process can be restored without losing crash tracking.
+type DetachedProcess struct {
+	cmd           *exec.Cmd
+	internalPort  int
+	internalPorts map[string]int
+	done          chan struct{}
+}
+
+func (dp *DetachedProcess) PID() int {
+	if dp == nil || dp.cmd == nil || dp.cmd.Process == nil {
+		return 0
+	}
+	return dp.cmd.Process.Pid
+}
+
+func (dp *DetachedProcess) Cmd() *exec.Cmd {
+	if dp == nil {
+		return nil
+	}
+	return dp.cmd
+}
+
+func (dp *DetachedProcess) Done() <-chan struct{} {
+	if dp == nil {
+		return nil
+	}
+	return dp.done
 }
 
 // Manager supervises running processes.
@@ -187,17 +223,65 @@ func (m *Manager) IsRunning(name string) bool {
 // The done channel is closed by the Start goroutine when the process exits —
 // pass it to DrainProc so it can wait without racing on cmd.Wait().
 func (m *Manager) Deregister(name string) (int, *exec.Cmd, <-chan struct{}) {
+	dp := m.Detach(name)
+	if dp == nil {
+		return 0, nil, nil
+	}
+	if dp.cmd.Process != nil {
+		return dp.cmd.Process.Pid, dp.cmd, dp.done
+	}
+	return 0, dp.cmd, dp.done
+}
+
+// Detach removes name from the tracked process table without sending a signal.
+// The returned process keeps running and may be restored if replacement startup
+// fails before proxy swap.
+func (m *Manager) Detach(name string) *DetachedProcess {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	rp, ok := m.procs[name]
 	if !ok {
-		return 0, nil, nil
+		return nil
 	}
 	delete(m.procs, name)
-	if rp.cmd.Process != nil {
-		return rp.cmd.Process.Pid, rp.cmd, rp.done
+	ports := make(map[string]int, len(rp.internalPorts))
+	for name, port := range rp.internalPorts {
+		ports[name] = port
 	}
-	return 0, rp.cmd, rp.done
+	return &DetachedProcess{
+		cmd:           rp.cmd,
+		internalPort:  rp.internalPort,
+		internalPorts: ports,
+		done:          rp.done,
+	}
+}
+
+// Restore re-attaches a detached process under name. It returns false when
+// there is nothing live to restore.
+func (m *Manager) Restore(name string, dp *DetachedProcess) (bool, error) {
+	if dp == nil || dp.cmd == nil || dp.cmd.Process == nil || dp.done == nil {
+		return false, nil
+	}
+	if !PIDAlive(dp.cmd.Process.Pid) {
+		return false, nil
+	}
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if _, exists := m.procs[name]; exists {
+		return false, fmt.Errorf("service %q is already running", name)
+	}
+	ports := make(map[string]int, len(dp.internalPorts))
+	for portName, port := range dp.internalPorts {
+		ports[portName] = port
+	}
+	m.procs[name] = &runningProc{
+		cmd:           dp.cmd,
+		internalPort:  dp.internalPort,
+		internalPorts: ports,
+		done:          dp.done,
+	}
+	return true, nil
 }
 
 // PID returns the PID of a running process, or 0.
@@ -244,6 +328,94 @@ func (m *Manager) InternalPorts(name string) map[string]int {
 		return rp.internalPorts
 	}
 	return nil
+}
+
+// VerifyPortsOwnedByProcessTree verifies that each internal listener belongs
+// to rootPID or one of its descendants. This closes the health-check race where
+// a different local process binds the selected ephemeral port and returns 200.
+func VerifyPortsOwnedByProcessTree(ports map[string]int, rootPID int) error {
+	if rootPID <= 0 {
+		return fmt.Errorf("cannot verify internal port ownership: missing process pid")
+	}
+	allowed, err := processTreePIDs(rootPID)
+	if err != nil {
+		return err
+	}
+	for portName, port := range ports {
+		pids, err := listenerPIDsForPort(port)
+		if err != nil {
+			return fmt.Errorf("verify internal port %s=%d: %w", portName, port, err)
+		}
+		if len(pids) == 0 {
+			return fmt.Errorf("verify internal port %s=%d: no listening process found", portName, port)
+		}
+		owned := false
+		for _, pid := range pids {
+			if allowed[pid] {
+				owned = true
+				break
+			}
+		}
+		if !owned {
+			return fmt.Errorf("verify internal port %s=%d: listener pid(s) %v are not service pid %d or its descendants", portName, port, pids, rootPID)
+		}
+	}
+	return nil
+}
+
+func processTreePIDs(rootPID int) (map[int]bool, error) {
+	allowed := map[int]bool{rootPID: true}
+	queue := []int{rootPID}
+	for len(queue) > 0 {
+		pid := queue[0]
+		queue = queue[1:]
+		children, err := childPIDsOf(pid)
+		if err != nil {
+			return nil, err
+		}
+		for _, child := range children {
+			if allowed[child] {
+				continue
+			}
+			allowed[child] = true
+			queue = append(queue, child)
+		}
+	}
+	return allowed, nil
+}
+
+func defaultListenerPIDsForPort(port int) ([]int, error) {
+	out, err := exec.Command("lsof", "-nP", "-t", fmt.Sprintf("-iTCP:%d", port), "-sTCP:LISTEN").Output()
+	if err != nil {
+		if exitErr, ok := err.(*exec.ExitError); ok && len(exitErr.Stderr) == 0 && len(out) == 0 {
+			return nil, nil
+		}
+		return nil, err
+	}
+	return parsePIDLines(string(out))
+}
+
+func defaultChildPIDsOf(pid int) ([]int, error) {
+	out, err := exec.Command("pgrep", "-P", strconv.Itoa(pid)).Output()
+	if err != nil {
+		if exitErr, ok := err.(*exec.ExitError); ok && len(exitErr.Stderr) == 0 && len(out) == 0 {
+			return nil, nil
+		}
+		return nil, err
+	}
+	return parsePIDLines(string(out))
+}
+
+func parsePIDLines(out string) ([]int, error) {
+	var pids []int
+	for _, line := range strings.Fields(out) {
+		pid, err := strconv.Atoi(line)
+		if err != nil {
+			return nil, fmt.Errorf("parse pid %q: %w", line, err)
+		}
+		pids = append(pids, pid)
+	}
+	return pids, nil
 }
 
 // --- helpers ---

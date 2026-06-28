@@ -305,6 +305,52 @@ func Snapshot(s *Service) *DeploymentSnapshot {
 	}
 }
 
+// Clone returns a deep-enough copy of a service record for rollback of
+// in-memory registry mutations. Runtime slices/maps are copied so callers can
+// safely mutate the original after taking the clone.
+func Clone(s *Service) *Service {
+	if s == nil {
+		return nil
+	}
+	out := *s
+	out.Args = append([]string(nil), s.Args...)
+	out.StablePorts = copyPortMap(s.StablePorts)
+	out.InternalPorts = copyPortMap(s.InternalPorts)
+	out.WatchPaths = append([]string(nil), s.WatchPaths...)
+	out.StartHistory = append([]StartEvent(nil), s.StartHistory...)
+	if s.PreviousDeployment != nil {
+		prev := *s.PreviousDeployment
+		prev.Args = append([]string(nil), s.PreviousDeployment.Args...)
+		prev.StablePorts = copyPortMap(s.PreviousDeployment.StablePorts)
+		prev.WatchPaths = append([]string(nil), s.PreviousDeployment.WatchPaths...)
+		out.PreviousDeployment = &prev
+	}
+	return &out
+}
+
+func copyPortMap(in map[string]int) map[string]int {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make(map[string]int, len(in))
+	for name, port := range in {
+		out[name] = port
+	}
+	return out
+}
+
+// Restore replaces a service record exactly with a previously cloned value.
+func (r *Registry) Restore(s *Service) error {
+	if s == nil {
+		return fmt.Errorf("cannot restore nil service")
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	s.NormalizePorts()
+	r.services[s.Name] = s
+	return r.save()
+}
+
 // Get returns a service by name.
 func (r *Registry) Get(name string) (*Service, bool) {
 	r.mu.RLock()
@@ -331,6 +377,9 @@ func (r *Registry) UpdateStatus(name string, status ServiceStatus, pid int) erro
 	s, ok := r.services[name]
 	if !ok {
 		return fmt.Errorf("service %q not found", name)
+	}
+	if s.Status == status && s.PID == pid {
+		return nil
 	}
 	s.Status = status
 	s.PID = pid
@@ -365,6 +414,45 @@ func (r *Registry) UpdateStartHistory(name string, event StartEvent) error {
 	if len(s.StartHistory) > 10 {
 		s.StartHistory = s.StartHistory[len(s.StartHistory)-10:]
 	}
+	s.UpdatedAt = time.Now()
+	return r.save()
+}
+
+// UpdateProcessStarted records the ephemeral ports, start timestamp, and
+// start-history entry for one process start in a single registry write.
+func (r *Registry) UpdateProcessStarted(name string, ports map[string]int, startedAt time.Time) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	s, ok := r.services[name]
+	if !ok {
+		return fmt.Errorf("service %q not found", name)
+	}
+	s.InternalPorts = ports
+	s.syncSingularFromMap()
+	s.LastStartedAt = startedAt
+	s.StartHistory = append(s.StartHistory, StartEvent{StartedAt: startedAt, ExitCode: -1})
+	if len(s.StartHistory) > 10 {
+		s.StartHistory = s.StartHistory[len(s.StartHistory)-10:]
+	}
+	s.UpdatedAt = time.Now()
+	return r.save()
+}
+
+// MarkRunning records the successful runtime state in a single registry write.
+func (r *Registry) MarkRunning(name string, pid int, lastDeployedAt time.Time) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	s, ok := r.services[name]
+	if !ok {
+		return fmt.Errorf("service %q not found", name)
+	}
+	s.Status = StatusRunning
+	s.PID = pid
+	if !lastDeployedAt.IsZero() {
+		s.LastDeployedAt = lastDeployedAt
+	}
+	s.CrashAttempts = 0
+	s.GaveUp = false
 	s.UpdatedAt = time.Now()
 	return r.save()
 }

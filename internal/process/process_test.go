@@ -402,6 +402,42 @@ func TestDeregister_Unknown(t *testing.T) {
 	}
 }
 
+func TestRestoreDetachedProcessReportsLaterCrash(t *testing.T) {
+	mgr, reg := newTestManager(t)
+	called := make(chan string, 1)
+	mgr.OnCrash = func(name string) {
+		called <- name
+	}
+	registerAndStart(t, mgr, reg, "restore-crash", "fake_service")
+
+	detached := mgr.Detach("restore-crash")
+	if detached == nil || detached.PID() == 0 {
+		t.Fatal("Detach returned no live process")
+	}
+	if mgr.IsRunning("restore-crash") {
+		t.Fatal("service still tracked after Detach")
+	}
+	restored, err := mgr.Restore("restore-crash", detached)
+	if err != nil {
+		t.Fatalf("Restore returned error: %v", err)
+	}
+	if !restored {
+		t.Fatal("Restore returned false for live detached process")
+	}
+
+	if err := detached.Cmd().Process.Kill(); err != nil {
+		t.Fatalf("kill restored process: %v", err)
+	}
+	select {
+	case name := <-called:
+		if name != "restore-crash" {
+			t.Fatalf("OnCrash name = %q, want restore-crash", name)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("restored process crash was not reported")
+	}
+}
+
 // TestPID returns non-zero after Start, zero after Stop.
 func TestPID(t *testing.T) {
 	mgr, reg := newTestManager(t)
@@ -464,6 +500,59 @@ func TestInternalPorts(t *testing.T) {
 	ports := mgr.InternalPorts("iports")
 	if len(ports) == 0 {
 		t.Error("InternalPorts returned empty map after Start")
+	}
+}
+
+func TestVerifyPortsOwnedByProcessTreeAcceptsRootAndDescendant(t *testing.T) {
+	origListeners := listenerPIDsForPort
+	origChildren := childPIDsOf
+	t.Cleanup(func() {
+		listenerPIDsForPort = origListeners
+		childPIDsOf = origChildren
+	})
+	listenerPIDsForPort = func(port int) ([]int, error) {
+		switch port {
+		case 5001:
+			return []int{42}, nil
+		case 5002:
+			return []int{84}, nil
+		default:
+			return nil, nil
+		}
+	}
+	childPIDsOf = func(pid int) ([]int, error) {
+		if pid == 42 {
+			return []int{84}, nil
+		}
+		return nil, nil
+	}
+
+	err := VerifyPortsOwnedByProcessTree(map[string]int{"http": 5001, "worker": 5002}, 42)
+	if err != nil {
+		t.Fatalf("VerifyPortsOwnedByProcessTree returned error: %v", err)
+	}
+}
+
+func TestVerifyPortsOwnedByProcessTreeRejectsForeignListener(t *testing.T) {
+	origListeners := listenerPIDsForPort
+	origChildren := childPIDsOf
+	t.Cleanup(func() {
+		listenerPIDsForPort = origListeners
+		childPIDsOf = origChildren
+	})
+	listenerPIDsForPort = func(port int) ([]int, error) {
+		return []int{99}, nil
+	}
+	childPIDsOf = func(pid int) ([]int, error) {
+		return nil, nil
+	}
+
+	err := VerifyPortsOwnedByProcessTree(map[string]int{"http": 5001}, 42)
+	if err == nil {
+		t.Fatal("expected foreign listener to be rejected")
+	}
+	if !strings.Contains(err.Error(), "not service pid") {
+		t.Fatalf("error = %q, want ownership message", err.Error())
 	}
 }
 

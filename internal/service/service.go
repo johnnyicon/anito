@@ -209,6 +209,8 @@ func (s *Service) Deploy(req DeployRequest) (*registry.Service, error) {
 	if err := proxy.ValidateProxyBindAddress(req.ProxyBindAddress); err != nil {
 		return nil, err
 	}
+	previous, hadPrevious := s.reg.Get(req.Name)
+	previous = registry.Clone(previous)
 
 	// Normalize: singular StablePort → StablePorts map.
 	if len(req.StablePorts) == 0 {
@@ -272,6 +274,7 @@ func (s *Service) Deploy(req DeployRequest) (*registry.Service, error) {
 
 	if req.Type == registry.TypeStatic {
 		if err := s.prx.SwapStatic(req.Name, req.Path); err != nil {
+			s.restoreFailedDeploy(req.Name, previous, hadPrevious, nil)
 			return nil, err
 		}
 		_ = s.reg.UpdateStatus(req.Name, registry.StatusRunning, 0)
@@ -284,48 +287,53 @@ func (s *Service) Deploy(req DeployRequest) (*registry.Service, error) {
 	}
 
 	// Binary: start new process, health-check it, swap proxy, drain old process.
-	oldPID, oldCmd, oldDone := s.mgr.Deregister(svc.Name)
+	oldProc := s.mgr.Detach(svc.Name)
 
 	startedAt := time.Now()
 	internalPorts, err := s.mgr.Start(svc)
 	if err != nil {
+		s.restoreFailedDeploy(req.Name, previous, hadPrevious, oldProc)
 		return nil, err
 	}
-	_ = s.reg.UpdateLastStarted(req.Name, startedAt)
-	_ = s.reg.UpdateStartHistory(req.Name, registry.StartEvent{StartedAt: startedAt, ExitCode: -1})
+	_ = s.reg.UpdateProcessStarted(req.Name, internalPorts, startedAt)
 
 	// Health-check on the designated port.
 	hcInternalPort := registry.PickPort(internalPorts, req.HealthCheckPort)
 
 	if err := waitHealthy(hcInternalPort, req.HealthCheck, hcTimeout); err != nil {
 		_ = s.mgr.Stop(req.Name)
+		s.restoreFailedDeploy(req.Name, previous, hadPrevious, oldProc)
+		return nil, err
+	}
+	if err := process.VerifyPortsOwnedByProcessTree(internalPorts, s.mgr.PID(req.Name)); err != nil {
+		_ = s.mgr.Stop(req.Name)
+		s.restoreFailedDeploy(req.Name, previous, hadPrevious, oldProc)
 		return nil, err
 	}
 
 	if err := s.prx.SwapPorts(req.Name, internalPorts); err != nil {
 		_ = s.mgr.Stop(req.Name)
+		s.restoreFailedDeploy(req.Name, previous, hadPrevious, oldProc)
 		return nil, err
 	}
 
 	newPID := s.mgr.PID(req.Name)
-	_ = s.reg.UpdateStatus(req.Name, registry.StatusRunning, newPID)
-	_ = s.reg.UpdateLastDeployed(req.Name, time.Now())
+	_ = s.reg.MarkRunning(req.Name, newPID, time.Now())
 
 	s.crashMu.Lock()
 	delete(s.crashAttempts, req.Name)
 	s.crashMu.Unlock()
-	_ = s.reg.UpdateCrashState(req.Name, 0, false)
 
-	if oldCmd != nil {
-		pid := s.mgr.MarkDrainingProcess(oldCmd)
+	if oldProc != nil && oldProc.Cmd() != nil {
+		pid := s.mgr.MarkDrainingProcess(oldProc.Cmd())
 		if pid == 0 {
-			pid = oldPID
+			pid = oldProc.PID()
 		}
 		go func(cmd *exec.Cmd, done <-chan struct{}, p int, window time.Duration) {
 			log.Printf("[DRAIN] name=%s pid=%d waiting %s for in-flight requests", req.Name, p, window)
 			time.Sleep(window)
 			process.DrainProc(cmd, done)
-		}(oldCmd, oldDone, pid, drainWindow)
+		}(oldProc.Cmd(), oldProc.Done(), pid, drainWindow)
 	}
 
 	svc, _ = s.reg.Get(req.Name)
@@ -335,6 +343,26 @@ func (s *Service) Deploy(req DeployRequest) (*registry.Service, error) {
 	s.startWatcher(svc)
 	writeReceipt(svc)
 	return svc, nil
+}
+
+func (s *Service) restoreFailedDeploy(name string, previous *registry.Service, hadPrevious bool, oldProc *process.DetachedProcess) {
+	if oldProc != nil {
+		if restored, err := s.mgr.Restore(name, oldProc); err != nil {
+			log.Printf("[ERROR] name=%s restore old process failed: %v", name, err)
+		} else if restored {
+			log.Printf("[RESTORE] name=%s old process restored after failed replacement pid=%d", name, oldProc.PID())
+		}
+	}
+	if hadPrevious {
+		if err := s.reg.Restore(previous); err != nil {
+			log.Printf("[ERROR] name=%s restore registry failed: %v", name, err)
+		}
+		return
+	}
+	if err := s.reg.Remove(name); err != nil {
+		log.Printf("[ERROR] name=%s cleanup registry after failed deploy: %v", name, err)
+	}
+	s.prx.RemovePorts(name)
 }
 
 // isOrphaned reports whether svc's binary no longer exists on disk.
@@ -417,16 +445,17 @@ func (s *Service) restartLocked(name string) error {
 		return nil
 	}
 
-	oldPID, oldCmd, oldDone := s.mgr.Deregister(name)
+	previous := registry.Clone(svc)
+	oldProc := s.mgr.Detach(name)
 
 	startedAt := time.Now()
 	internalPorts, err := s.mgr.Start(svc)
 	if err != nil {
 		log.Printf("[RESTART] name=%s error=%q", name, err)
+		s.restoreFailedDeploy(name, previous, true, oldProc)
 		return err
 	}
-	_ = s.reg.UpdateLastStarted(name, startedAt)
-	_ = s.reg.UpdateStartHistory(name, registry.StartEvent{StartedAt: startedAt, ExitCode: -1})
+	_ = s.reg.UpdateProcessStarted(name, internalPorts, startedAt)
 
 	hcTimeout := svc.HealthCheckTimeout
 	if hcTimeout == 0 {
@@ -439,36 +468,43 @@ func (s *Service) restartLocked(name string) error {
 	if err := waitHealthy(hcInternalPort, svc.HealthCheck, hcTimeout); err != nil {
 		log.Printf("[RESTART] name=%s error=%q", name, err)
 		_ = s.mgr.Stop(name)
+		s.restoreFailedDeploy(name, previous, true, oldProc)
+		return err
+	}
+	if err := process.VerifyPortsOwnedByProcessTree(internalPorts, s.mgr.PID(name)); err != nil {
+		log.Printf("[RESTART] name=%s ownership=%q", name, err)
+		_ = s.mgr.Stop(name)
+		s.restoreFailedDeploy(name, previous, true, oldProc)
 		return err
 	}
 
 	if err := s.prx.SwapPorts(name, internalPorts); err != nil {
 		_ = s.mgr.Stop(name)
+		s.restoreFailedDeploy(name, previous, true, oldProc)
 		return err
 	}
 
 	newPID := s.mgr.PID(name)
-	_ = s.reg.UpdateStatus(name, registry.StatusRunning, newPID)
+	_ = s.reg.MarkRunning(name, newPID, time.Time{})
 
 	s.crashMu.Lock()
 	delete(s.crashAttempts, name)
 	s.crashMu.Unlock()
-	_ = s.reg.UpdateCrashState(name, 0, false)
 
 	drainWindow := svc.DrainWindow
 	if drainWindow == 0 {
 		drainWindow = defaultDrainWindow
 	}
-	if oldCmd != nil {
-		pid := s.mgr.MarkDrainingProcess(oldCmd)
+	if oldProc != nil && oldProc.Cmd() != nil {
+		pid := s.mgr.MarkDrainingProcess(oldProc.Cmd())
 		if pid == 0 {
-			pid = oldPID
+			pid = oldProc.PID()
 		}
 		go func(cmd *exec.Cmd, done <-chan struct{}, p int, window time.Duration) {
 			log.Printf("[DRAIN] name=%s pid=%d waiting %s for in-flight requests", name, p, window)
 			time.Sleep(window)
 			process.DrainProc(cmd, done)
-		}(oldCmd, oldDone, pid, drainWindow)
+		}(oldProc.Cmd(), oldProc.Done(), pid, drainWindow)
 	}
 
 	log.Printf("[RESTART] name=%s port=%d internal=%d", name, svc.StablePort, svc.InternalPort)

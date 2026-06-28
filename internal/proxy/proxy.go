@@ -25,6 +25,7 @@ var (
 
 const (
 	proxyReadHeaderTimeout = 5 * time.Second
+	proxyReadTimeout       = 30 * time.Second
 	proxyIdleTimeout       = 60 * time.Second
 )
 
@@ -169,6 +170,7 @@ func serverFor(e *entry) *http.Server {
 			e.handler.Load().(handlerWrapper).h.ServeHTTP(w, r)
 		}),
 		ReadHeaderTimeout: proxyReadHeaderTimeout,
+		ReadTimeout:       proxyReadTimeout,
 		IdleTimeout:       proxyIdleTimeout,
 	}
 }

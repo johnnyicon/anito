@@ -24,6 +24,7 @@ import (
 
 const (
 	managementReadHeaderTimeout = 5 * time.Second
+	managementReadTimeout       = 30 * time.Second
 	managementIdleTimeout       = 60 * time.Second
 )
 
@@ -130,6 +131,7 @@ func (s *Server) Start() error {
 
 func configureManagementHTTPServer(srv *http.Server) {
 	srv.ReadHeaderTimeout = managementReadHeaderTimeout
+	srv.ReadTimeout = managementReadTimeout
 	srv.IdleTimeout = managementIdleTimeout
 }
 

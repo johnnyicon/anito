@@ -229,6 +229,9 @@ func TestServerForConfiguresHTTPTimeouts(t *testing.T) {
 	if srv.ReadHeaderTimeout != proxyReadHeaderTimeout {
 		t.Fatalf("ReadHeaderTimeout = %s, want %s", srv.ReadHeaderTimeout, proxyReadHeaderTimeout)
 	}
+	if srv.ReadTimeout != proxyReadTimeout {
+		t.Fatalf("ReadTimeout = %s, want %s", srv.ReadTimeout, proxyReadTimeout)
+	}
 	if srv.IdleTimeout != proxyIdleTimeout {
 		t.Fatalf("IdleTimeout = %s, want %s", srv.IdleTimeout, proxyIdleTimeout)
 	}

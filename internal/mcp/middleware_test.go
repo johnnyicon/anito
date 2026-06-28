@@ -122,6 +122,9 @@ func TestMCPHTTPServerConfiguresTimeouts(t *testing.T) {
 	if srv.ReadHeaderTimeout != mcpReadHeaderTimeout {
 		t.Fatalf("ReadHeaderTimeout = %s, want %s", srv.ReadHeaderTimeout, mcpReadHeaderTimeout)
 	}
+	if srv.ReadTimeout != mcpReadTimeout {
+		t.Fatalf("ReadTimeout = %s, want %s", srv.ReadTimeout, mcpReadTimeout)
+	}
 	if srv.IdleTimeout != mcpIdleTimeout {
 		t.Fatalf("IdleTimeout = %s, want %s", srv.IdleTimeout, mcpIdleTimeout)
 	}

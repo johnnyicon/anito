@@ -25,9 +25,18 @@ func TestHelperFakeServiceLifecycle(t *testing.T) {
 		fmt.Fprintf(os.Stderr, "TestHelperFakeServiceLifecycle: invalid PORT=%q\n", portStr)
 		os.Exit(1)
 	}
+	status := http.StatusOK
+	if raw := os.Getenv("HEALTH_STATUS"); raw != "" {
+		parsed, err := strconv.Atoi(raw)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "TestHelperFakeServiceLifecycle: invalid HEALTH_STATUS=%q\n", raw)
+			os.Exit(1)
+		}
+		status = parsed
+	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusOK)
+		w.WriteHeader(status)
 	})
 	srv := &http.Server{Addr: fmt.Sprintf("localhost:%d", port), Handler: mux}
 	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
@@ -136,6 +145,60 @@ func TestDeploy_RunningWrittenAfterSwap(t *testing.T) {
 	}
 	if result.PID == 0 {
 		t.Error("PID = 0 after successful Deploy, want non-zero")
+	}
+}
+
+func TestDeploy_FailedRedeployRestoresOldProcessAndRegistry(t *testing.T) {
+	t.Setenv("TEST_HELPER", "fake_service_lifecycle")
+	svc := newTestService(t)
+
+	first, err := svc.Deploy(DeployRequest{
+		Name:               "failed-redeploy-test",
+		Version:            "v1",
+		Type:               registry.TypeBinary,
+		Path:               os.Args[0],
+		Args:               []string{"-test.run=TestHelperFakeServiceLifecycle", "-test.v"},
+		HealthCheck:        "/health",
+		HealthCheckTimeout: 10 * time.Second,
+	})
+	if err != nil {
+		t.Fatalf("initial Deploy: %v", err)
+	}
+	t.Cleanup(func() { _ = svc.Stop("failed-redeploy-test") })
+	firstPID := first.PID
+	if firstPID == 0 {
+		t.Fatal("initial deploy PID = 0")
+	}
+
+	t.Setenv("HEALTH_STATUS", "500")
+	_, err = svc.Deploy(DeployRequest{
+		Name:               "failed-redeploy-test",
+		Version:            "v2",
+		Type:               registry.TypeBinary,
+		Path:               os.Args[0],
+		Args:               []string{"-test.run=TestHelperFakeServiceLifecycle", "-test.v"},
+		HealthCheck:        "/health",
+		HealthCheckTimeout: 300 * time.Millisecond,
+	})
+	if err == nil {
+		t.Fatal("failed redeploy returned nil error")
+	}
+
+	got, ok := svc.reg.Get("failed-redeploy-test")
+	if !ok {
+		t.Fatal("service missing after failed redeploy")
+	}
+	if got.Version != "v1" {
+		t.Fatalf("registry version after failed redeploy = %q, want v1", got.Version)
+	}
+	if got.PID != firstPID {
+		t.Fatalf("registry PID after failed redeploy = %d, want old PID %d", got.PID, firstPID)
+	}
+	if !svc.mgr.IsRunning("failed-redeploy-test") {
+		t.Fatal("old process was not restored after failed redeploy")
+	}
+	if svc.mgr.PID("failed-redeploy-test") != firstPID {
+		t.Fatalf("process manager PID = %d, want restored old PID %d", svc.mgr.PID("failed-redeploy-test"), firstPID)
 	}
 }
 
