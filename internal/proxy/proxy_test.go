@@ -624,6 +624,79 @@ func TestXAnitoProxyHeaderAfterSwap(t *testing.T) {
 	}
 }
 
+func TestXAnitoClientIPHeaderForwarded(t *testing.T) {
+	m := NewManager()
+	port := freePort(t)
+
+	if err := m.Register("identity-svc", port); err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+	t.Cleanup(func() { m.Remove("identity-svc") })
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, r.Header.Get(clientIPHeader))
+	}))
+	defer upstream.Close()
+
+	time.Sleep(10 * time.Millisecond)
+
+	if err := m.Swap("identity-svc", upstream.Listener.Addr().(*net.TCPAddr).Port); err != nil {
+		t.Fatalf("Swap: %v", err)
+	}
+
+	resp, err := http.Get(fmt.Sprintf("http://127.0.0.1:%d/", port)) //nolint:noctx
+	if err != nil {
+		t.Fatalf("GET: %v", err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+
+	if got := strings.TrimSpace(string(body)); got != "127.0.0.1" {
+		t.Errorf("%s = %q, want %q", clientIPHeader, got, "127.0.0.1")
+	}
+	if got := resp.Header.Get("X-Anito-Proxy"); got != "1" {
+		t.Errorf("X-Anito-Proxy = %q, want %q", got, "1")
+	}
+}
+
+func TestXAnitoClientIPHeaderOverwritesSpoofedInbound(t *testing.T) {
+	m := NewManager()
+	port := freePort(t)
+
+	if err := m.Register("identity-svc", port); err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+	t.Cleanup(func() { m.Remove("identity-svc") })
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, r.Header.Get(clientIPHeader))
+	}))
+	defer upstream.Close()
+
+	time.Sleep(10 * time.Millisecond)
+
+	if err := m.Swap("identity-svc", upstream.Listener.Addr().(*net.TCPAddr).Port); err != nil {
+		t.Fatalf("Swap: %v", err)
+	}
+
+	req, err := http.NewRequest("GET", fmt.Sprintf("http://127.0.0.1:%d/", port), nil)
+	if err != nil {
+		t.Fatalf("NewRequest: %v", err)
+	}
+	req.Header.Set(clientIPHeader, "203.0.113.9")
+
+	resp, err := http.DefaultClient.Do(req) //nolint:noctx
+	if err != nil {
+		t.Fatalf("Do: %v", err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+
+	if got := strings.TrimSpace(string(body)); got != "127.0.0.1" {
+		t.Errorf("%s = %q, want proxy-owned %q", clientIPHeader, got, "127.0.0.1")
+	}
+}
+
 // TestSSERequestIsFlushed verifies that SSE requests (Accept: text/event-stream)
 // are auto-flushed so that events arrive without waiting for the buffer to fill.
 func TestSSERequestIsFlushed(t *testing.T) {

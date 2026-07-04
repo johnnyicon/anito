@@ -14,6 +14,8 @@ import (
 	"github.com/johnnyicon/anito/internal/registry"
 )
 
+const clientIPHeader = "X-Anito-Client-IP"
+
 // handlerWrapper is stored in an atomic.Value so it can be swapped safely.
 type handlerWrapper struct {
 	h http.Handler
@@ -196,6 +198,15 @@ func (m *Manager) SwapPorts(name string, internalPorts map[string]int) error {
 			return err
 		}
 		rp := httputil.NewSingleHostReverseProxy(target)
+		defaultDirector := rp.Director
+		rp.Director = func(req *http.Request) {
+			defaultDirector(req)
+			if ip := clientIPFromRemoteAddr(req.RemoteAddr); ip != "" {
+				req.Header.Set(clientIPHeader, ip)
+			} else {
+				req.Header.Del(clientIPHeader)
+			}
+		}
 		rp.ErrorHandler = func(w http.ResponseWriter, r *http.Request, err error) {
 			http.Error(w, fmt.Sprintf("upstream error: %v", err), http.StatusBadGateway)
 		}
@@ -273,6 +284,20 @@ func (m *Manager) StablePort(name string) int {
 		}
 	}
 	return 0
+}
+
+func clientIPFromRemoteAddr(remoteAddr string) string {
+	host, _, err := net.SplitHostPort(remoteAddr)
+	if err == nil {
+		if ip := net.ParseIP(host); ip != nil {
+			return ip.String()
+		}
+		return ""
+	}
+	if ip := net.ParseIP(remoteAddr); ip != nil {
+		return ip.String()
+	}
+	return ""
 }
 
 // flushProxy wraps httputil.ReverseProxy and flushes after every write,
