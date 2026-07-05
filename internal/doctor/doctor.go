@@ -26,9 +26,9 @@ type Issue struct {
 
 // ConfigResult is the doctor report for one config file.
 type ConfigResult struct {
-	ConfigFile string  // relative path from repo root
-	Name       string  // service name (empty if parse failed)
-	ParseError string  // non-empty if config.Load failed
+	ConfigFile string // relative path from repo root
+	Name       string // service name (empty if parse failed)
+	ParseError string // non-empty if config.Load failed
 	Issues     []Issue
 	Errors     int
 	Warnings   int
@@ -110,6 +110,13 @@ func checkConfig(cfgPath, relPath, repoRoot string, svc StatusFetcher) ConfigRes
 	}
 	cr.Name = cfg.Name
 
+	// Resolve output paths once; worktree checks and output existence checks
+	// both need the same repo-root-relative behavior.
+	absOutput := cfg.Output
+	if !filepath.IsAbs(absOutput) {
+		absOutput = filepath.Join(repoRoot, absOutput)
+	}
+
 	// Worktree check — when the config lives inside a git worktree, check for
 	// Node.js frontend issues. Worktrees don't inherit node_modules, and Vite's
 	// module graph cache goes stale after cherry-picks that add new files.
@@ -133,10 +140,12 @@ func checkConfig(cfgPath, relPath, repoRoot string, svc StatusFetcher) ConfigRes
 				// node_modules exists — check for stale Vite cache.
 				viteCachePath := filepath.Join(nmPath, ".vite")
 				if _, err := os.Stat(viteCachePath); err == nil {
-					cr.add(Issue{Severity: "info", Field: "worktree",
-						Message: "Vite cache present in worktree — content may be stale after cherry-picks that add new files",
-						Action:  "add `--force` to your vite start command in the dev wrapper script to clear the module graph cache on each restart",
-					})
+					if !viteWrapperUsesForce(absOutput) {
+						cr.add(Issue{Severity: "info", Field: "worktree",
+							Message: "Vite cache present in worktree — content may be stale after cherry-picks that add new files",
+							Action:  "add `--force` to your vite start command in the dev wrapper script to clear the module graph cache on each restart",
+						})
+					}
 				}
 			}
 			break
@@ -144,10 +153,6 @@ func checkConfig(cfgPath, relPath, repoRoot string, svc StatusFetcher) ConfigRes
 	}
 
 	// Output file existence.
-	absOutput := cfg.Output
-	if !filepath.IsAbs(absOutput) {
-		absOutput = filepath.Join(repoRoot, absOutput)
-	}
 	if _, err := os.Stat(absOutput); os.IsNotExist(err) {
 		sev, action := "error", "build the binary and run `anito deploy`"
 		if cfg.Build != "" {
@@ -374,6 +379,15 @@ func detectPortConflict(port int) string {
 // the common git worktree convention (../worktrees/).
 func isWorktreePath(path string) bool {
 	return strings.Contains(path, "/worktrees/")
+}
+
+func viteWrapperUsesForce(path string) bool {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return false
+	}
+	content := string(data)
+	return strings.Contains(content, "vite") && strings.Contains(content, "--force")
 }
 
 // findAssets walks dir and returns unique asset extensions found and total count.

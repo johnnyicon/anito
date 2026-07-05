@@ -996,6 +996,19 @@ func TestCoordinateApp_BasicComposite(t *testing.T) {
 	if len(result.GeneratedFiles) < 3 {
 		t.Errorf("expected at least 3 generated files, got %d", len(result.GeneratedFiles))
 	}
+	var wrapper string
+	for _, file := range result.GeneratedFiles {
+		if file.RelPath == ".anito/my-web-dev.sh" {
+			wrapper = file.Content
+			break
+		}
+	}
+	if wrapper == "" {
+		t.Fatal("missing generated Vite dev wrapper")
+	}
+	if !strings.Contains(wrapper, "pnpm --filter web exec vite dev --force") {
+		t.Errorf("wrapper = %q, want Vite dev command with --force", wrapper)
+	}
 
 	// Should have a source patch for the Vite service.
 	if len(result.SourcePatches) == 0 {
