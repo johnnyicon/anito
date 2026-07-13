@@ -9,7 +9,7 @@
 ## Current position
 
 - Canonical AWF plan: `019f5bb0-cf2a-7d33-ae7b-fa2aea3e5875` — **Anito Reliability and Control-Plane Consolidation**.
-- Plan status: `active`; the audit baseline, RestoreAll design/implementation/proof, MCP telemetry design, and issue aggregation are complete. Shared setup planning and immutable routing generations are in progress; typed diagnosis/errors, parity, lifecycle state, archive/prune, frontend coverage, CI, and rollout remain queued.
+- Plan status: `active`; the audit baseline, RestoreAll design/implementation/proof, MCP telemetry design, issue aggregation, shared setup planning, and immutable routing generations are complete. Typed diagnosis/errors is now in progress; issue lifecycle, archive/prune, parity, frontend coverage, CI, and rollout remain queued behind its contract.
 - AWF v2 routing work is in progress on M1 under `codex/awf-v2-planned-routing`. The plan currently stores useful model recommendations and dependency waves, but agent/persona, harness, effort, reviewer, write scope, fallback, and routing provenance are not consistently durable first-class fields yet.
 - AWF schema feature requests: `019f5bba-e76a-7697-a3dd-2fe10f1da3d5` and `019f5bc1-2156-7e72-b392-bf562099c141`.
 - The M1 AWF-plans session has acknowledged the routing/schema work and reported no implementation blocker. Its status evidence is inbox item `019f5cf5-88ca-7be3-abb9-37010e41c4c5`.
@@ -58,9 +58,9 @@ The AWF dependency graph is authoritative. The table gives the coordinator a con
 | 3 | Add Issue Acknowledge, Resolve, Reopen, and Tracker Links | `019f5bb4-6b6a-7647-9667-2e453756af00` | Go Engineer + SRE | `gpt-5.4` | medium | QA / Test Engineer | pending |
 | 4 | Prove Restore Failure and Remove Duplicate Lifecycle Code | `019f5bb2-c629-771b-a1ac-232178be4ded` | QA / Test + Go Engineer | `gpt-5.4` | high | Architect + SRE | done |
 | 4 | Add Reversible Service Archive and Prune Workflows | `019f5bb4-6ba5-7382-b2db-1d8dc96a54f2` | SRE + DevOps | `gpt-5.5` | medium | QA / Test Engineer | pending |
-| 5 | Extract Shared Setup Plan and Apply | `019f5bb3-a094-755d-9329-2d57457495f1` | DX + MCP / AI Integration | `gpt-5.5` | high | Architect + Go Engineer | in_progress |
-| 5 | Implement Immutable Multi-Port Routing Generations | `019f5bb5-0b58-7f6e-8f3f-ff596b6e4a1e` | Network / Infrastructure + Go Engineer | `gpt-5.5` | high | Architect + QA / Test | in_progress |
-| 6 | Add Shared Diagnosis and Typed Domain Errors | `019f5bb3-a0b2-76b5-a7f5-248edb27e9e4` | Go Engineer + SRE | `gpt-5.4` | high | Architect | pending |
+| 5 | Extract Shared Setup Plan and Apply | `019f5bb3-a094-755d-9329-2d57457495f1` | DX + MCP / AI Integration | `gpt-5.5` | high | Architect + Go Engineer | done |
+| 5 | Implement Immutable Multi-Port Routing Generations | `019f5bb5-0b58-7f6e-8f3f-ff596b6e4a1e` | Network / Infrastructure + Go Engineer | `gpt-5.5` | high | Architect + QA / Test | done |
+| 6 | Add Shared Diagnosis and Typed Domain Errors | `019f5bb3-a0b2-76b5-a7f5-248edb27e9e4` | Go Engineer + SRE | `gpt-5.4` | high | Architect | in_progress |
 | 7 | Enforce CLI, HTTP, MCP, and Dashboard Parity | `019f5bb3-a0ce-7331-8026-13a7d8062d4b` | MCP / AI Integration + DX | `gpt-5.4` | high | Go Engineer + QA / Test | pending |
 | 8 | Split Application Responsibilities Along Shared Primitives | `019f5bb5-0b7e-706f-8dc9-245f3431a85f` | Architect + Go Engineer | `gpt-5.4` | high | SRE + MCP / AI Integration | pending |
 | 8 | Add Frontend, Accessibility, and Browser Test Coverage | `019f5bb5-0b92-7afd-83db-2a475f7a1e9c` | QA / Test + DX | `gpt-5.4` | medium | MCP / AI Integration | pending |
@@ -109,3 +109,5 @@ Research briefs must additionally leave a decision record or implementation-read
 | 2026-07-13 | Completed issue aggregation in `255b9ff`: versioned storage, legacy migration, conservative fingerprinting, occurrence retention, atomic persistence, and race-safe tests. RestoreAll implementation remains the active critical-path work. |
 | 2026-07-13 | Completed RestoreAll in `73d316b`: service-owned listener-first reconciliation, bounded worker pool, startup mutation gate, liveness-before-restore wiring, cancellation outcomes, and focused/race tests. |
 | 2026-07-13 | Closed RestoreAll design, MCP telemetry design, and restore proof in AWF. Commit `f59c45a` adds mixed-fixture, listener-first, startup-gate, bounded-concurrency, isolation, and slow-failure coverage; focused and race suites pass. Dispatched setup extraction and immutable routing generation workers as the next shared-primitive gate. |
+| 2026-07-13 | Closed setup extraction and atomic routing in AWF. Commits `0648c48` and `782d8a4` establish shared setup DryRun/Apply with rollback and immutable multi-port route generations; focused and race suites pass. The next executable work is typed domain diagnosis/errors, issue lifecycle, archive/prune, parity, and delivery gates. |
+| 2026-07-13 | Dispatched typed diagnosis/domain errors to worker `019f5d35-6a77-7622-8d84-f57232987efb` (Schrodinger), planned `gpt-5.5` high effort. AWF brief `019f5bb3-a0b2-76b5-a7f5-248edb27e9e4` is in progress; issue lifecycle and archive/prune remain dependency-gated. |
