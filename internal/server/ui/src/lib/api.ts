@@ -85,13 +85,61 @@ export interface IssuesResponse {
   issues: Issue[]
 }
 
+export type DomainErrorCode = 'missing_service' | 'invalid_config' | 'readiness_failure' | 'conflict'
+
+export class ApiError extends Error {
+  status: number
+  code?: DomainErrorCode
+  details?: Record<string, string>
+
+  constructor(message: string, status: number, code?: DomainErrorCode, details?: Record<string, string>) {
+    super(message)
+    this.name = 'ApiError'
+    this.status = status
+    this.code = code
+    this.details = details
+  }
+}
+
+export interface DiagnosisFinding {
+  code:     DomainErrorCode
+  severity: 'error' | 'warning' | 'info'
+  scope?:   string
+  field?:   string
+  message:  string
+  action?:  string
+}
+
+export interface DiagnosisServiceSnapshot {
+  name:     string
+  status:   ServiceStatus
+  address?: string
+  pid?:     number
+  gave_up?: boolean
+}
+
+export interface DiagnosisResult {
+  request:  { service_name?: string; repo_path?: string }
+  healthy:  boolean
+  errors:   number
+  warnings: number
+  findings?: DiagnosisFinding[]
+  service?:  DiagnosisServiceSnapshot
+}
+
 // ── Fetch helpers ──────────────────────────────────────────────────────────
 
 async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(path, init)
   if (!res.ok) {
-    const text = await res.text().catch(() => res.statusText)
-    throw new Error(text || res.statusText)
+    const text = await res.text().catch(() => '')
+    try {
+      const body = JSON.parse(text) as { code?: DomainErrorCode; error?: string; message?: string; details?: Record<string, string> }
+      throw new ApiError(body.message || body.error || res.statusText, res.status, body.code, body.details)
+    } catch (err) {
+      if (err instanceof ApiError) throw err
+      throw new ApiError(text || res.statusText, res.status)
+    }
   }
   return res.json() as Promise<T>
 }
@@ -143,6 +191,19 @@ export const doctorQuery = (repoPath: string, enabled = true) => queryOptions({
   queryKey:  ['doctor', repoPath],
   queryFn:   () => apiFetch<DoctorResult>(`/doctor?path=${encodeURIComponent(repoPath)}`),
   enabled:   enabled && !!repoPath,
+  staleTime: 30_000,
+  retry:     false,
+})
+
+export const diagnosisQuery = (input: { serviceName?: string; repoPath?: string }, enabled = true) => queryOptions({
+  queryKey: ['diagnosis', input.serviceName ?? '', input.repoPath ?? ''],
+  queryFn:  () => {
+    const qs = new URLSearchParams()
+    if (input.serviceName) qs.set('service_name', input.serviceName)
+    if (input.repoPath) qs.set('path', input.repoPath)
+    return apiFetch<DiagnosisResult>(`/diagnose?${qs.toString()}`)
+  },
+  enabled:   enabled && !!(input.serviceName || input.repoPath),
   staleTime: 30_000,
   retry:     false,
 })

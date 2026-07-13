@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -16,6 +17,8 @@ import (
 
 	"github.com/johnnyicon/anito/internal/client"
 	"github.com/johnnyicon/anito/internal/config"
+	"github.com/johnnyicon/anito/internal/diagnosis"
+	"github.com/johnnyicon/anito/internal/domain"
 	"github.com/johnnyicon/anito/internal/issues"
 	mcpserver "github.com/johnnyicon/anito/internal/mcp"
 	"github.com/johnnyicon/anito/internal/process"
@@ -84,6 +87,9 @@ func main() {
 			path = os.Args[2]
 		}
 		runDoctor(cli, path)
+
+	case "diagnose":
+		runDiagnose(cli, os.Args[2:])
 
 	case "deploy":
 		configPath := defaultConfigPath()
@@ -527,6 +533,50 @@ func runLogs(cli *client.Client, name string) {
 	}
 }
 
+func runDiagnose(cli *client.Client, args []string) {
+	req := diagnosis.Request{RepoPath: "."}
+	if len(args) > 0 {
+		target := args[0]
+		if info, err := os.Stat(target); err == nil && info.IsDir() {
+			req.RepoPath = target
+		} else {
+			req = diagnosis.Request{ServiceName: target}
+		}
+	}
+	result, err := cli.Diagnose(req)
+	if err != nil {
+		fatal(err)
+	}
+	if result.Service != nil {
+		fmt.Printf("service: %s (%s)\n", result.Service.Name, result.Service.Status)
+	}
+	if result.Healthy {
+		fmt.Println("✓ no diagnosis findings")
+		return
+	}
+	for _, finding := range result.Findings {
+		marker := "info"
+		if finding.Severity != "" {
+			marker = finding.Severity
+		}
+		scope := finding.Scope
+		if scope != "" {
+			scope += " "
+		}
+		field := finding.Field
+		if field != "" {
+			field += ": "
+		}
+		fmt.Printf("[%s:%s] %s%s%s\n", finding.Code, marker, scope, field, finding.Message)
+		if finding.Action != "" {
+			fmt.Printf("  -> %s\n", finding.Action)
+		}
+	}
+	if result.Errors > 0 {
+		os.Exit(1)
+	}
+}
+
 func runMCPInfo(mcpPort int) {
 	fmt.Printf("Anito MCP server: http://localhost:%d\n\n", mcpPort)
 	fmt.Println("Add to Claude Code:")
@@ -808,6 +858,11 @@ func hasSingleDefault(ports map[string]int) bool {
 }
 
 func fatal(err error) {
+	var de *domain.Error
+	if errors.As(err, &de) {
+		fmt.Fprintf(os.Stderr, "error [%s]: %s\n", de.Code, de.Message)
+		os.Exit(1)
+	}
 	fmt.Fprintln(os.Stderr, "error:", err)
 	os.Exit(1)
 }
@@ -832,6 +887,7 @@ Usage:
   anito daemon [flags]                      start the anito daemon
   anito setup [path]                        inspect repo, check service contract, write .anito/config.yaml
   anito doctor [path]                       validate .anito/config.yaml and check registry alignment
+  anito diagnose [service-or-path]          run shared read-only diagnosis and print stable issue codes
   anito deploy [config]                     build + deploy (default: .anito/config.yaml)
   anito promote <stable-config> [dev-name]  build stable binary and deploy it
   anito services                            list all running services

@@ -18,7 +18,9 @@ import (
 
 	sdkmcp "github.com/modelcontextprotocol/go-sdk/mcp"
 
+	"github.com/johnnyicon/anito/internal/diagnosis"
 	"github.com/johnnyicon/anito/internal/doctor"
+	"github.com/johnnyicon/anito/internal/domain"
 	"github.com/johnnyicon/anito/internal/issues"
 	"github.com/johnnyicon/anito/internal/registry"
 	"github.com/johnnyicon/anito/internal/service"
@@ -52,7 +54,7 @@ func (s *Server) logErr(tool string, input any, err error) {
 		Source:   "mcp:" + tool,
 		Tool:     tool,
 		Input:    inputJSON,
-		Error:    err.Error(),
+		Error:    domain.Redact(err.Error()),
 		Severity: "error",
 	})
 }
@@ -305,6 +307,11 @@ type doctorInput struct {
 	Path string `json:"path" jsonschema:"absolute path to the repo root containing .anito/"`
 }
 
+type diagnosisInput struct {
+	ServiceName string `json:"service_name,omitempty" jsonschema:"optional service name to check against the Anito registry"`
+	RepoPath    string `json:"repo_path,omitempty" jsonschema:"optional absolute path to the repo root containing .anito/"`
+}
+
 type doctorIssueView struct {
 	Severity string `json:"severity"`
 	Field    string `json:"field"`
@@ -404,7 +411,7 @@ func (s *Server) registerTools(srv *sdkmcp.Server) {
 		if in.DrainWindow != "" {
 			d, err := time.ParseDuration(in.DrainWindow)
 			if err != nil {
-				return nil, serviceView{}, fmt.Errorf("invalid drain_window %q: use a duration string like '3s' or '500ms'", in.DrainWindow)
+				return nil, serviceView{}, domain.InvalidConfigf("invalid drain_window %q: use a duration string like '3s' or '500ms'", in.DrainWindow)
 			}
 			drainWindow = d
 		}
@@ -412,7 +419,7 @@ func (s *Server) registerTools(srv *sdkmcp.Server) {
 		if in.HealthCheckTimeout != "" {
 			d, err := time.ParseDuration(in.HealthCheckTimeout)
 			if err != nil {
-				return nil, serviceView{}, fmt.Errorf("invalid health_check_timeout %q: use a duration string like '30s'", in.HealthCheckTimeout)
+				return nil, serviceView{}, domain.InvalidConfigf("invalid health_check_timeout %q: use a duration string like '30s'", in.HealthCheckTimeout)
 			}
 			hcTimeout = d
 		}
@@ -664,6 +671,22 @@ func (s *Server) registerTools(srv *sdkmcp.Server) {
 			out.Configs = append(out.Configs, dcr)
 		}
 		return nil, out, nil
+	})
+
+	sdkmcp.AddTool(srv, &sdkmcp.Tool{
+		Name: "anito_diagnose",
+		Description: "Run shared read-only diagnosis for a service name, repo path, or both. " +
+			"Returns stable finding codes: missing_service, invalid_config, readiness_failure, and conflict. " +
+			"Does not restart, repair, or read local log files.",
+	}, func(ctx context.Context, req *sdkmcp.CallToolRequest, in diagnosisInput) (*sdkmcp.CallToolResult, diagnosis.Result, error) {
+		log.Printf("[MCP] tool=anito_diagnose service=%q repo=%q", in.ServiceName, in.RepoPath)
+		result, err := s.svc.Diagnose(diagnosis.Request{ServiceName: in.ServiceName, RepoPath: in.RepoPath})
+		if err != nil {
+			log.Printf("[MCP] tool=anito_diagnose service=%q repo=%q error=%q", in.ServiceName, in.RepoPath, err)
+			s.logErr("anito_diagnose", in, err)
+			return nil, diagnosis.Result{}, err
+		}
+		return nil, *result, nil
 	})
 
 	sdkmcp.AddTool(srv, &sdkmcp.Tool{

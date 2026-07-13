@@ -7,8 +7,11 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
 
+	"github.com/johnnyicon/anito/internal/diagnosis"
+	"github.com/johnnyicon/anito/internal/domain"
 	"github.com/johnnyicon/anito/internal/issues"
 	"github.com/johnnyicon/anito/internal/registry"
 )
@@ -104,6 +107,25 @@ func (c *Client) Logs(name string, lines int) ([]string, error) {
 	return out, nil
 }
 
+func (c *Client) Diagnose(req diagnosis.Request) (*diagnosis.Result, error) {
+	path := "/diagnose"
+	var parts []string
+	if req.ServiceName != "" {
+		parts = append(parts, "service_name="+url.QueryEscape(req.ServiceName))
+	}
+	if req.RepoPath != "" {
+		parts = append(parts, "path="+url.QueryEscape(req.RepoPath))
+	}
+	if len(parts) > 0 {
+		path += "?" + strings.Join(parts, "&")
+	}
+	var out diagnosis.Result
+	if err := c.getJSON(path, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
 // LogsFollow streams log lines from the daemon via SSE, writing each line to w.
 // It blocks until the connection is closed or an error occurs.
 func (c *Client) LogsFollow(name string, backlog int, w io.Writer) error {
@@ -196,6 +218,9 @@ func parseError(resp *http.Response) error {
 	msg := buf.String()
 	if msg == "" {
 		msg = resp.Status
+	}
+	if de, ok := domain.FromWire(buf.Bytes()); ok {
+		return de
 	}
 	return fmt.Errorf("daemon error %d: %s", resp.StatusCode, msg)
 }

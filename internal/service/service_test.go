@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -11,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/johnnyicon/anito/internal/domain"
 	"github.com/johnnyicon/anito/internal/issues"
 	"github.com/johnnyicon/anito/internal/process"
 	"github.com/johnnyicon/anito/internal/proxy"
@@ -75,6 +77,10 @@ func TestWaitHTTPReady_FailsOn404(t *testing.T) {
 	err := waitHTTPReady(port, "/health", 300*time.Millisecond)
 	if err == nil {
 		t.Error("expected error when server returns 404, got nil")
+	}
+	var de *domain.Error
+	if !errors.As(err, &de) || de.Code != domain.CodeReadinessFailure {
+		t.Fatalf("error = %v, want readiness_failure domain error", err)
 	}
 }
 
@@ -495,6 +501,10 @@ func TestStatus_NotFound(t *testing.T) {
 	_, err := svc.Status("nonexistent")
 	if err == nil {
 		t.Error("expected error for nonexistent service, got nil")
+	}
+	var de *domain.Error
+	if !errors.As(err, &de) || de.Code != domain.CodeMissingService {
+		t.Fatalf("error = %v, want missing_service domain error", err)
 	}
 }
 
@@ -1046,6 +1056,10 @@ func TestReserve_ReservedPort(t *testing.T) {
 	if err == nil {
 		t.Error("expected error when reserving Anito's management port 7700")
 	}
+	var de *domain.Error
+	if !errors.As(err, &de) || de.Code != domain.CodeConflict {
+		t.Fatalf("error = %v, want conflict domain error", err)
+	}
 	if !strings.Contains(err.Error(), "reserved") {
 		t.Errorf("error should mention 'reserved': %v", err)
 	}
@@ -1220,6 +1234,10 @@ func TestRestart_NotFound(t *testing.T) {
 	err := svc.Restart("no-such-svc")
 	if err == nil {
 		t.Fatal("expected error for nonexistent service")
+	}
+	var de *domain.Error
+	if !errors.As(err, &de) || de.Code != domain.CodeMissingService {
+		t.Fatalf("error = %v, want missing_service domain error", err)
 	}
 }
 

@@ -14,6 +14,7 @@ import (
 
 	"github.com/labstack/echo/v4"
 
+	"github.com/johnnyicon/anito/internal/domain"
 	"github.com/johnnyicon/anito/internal/issues"
 	"github.com/johnnyicon/anito/internal/process"
 	"github.com/johnnyicon/anito/internal/proxy"
@@ -118,6 +119,7 @@ func newTestHarness(t *testing.T) *testHarness {
 	e.POST("/issues", s.handlePostIssue)
 	e.GET("/issues", s.handleGetIssues)
 	e.GET("/doctor", s.handleDoctor)
+	e.GET("/diagnose", s.handleDiagnose)
 	e.GET("/metrics", s.handleMetrics)
 	e.POST("/teardown", s.handleTeardown)
 
@@ -232,9 +234,12 @@ func TestHandleDeployInvalidDrainWindow(t *testing.T) {
 	if he.Code != http.StatusBadRequest {
 		t.Errorf("expected 400, got %d", he.Code)
 	}
-	msg, _ := he.Message.(string)
-	if !strings.Contains(msg, "drain_window") {
-		t.Errorf("error message should mention drain_window, got %q", msg)
+	wire, ok := he.Message.(domain.WireError)
+	if !ok {
+		t.Fatalf("expected domain wire error, got %T", he.Message)
+	}
+	if wire.Code != domain.CodeInvalidConfig || !strings.Contains(wire.Error, "drain_window") {
+		t.Errorf("error should be invalid_config drain_window, got %+v", wire)
 	}
 }
 
@@ -250,9 +255,12 @@ func TestHandleDeployInvalidHealthCheckTimeout(t *testing.T) {
 	if he.Code != http.StatusBadRequest {
 		t.Errorf("expected 400, got %d", he.Code)
 	}
-	msg, _ := he.Message.(string)
-	if !strings.Contains(msg, "health_check_timeout") {
-		t.Errorf("error message should mention health_check_timeout, got %q", msg)
+	wire, ok := he.Message.(domain.WireError)
+	if !ok {
+		t.Fatalf("expected domain wire error, got %T", he.Message)
+	}
+	if wire.Code != domain.CodeInvalidConfig || !strings.Contains(wire.Error, "health_check_timeout") {
+		t.Errorf("error should be invalid_config health_check_timeout, got %+v", wire)
 	}
 }
 
@@ -270,6 +278,29 @@ func TestHandleDeployInvalidBody(t *testing.T) {
 	}
 }
 
+func TestHandleDeployIssueRedactsSecrets(t *testing.T) {
+	h := newTestHarness(t)
+	c, _ := h.request(http.MethodPost, "/deploy", `{"name":"secret-svc","path":"/tmp/API_KEY=supersecret"}`)
+
+	err := h.srv.handleDeploy(c)
+	if err == nil {
+		t.Fatal("expected deploy error")
+	}
+	list, listErr := h.srv.iss.Recent(1, "cli:deploy")
+	if listErr != nil {
+		t.Fatal(listErr)
+	}
+	if len(list) != 1 {
+		t.Fatalf("issues = %d, want 1", len(list))
+	}
+	if strings.Contains(list[0].Error, "supersecret") {
+		t.Fatalf("issue leaked secret: %q", list[0].Error)
+	}
+	if !strings.Contains(list[0].Error, "[redacted]") {
+		t.Fatalf("issue was not redacted: %q", list[0].Error)
+	}
+}
+
 // --- handleStop ---
 
 func TestHandleStopNotFound(t *testing.T) {
@@ -283,8 +314,15 @@ func TestHandleStopNotFound(t *testing.T) {
 	if !ok {
 		t.Fatalf("expected echo.HTTPError, got %T (%v)", err, err)
 	}
-	if he.Code != http.StatusInternalServerError {
-		t.Errorf("expected 500, got %d", he.Code)
+	if he.Code != http.StatusNotFound {
+		t.Errorf("expected 404, got %d", he.Code)
+	}
+	wire, ok := he.Message.(domain.WireError)
+	if !ok {
+		t.Fatalf("expected domain wire error, got %T", he.Message)
+	}
+	if wire.Code != domain.CodeMissingService {
+		t.Errorf("expected missing_service, got %q", wire.Code)
 	}
 }
 
@@ -301,8 +339,15 @@ func TestHandleRestartNotFound(t *testing.T) {
 	if !ok {
 		t.Fatalf("expected echo.HTTPError, got %T (%v)", err, err)
 	}
-	if he.Code != http.StatusInternalServerError {
-		t.Errorf("expected 500, got %d", he.Code)
+	if he.Code != http.StatusNotFound {
+		t.Errorf("expected 404, got %d", he.Code)
+	}
+	wire, ok := he.Message.(domain.WireError)
+	if !ok {
+		t.Fatalf("expected domain wire error, got %T", he.Message)
+	}
+	if wire.Code != domain.CodeMissingService {
+		t.Errorf("expected missing_service, got %q", wire.Code)
 	}
 }
 
@@ -319,8 +364,15 @@ func TestHandleRollbackNotFound(t *testing.T) {
 	if !ok {
 		t.Fatalf("expected echo.HTTPError, got %T (%v)", err, err)
 	}
-	if he.Code != http.StatusInternalServerError {
-		t.Errorf("expected 500, got %d", he.Code)
+	if he.Code != http.StatusNotFound {
+		t.Errorf("expected 404, got %d", he.Code)
+	}
+	wire, ok := he.Message.(domain.WireError)
+	if !ok {
+		t.Fatalf("expected domain wire error, got %T", he.Message)
+	}
+	if wire.Code != domain.CodeMissingService {
+		t.Errorf("expected missing_service, got %q", wire.Code)
 	}
 }
 
@@ -396,6 +448,41 @@ func TestHandleStatusNotFound(t *testing.T) {
 	}
 	if he.Code != http.StatusNotFound {
 		t.Errorf("expected 404, got %d", he.Code)
+	}
+	wire, ok := he.Message.(domain.WireError)
+	if !ok {
+		t.Fatalf("expected domain wire error, got %T", he.Message)
+	}
+	if wire.Code != domain.CodeMissingService {
+		t.Errorf("expected missing_service, got %q", wire.Code)
+	}
+}
+
+func TestHandleDiagnoseMissingService(t *testing.T) {
+	h := newTestHarness(t)
+	c, rec := h.request(http.MethodGet, "/diagnose?service_name=ghost", "")
+
+	if err := h.srv.handleDiagnose(c); err != nil {
+		t.Fatalf("handleDiagnose returned error: %v", err)
+	}
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rec.Code)
+	}
+	var resp struct {
+		Healthy  bool `json:"healthy"`
+		Errors   int  `json:"errors"`
+		Findings []struct {
+			Code domain.Code `json:"code"`
+		} `json:"findings"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if resp.Healthy || resp.Errors != 1 {
+		t.Fatalf("healthy/errors = %v/%d, want false/1", resp.Healthy, resp.Errors)
+	}
+	if len(resp.Findings) != 1 || resp.Findings[0].Code != domain.CodeMissingService {
+		t.Fatalf("findings = %+v, want missing_service", resp.Findings)
 	}
 }
 
@@ -534,6 +621,13 @@ func TestHandleLogsNotFound(t *testing.T) {
 	}
 	if he.Code != http.StatusNotFound {
 		t.Errorf("expected 404, got %d", he.Code)
+	}
+	wire, ok := he.Message.(domain.WireError)
+	if !ok {
+		t.Fatalf("expected domain wire error, got %T", he.Message)
+	}
+	if wire.Code != domain.CodeMissingService {
+		t.Errorf("expected missing_service, got %q", wire.Code)
 	}
 }
 
@@ -1114,13 +1208,12 @@ func TestHandleGetIssues_WithLinesParam(t *testing.T) {
 
 // --- handleDeploy with valid duration strings ---
 
-// TestHandleDeploy_BinaryFails verifies that handleDeploy returns 500 when
+// TestHandleDeploy_BinaryFails verifies that handleDeploy returns 503 when
 // the service deploy fails (binary exits before health check passes).
-// Uses /bin/true which exits immediately without ever serving HTTP.
+// Uses /usr/bin/true which exits immediately without ever serving HTTP.
 func TestHandleDeploy_BinaryFails(t *testing.T) {
 	h := newTestHarness(t)
-	// /bin/true exits immediately — health check times out quickly with 100ms timeout.
-	body := `{"name":"fail-svc","type":"binary","path":"/bin/true","health_check_timeout":"100ms"}`
+	body := `{"name":"fail-svc","type":"binary","path":"/usr/bin/true","health_check_timeout":"100ms"}`
 	c, _ := h.request(http.MethodPost, "/deploy", body)
 
 	err := h.srv.handleDeploy(c)
@@ -1128,8 +1221,15 @@ func TestHandleDeploy_BinaryFails(t *testing.T) {
 	if !ok {
 		t.Fatalf("expected echo.HTTPError, got %T (%v)", err, err)
 	}
-	if he.Code != http.StatusInternalServerError {
-		t.Errorf("expected 500, got %d", he.Code)
+	if he.Code != http.StatusServiceUnavailable {
+		t.Errorf("expected 503, got %d", he.Code)
+	}
+	wire, ok := he.Message.(domain.WireError)
+	if !ok {
+		t.Fatalf("expected domain wire error, got %T", he.Message)
+	}
+	if wire.Code != domain.CodeReadinessFailure {
+		t.Errorf("expected readiness_failure, got %q", wire.Code)
 	}
 }
 

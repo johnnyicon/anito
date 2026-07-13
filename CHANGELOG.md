@@ -8,6 +8,12 @@ Format: `## [date] — description`, breaking changes marked **BREAKING**.
 
 ---
 
+## 2026-07-13 — Shared diagnosis and typed domain errors
+
+**HTTP API / MCP / CLI:** Service failures now use stable domain codes for missing services, invalid configuration, readiness failures, and conflicts. HTTP error responses include additive structured fields (`code`, `error`, `message`) where the current surface can carry them. New read-only diagnosis surfaces are available as `GET /diagnose`, `anito_diagnose`, and `anito diagnose`.
+
+**Dashboard:** Shared API types now understand the stable error and diagnosis codes. Diagnosis redacts common secret/token patterns and does not perform repair, restart services, or read local log files.
+
 ## 2026-07-13 — Startup reconciliation gate
 
 **HTTP API:** Mutating service requests made while daemon startup reconciliation is in progress now return `409 Conflict` with startup progress fields instead of a generic server error. `GET /health` now includes additive startup phase/progress fields. Read-only endpoints remain available during reconciliation.

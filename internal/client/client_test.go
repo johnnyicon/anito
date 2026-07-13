@@ -3,6 +3,7 @@ package client
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -11,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/johnnyicon/anito/internal/domain"
 	"github.com/johnnyicon/anito/internal/issues"
 	"github.com/johnnyicon/anito/internal/registry"
 )
@@ -830,6 +832,22 @@ func TestParseError_WithBody(t *testing.T) {
 	want := "daemon error 422: port already in use"
 	if err.Error() != want {
 		t.Errorf("parseError = %q; want %q", err.Error(), want)
+	}
+}
+
+func TestParseError_WithDomainBody(t *testing.T) {
+	resp := &http.Response{
+		StatusCode: http.StatusNotFound,
+		Status:     "404 Not Found",
+		Body:       io.NopCloser(strings.NewReader(`{"code":"missing_service","error":"service \"ghost\" not found"}`)),
+	}
+	err := parseError(resp)
+	if err == nil {
+		t.Fatal("parseError: expected error, got nil")
+	}
+	var de *domain.Error
+	if !errors.As(err, &de) || de.Code != domain.CodeMissingService {
+		t.Fatalf("parseError = %T %v, want missing_service domain error", err, err)
 	}
 }
 

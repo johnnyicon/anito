@@ -15,7 +15,9 @@ import (
 	"github.com/labstack/echo/v4"
 	echomiddleware "github.com/labstack/echo/v4/middleware"
 
+	"github.com/johnnyicon/anito/internal/diagnosis"
 	"github.com/johnnyicon/anito/internal/doctor"
+	"github.com/johnnyicon/anito/internal/domain"
 	"github.com/johnnyicon/anito/internal/issues"
 	"github.com/johnnyicon/anito/internal/registry"
 	"github.com/johnnyicon/anito/internal/service"
@@ -75,6 +77,7 @@ func (s *Server) Start() error {
 	e.GET("/issues", s.handleGetIssues)
 	e.DELETE("/issues", s.handleClearIssues)
 	e.GET("/doctor", s.handleDoctor)
+	e.GET("/diagnose", s.handleDiagnose)
 	e.GET("/metrics", s.handleMetrics)
 	e.GET("/sessions", s.handleSessions)
 	e.POST("/teardown", s.handleTeardown)
@@ -154,14 +157,14 @@ func (s *Server) handleDeploy(c echo.Context) error {
 		return echo.NewHTTPError(http.StatusBadRequest, "invalid request body")
 	}
 	if req.Name == "" || req.Path == "" {
-		return echo.NewHTTPError(http.StatusBadRequest, "name and path are required")
+		return domainHTTPError(domain.InvalidConfigf("name and path are required"))
 	}
 
 	var drainWindow time.Duration
 	if req.DrainWindow != "" {
 		d, err := time.ParseDuration(req.DrainWindow)
 		if err != nil {
-			return echo.NewHTTPError(http.StatusBadRequest, fmt.Sprintf("invalid drain_window %q: use a duration string like '3s' or '500ms'", req.DrainWindow))
+			return domainHTTPError(domain.InvalidConfigf("invalid drain_window %q: use a duration string like '3s' or '500ms'", req.DrainWindow))
 		}
 		drainWindow = d
 	}
@@ -169,7 +172,7 @@ func (s *Server) handleDeploy(c echo.Context) error {
 	if req.HealthCheckTimeout != "" {
 		d, err := time.ParseDuration(req.HealthCheckTimeout)
 		if err != nil {
-			return echo.NewHTTPError(http.StatusBadRequest, fmt.Sprintf("invalid health_check_timeout %q: use a duration string like '30s'", req.HealthCheckTimeout))
+			return domainHTTPError(domain.InvalidConfigf("invalid health_check_timeout %q: use a duration string like '30s'", req.HealthCheckTimeout))
 		}
 		hcTimeout = d
 	}
@@ -200,7 +203,7 @@ func (s *Server) handleDeploy(c echo.Context) error {
 				Source:   "cli:deploy",
 				Tool:     "deploy",
 				Input:    req.Name,
-				Error:    err.Error(),
+				Error:    domain.Redact(err.Error()),
 				Severity: "error",
 			})
 		}
@@ -245,7 +248,7 @@ func (s *Server) handleStatus(c echo.Context) error {
 	name := c.Param("name")
 	svc, err := s.svc.Status(name)
 	if err != nil {
-		return echo.NewHTTPError(http.StatusNotFound, err.Error())
+		return serviceHTTPError(err)
 	}
 	return c.JSON(http.StatusOK, svc)
 }
@@ -285,7 +288,7 @@ func (s *Server) handleLogs(c echo.Context) error {
 
 	logLines, err := s.svc.Logs(name, lines)
 	if err != nil {
-		return echo.NewHTTPError(http.StatusNotFound, err.Error())
+		return serviceHTTPError(err)
 	}
 	return c.JSON(http.StatusOK, logLines)
 }
@@ -297,7 +300,18 @@ func (s *Server) handleDoctor(c echo.Context) error {
 	}
 	result, err := doctor.Check(path, s.svc)
 	if err != nil {
-		return echo.NewHTTPError(http.StatusBadRequest, err.Error())
+		return domainHTTPError(domain.InvalidConfigf("%s", err.Error()))
+	}
+	return c.JSON(http.StatusOK, result)
+}
+
+func (s *Server) handleDiagnose(c echo.Context) error {
+	result, err := s.svc.Diagnose(diagnosis.Request{
+		ServiceName: c.QueryParam("service_name"),
+		RepoPath:    c.QueryParam("path"),
+	})
+	if err != nil {
+		return serviceHTTPError(err)
 	}
 	return c.JSON(http.StatusOK, result)
 }
@@ -340,13 +354,41 @@ func serviceHTTPError(err error) error {
 	var gate *service.StartupGateError
 	if errors.As(err, &gate) {
 		return echo.NewHTTPError(http.StatusConflict, map[string]any{
+			"code":      string(domain.CodeConflict),
 			"error":     gate.Error(),
+			"message":   gate.Error(),
 			"phase":     gate.Phase,
 			"completed": gate.Completed,
 			"total":     gate.Total,
 		})
 	}
+	if _, ok := domain.CodeOf(err); ok {
+		return domainHTTPError(err)
+	}
 	return echo.NewHTTPError(http.StatusInternalServerError, err.Error())
+}
+
+func domainHTTPError(err error) error {
+	return echo.NewHTTPError(domainHTTPStatus(err), domain.ToWire(err))
+}
+
+func domainHTTPStatus(err error) int {
+	code, ok := domain.CodeOf(err)
+	if !ok {
+		return http.StatusInternalServerError
+	}
+	switch code {
+	case domain.CodeMissingService:
+		return http.StatusNotFound
+	case domain.CodeInvalidConfig:
+		return http.StatusBadRequest
+	case domain.CodeReadinessFailure:
+		return http.StatusServiceUnavailable
+	case domain.CodeConflict:
+		return http.StatusConflict
+	default:
+		return http.StatusInternalServerError
+	}
 }
 
 func (s *Server) handlePostIssue(c echo.Context) error {

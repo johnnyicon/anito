@@ -21,6 +21,8 @@ import (
 	"time"
 
 	"github.com/johnnyicon/anito/internal/config"
+	"github.com/johnnyicon/anito/internal/diagnosis"
+	"github.com/johnnyicon/anito/internal/domain"
 	"github.com/johnnyicon/anito/internal/issues"
 	"github.com/johnnyicon/anito/internal/notify"
 	"github.com/johnnyicon/anito/internal/process"
@@ -366,7 +368,7 @@ func (s *Service) UsedPorts() map[int]bool {
 func (s *Service) Status(name string) (*registry.Service, error) {
 	svc, ok := s.reg.Get(name)
 	if !ok {
-		return nil, fmt.Errorf("service %q not found", name)
+		return nil, domain.MissingServicef("service %q not found", name)
 	}
 	if isOrphaned(svc) {
 		projected := *svc
@@ -379,6 +381,9 @@ func (s *Service) Status(name string) (*registry.Service, error) {
 func (s *Service) Stop(name string) error {
 	if err := s.ensureMutable(); err != nil {
 		return err
+	}
+	if _, ok := s.reg.Get(name); !ok {
+		return domain.MissingServicef("service %q not found", name)
 	}
 	s.wtch.Stop(name)
 	err := s.mgr.Stop(name)
@@ -404,7 +409,7 @@ func (s *Service) Restart(name string) error {
 func (s *Service) restartLocked(name string) error {
 	svc, ok := s.reg.Get(name)
 	if !ok {
-		return fmt.Errorf("service %q not found", name)
+		return domain.MissingServicef("service %q not found", name)
 	}
 
 	if svc.Type != registry.TypeBinary {
@@ -528,33 +533,33 @@ func validateDeployRequest(req DeployRequest) error {
 		return err
 	}
 	if req.Path == "" {
-		return fmt.Errorf("service path is required")
+		return domain.InvalidConfigf("service path is required")
 	}
 	typeName := req.Type
 	if typeName == "" {
 		typeName = registry.TypeBinary
 	}
 	if typeName != registry.TypeBinary && typeName != registry.TypeStatic {
-		return fmt.Errorf("service %q has unsupported type %q", req.Name, typeName)
+		return domain.InvalidConfigf("service %q has unsupported type %q", req.Name, typeName)
 	}
 	info, err := os.Stat(req.Path)
 	if err != nil {
-		return fmt.Errorf("service %q path %s: %w", req.Name, req.Path, err)
+		return domain.InvalidConfigf("service %q path %s: %v", req.Name, req.Path, err)
 	}
 	if typeName == registry.TypeBinary && info.IsDir() {
-		return fmt.Errorf("service %q binary path is a directory: %s", req.Name, req.Path)
+		return domain.InvalidConfigf("service %q binary path is a directory: %s", req.Name, req.Path)
 	}
 	if typeName == registry.TypeStatic && !info.IsDir() {
-		return fmt.Errorf("service %q static path is not a directory: %s", req.Name, req.Path)
+		return domain.InvalidConfigf("service %q static path is not a directory: %s", req.Name, req.Path)
 	}
 	if req.HealthCheck != "" && !strings.HasPrefix(req.HealthCheck, "/") {
-		return fmt.Errorf("service %q health_check must start with /", req.Name)
+		return domain.InvalidConfigf("service %q health_check must start with /", req.Name)
 	}
 	if req.RestartPolicy != "" {
 		switch req.RestartPolicy {
 		case "always", "on-watch", "never":
 		default:
-			return fmt.Errorf("service %q restart_policy must be always, on-watch, or never", req.Name)
+			return domain.InvalidConfigf("service %q restart_policy must be always, on-watch, or never", req.Name)
 		}
 	}
 	return nil
@@ -562,19 +567,19 @@ func validateDeployRequest(req DeployRequest) error {
 
 func validateServiceName(name string) error {
 	if name == "" {
-		return fmt.Errorf("service name is required")
+		return domain.InvalidConfigf("service name is required")
 	}
 	if len(name) > 128 {
-		return fmt.Errorf("service name must be 128 characters or fewer")
+		return domain.InvalidConfigf("service name must be 128 characters or fewer")
 	}
 	if name == DaemonLogName || name == "." || name == ".." {
-		return fmt.Errorf("service name %q is reserved", name)
+		return domain.InvalidConfigf("service name %q is reserved", name)
 	}
 	for _, r := range name {
 		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '-' || r == '_' || r == '.' {
 			continue
 		}
-		return fmt.Errorf("service name %q contains invalid character %q", name, r)
+		return domain.InvalidConfigf("service name %q contains invalid character %q", name, r)
 	}
 	return nil
 }
@@ -587,11 +592,11 @@ func (s *Service) Rollback(name string) (*registry.Service, error) {
 
 	current, ok := s.reg.Get(name)
 	if !ok {
-		return nil, fmt.Errorf("service %q not found", name)
+		return nil, domain.MissingServicef("service %q not found", name)
 	}
 	prev := current.PreviousDeployment
 	if prev == nil {
-		return nil, fmt.Errorf("service %q has no previous deployment", name)
+		return nil, domain.InvalidConfigf("service %q has no previous deployment", name)
 	}
 
 	restored := &registry.Service{
@@ -844,18 +849,18 @@ func (s *Service) handleCrash(name string) {
 func (s *Service) BuildLog(name string) (string, error) {
 	svc, ok := s.reg.Get(name)
 	if !ok {
-		return "", fmt.Errorf("service %q not found", name)
+		return "", domain.MissingServicef("service %q not found", name)
 	}
 	if svc.ConfigPath == "" {
-		return "", fmt.Errorf("service %q has no config_path — cannot run build", name)
+		return "", domain.InvalidConfigf("service %q has no config_path — cannot run build", name)
 	}
 
 	cfg, err := config.Load(svc.ConfigPath)
 	if err != nil {
-		return "", fmt.Errorf("loading config: %w", err)
+		return "", domain.InvalidConfigf("loading config: %v", err)
 	}
 	if cfg.Build == "" {
-		return "", fmt.Errorf("service %q config has no build command", name)
+		return "", domain.InvalidConfigf("service %q config has no build command", name)
 	}
 
 	buildLogPath := filepath.Join(s.logDir, name+"-build.log")
@@ -879,7 +884,7 @@ func (s *Service) BuildLog(name string) (string, error) {
 // Returns an error if the service is not registered.
 func (s *Service) buildLogFilePath(name string) (string, error) {
 	if _, ok := s.reg.Get(name); !ok {
-		return "", fmt.Errorf("service %q not found", name)
+		return "", domain.MissingServicef("service %q not found", name)
 	}
 	return filepath.Join(s.logDir, name+"-build.log"), nil
 }
@@ -969,7 +974,7 @@ func (s *Service) logFilePath(name string) (string, error) {
 		return filepath.Join(s.logDir, "anito.log"), nil
 	}
 	if _, ok := s.reg.Get(name); !ok {
-		return "", fmt.Errorf("service %q not found", name)
+		return "", domain.MissingServicef("service %q not found", name)
 	}
 	return filepath.Join(s.logDir, name+".log"), nil
 }
@@ -1146,7 +1151,7 @@ func (s *Service) allocatePorts(name string, preferred map[string]int, bindAddre
 func (s *Service) allocateOnePort(name, portName string, preferred int, used map[int]bool, bindAddress string) (int, error) {
 	if preferred != 0 {
 		if reservedPorts[preferred] {
-			return 0, fmt.Errorf("port %d is reserved by Anito and cannot be assigned to a service", preferred)
+			return 0, domain.Conflictf("port %d is reserved by Anito and cannot be assigned to a service", preferred)
 		}
 		if !used[preferred] {
 			if err := s.prx.RegisterPortsWithBind(name, map[string]int{portName: preferred}, bindAddress); err == nil {
@@ -1164,7 +1169,7 @@ func (s *Service) allocateOnePort(name, portName string, preferred int, used map
 			return port, nil
 		}
 	}
-	return 0, fmt.Errorf("no available ports in range %d–%d for %s (port %s)", portRangeStart, portRangeEnd, name, portName)
+	return 0, domain.Conflictf("no available ports in range %d-%d for %s (port %s)", portRangeStart, portRangeEnd, name, portName)
 }
 
 // hashPath returns a short content hash for a file or directory.
@@ -1254,7 +1259,11 @@ func waitHTTPReady(internalPort int, path string, timeout time.Duration) error {
 		msg += fmt.Sprintf(" (last status: %d)", lastStatus)
 	}
 	msg += "\nAnito requires your service to expose GET " + path + " → 200 OK and read PORT from the environment."
-	return fmt.Errorf("%s", msg)
+	return domain.ReadinessFailuref("%s", msg)
+}
+
+func (s *Service) Diagnose(req diagnosis.Request) (*diagnosis.Result, error) {
+	return diagnosis.Run(req, s)
 }
 
 // CaseStudyRequest is the structured input for a consumer case study submission.
