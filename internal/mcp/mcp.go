@@ -341,15 +341,22 @@ type issuesQueryInput struct {
 }
 
 type issueView struct {
-	ID        string    `json:"id"`
-	Timestamp time.Time `json:"timestamp"`
-	Source    string    `json:"source"`
-	Tool      string    `json:"tool,omitempty"`
-	Input     string    `json:"input,omitempty"`
-	Error     string    `json:"error"`
-	Context   string    `json:"context,omitempty"`
-	RepoPath  string    `json:"repo_path,omitempty"`
-	Severity  string    `json:"severity"`
+	ID              string     `json:"id"`
+	Timestamp       time.Time  `json:"timestamp"`
+	Source          string     `json:"source"`
+	Tool            string     `json:"tool,omitempty"`
+	Input           string     `json:"input,omitempty"`
+	Error           string     `json:"error"`
+	Context         string     `json:"context,omitempty"`
+	RepoPath        string     `json:"repo_path,omitempty"`
+	Severity        string     `json:"severity"`
+	State           string     `json:"state"`
+	FirstSeen       time.Time  `json:"first_seen,omitempty"`
+	LastSeen        time.Time  `json:"last_seen,omitempty"`
+	OccurrenceCount int        `json:"occurrence_count,omitempty"`
+	AcknowledgedAt  *time.Time `json:"acknowledged_at,omitempty"`
+	ResolvedAt      *time.Time `json:"resolved_at,omitempty"`
+	TrackerURL      string     `json:"tracker_url,omitempty"`
 }
 
 type issuesOutput struct {
@@ -368,6 +375,27 @@ type reportInput struct {
 type reportOutput struct {
 	ID     string `json:"id"`
 	Status string `json:"status"`
+}
+
+func issueToView(iss issues.Issue) issueView {
+	return issueView{
+		ID: iss.ID, Timestamp: iss.Timestamp, Source: iss.Source, Tool: iss.Tool,
+		Input: iss.Input, Error: iss.Error, Context: iss.Context, RepoPath: iss.RepoPath,
+		Severity: iss.Severity, State: iss.State, FirstSeen: iss.FirstSeen, LastSeen: iss.LastSeen,
+		OccurrenceCount: iss.OccurrenceCount, AcknowledgedAt: iss.AcknowledgedAt,
+		ResolvedAt: iss.ResolvedAt, TrackerURL: iss.TrackerURL,
+	}
+}
+
+type issueTransitionInput struct {
+	ID         string `json:"id" jsonschema:"required — issue aggregate ID"`
+	Actor      string `json:"actor,omitempty" jsonschema:"optional operator or agent identity"`
+	TrackerURL string `json:"tracker_url,omitempty" jsonschema:"optional opaque external tracker URL, resolve only"`
+}
+
+type issueTransitionOutput struct {
+	Status string    `json:"status"`
+	Issue  issueView `json:"issue"`
 }
 
 type caseStudyInput struct {
@@ -449,6 +477,39 @@ func (s *Server) registerTools(srv *sdkmcp.Server) {
 			return nil, serviceView{}, err
 		}
 		return nil, toView(svc), nil
+	})
+
+	sdkmcp.AddTool(srv, &sdkmcp.Tool{
+		Name:        "anito_issue_acknowledge",
+		Description: "Acknowledge one local issue aggregate without affecting other issues.",
+	}, func(ctx context.Context, req *sdkmcp.CallToolRequest, in issueTransitionInput) (*sdkmcp.CallToolResult, issueTransitionOutput, error) {
+		iss, err := s.iss.Acknowledge(in.ID, in.Actor)
+		if err != nil {
+			return nil, issueTransitionOutput{}, err
+		}
+		return nil, issueTransitionOutput{Status: "acknowledged", Issue: issueToView(*iss)}, nil
+	})
+
+	sdkmcp.AddTool(srv, &sdkmcp.Tool{
+		Name:        "anito_issue_resolve",
+		Description: "Resolve one local issue aggregate and optionally preserve an opaque tracker URL.",
+	}, func(ctx context.Context, req *sdkmcp.CallToolRequest, in issueTransitionInput) (*sdkmcp.CallToolResult, issueTransitionOutput, error) {
+		iss, err := s.iss.Resolve(in.ID, in.Actor, in.TrackerURL)
+		if err != nil {
+			return nil, issueTransitionOutput{}, err
+		}
+		return nil, issueTransitionOutput{Status: "resolved", Issue: issueToView(*iss)}, nil
+	})
+
+	sdkmcp.AddTool(srv, &sdkmcp.Tool{
+		Name:        "anito_issue_reopen",
+		Description: "Reopen one resolved local issue aggregate.",
+	}, func(ctx context.Context, req *sdkmcp.CallToolRequest, in issueTransitionInput) (*sdkmcp.CallToolResult, issueTransitionOutput, error) {
+		iss, err := s.iss.Reopen(in.ID, in.Actor)
+		if err != nil {
+			return nil, issueTransitionOutput{}, err
+		}
+		return nil, issueTransitionOutput{Status: "reopened", Issue: issueToView(*iss)}, nil
 	})
 
 	sdkmcp.AddTool(srv, &sdkmcp.Tool{
@@ -706,17 +767,7 @@ func (s *Server) registerTools(srv *sdkmcp.Server) {
 		}
 		out := issuesOutput{Issues: make([]issueView, len(list))}
 		for i, iss := range list {
-			out.Issues[i] = issueView{
-				ID:        iss.ID,
-				Timestamp: iss.Timestamp,
-				Source:    iss.Source,
-				Tool:      iss.Tool,
-				Input:     iss.Input,
-				Error:     iss.Error,
-				Context:   iss.Context,
-				RepoPath:  iss.RepoPath,
-				Severity:  iss.Severity,
-			}
+			out.Issues[i] = issueToView(iss)
 		}
 		return nil, out, nil
 	})

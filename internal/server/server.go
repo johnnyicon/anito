@@ -76,6 +76,9 @@ func (s *Server) Start() error {
 	e.POST("/issues", s.handlePostIssue)
 	e.GET("/issues", s.handleGetIssues)
 	e.DELETE("/issues", s.handleClearIssues)
+	e.POST("/issues/:id/acknowledge", s.handleAcknowledgeIssue)
+	e.POST("/issues/:id/resolve", s.handleResolveIssue)
+	e.POST("/issues/:id/reopen", s.handleReopenIssue)
 	e.GET("/doctor", s.handleDoctor)
 	e.GET("/diagnose", s.handleDiagnose)
 	e.GET("/metrics", s.handleMetrics)
@@ -432,6 +435,58 @@ func (s *Server) handleClearIssues(c echo.Context) error {
 		return echo.NewHTTPError(http.StatusInternalServerError, err.Error())
 	}
 	return c.JSON(http.StatusOK, map[string]any{"status": "cleared"})
+}
+
+type issueTransitionRequest struct {
+	Actor      string `json:"actor,omitempty"`
+	TrackerURL string `json:"tracker_url,omitempty"`
+}
+
+func decodeIssueTransition(c echo.Context) (issueTransitionRequest, error) {
+	var req issueTransitionRequest
+	if c.Request().Body == nil || c.Request().ContentLength == 0 {
+		return req, nil
+	}
+	if err := json.NewDecoder(c.Request().Body).Decode(&req); err != nil {
+		return req, domainHTTPError(domain.InvalidConfigf("invalid issue transition body"))
+	}
+	return req, nil
+}
+
+func (s *Server) handleAcknowledgeIssue(c echo.Context) error {
+	req, err := decodeIssueTransition(c)
+	if err != nil {
+		return err
+	}
+	iss, err := s.iss.Acknowledge(c.Param("id"), req.Actor)
+	if err != nil {
+		return serviceHTTPError(err)
+	}
+	return c.JSON(http.StatusOK, iss)
+}
+
+func (s *Server) handleResolveIssue(c echo.Context) error {
+	req, err := decodeIssueTransition(c)
+	if err != nil {
+		return err
+	}
+	iss, err := s.iss.Resolve(c.Param("id"), req.Actor, req.TrackerURL)
+	if err != nil {
+		return serviceHTTPError(err)
+	}
+	return c.JSON(http.StatusOK, iss)
+}
+
+func (s *Server) handleReopenIssue(c echo.Context) error {
+	req, err := decodeIssueTransition(c)
+	if err != nil {
+		return err
+	}
+	iss, err := s.iss.Reopen(c.Param("id"), req.Actor)
+	if err != nil {
+		return serviceHTTPError(err)
+	}
+	return c.JSON(http.StatusOK, iss)
 }
 
 // setSSEHeaders configures the response for Server-Sent Events streaming.

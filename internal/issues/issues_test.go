@@ -9,7 +9,56 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/johnnyicon/anito/internal/domain"
 )
+
+func TestIssueLifecycleReopensOnNewOccurrence(t *testing.T) {
+	s := New(t.TempDir())
+	if err := s.Append(Issue{ID: "issue-1", Source: "mcp:deploy", Tool: "deploy", Input: `{"name":"api"}`, Error: "bind failed"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Acknowledge("issue-1", "agent"); err != nil {
+		t.Fatal(err)
+	}
+	resolved, err := s.Resolve("issue-1", "agent", "https://tracker.invalid/1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resolved.State != StateResolved || resolved.TrackerURL == "" || len(resolved.History) != 2 {
+		t.Fatalf("resolved issue = %+v", resolved)
+	}
+	if err := s.Append(Issue{ID: "issue-2", Source: "mcp:deploy", Tool: "deploy", Input: `{"name":"api"}`, Error: "bind failed"}); err != nil {
+		t.Fatal(err)
+	}
+	got, err := s.Get("issue-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.State != StateActive || got.ResolvedAt != nil || got.OccurrenceCount != 2 {
+		t.Fatalf("reopened issue = %+v", got)
+	}
+	if len(got.History) != 3 || got.History[2].Note != "reopened by new occurrence" {
+		t.Fatalf("history = %+v", got.History)
+	}
+}
+
+func TestIssueLifecycleRejectsInvalidTransitionsAndMissingIDs(t *testing.T) {
+	s := New(t.TempDir())
+	if _, err := s.Acknowledge("missing", "agent"); err == nil {
+		t.Fatal("missing issue acknowledge unexpectedly succeeded")
+	} else if code, ok := domain.CodeOf(err); !ok || code != domain.CodeMissingService {
+		t.Fatalf("missing error = %v, want missing_service", err)
+	}
+	if err := s.Append(Issue{ID: "issue-1", Error: "boom"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Reopen("issue-1", "agent"); err == nil {
+		t.Fatal("active issue reopen unexpectedly succeeded")
+	} else if code, ok := domain.CodeOf(err); !ok || code != domain.CodeConflict {
+		t.Fatalf("transition error = %v, want conflict", err)
+	}
+}
 
 func TestNew(t *testing.T) {
 	dir := t.TempDir()

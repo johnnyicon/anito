@@ -19,6 +19,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/johnnyicon/anito/internal/domain"
 )
 
 const currentStoreVersion = 1
@@ -56,22 +58,42 @@ type Occurrence struct {
 // Issue is one aggregated runtime issue. The legacy top-level fields mirror the
 // most recent occurrence for backward compatibility with existing callers.
 type Issue struct {
-	ID              string       `json:"id"`
-	Timestamp       time.Time    `json:"timestamp"`           // most recent occurrence timestamp
-	Source          string       `json:"source"`              // most recent occurrence source
-	Tool            string       `json:"tool,omitempty"`      // most recent occurrence tool
-	Input           string       `json:"input,omitempty"`     // most recent occurrence input
-	Error           string       `json:"error"`               // most recent occurrence error
-	Context         string       `json:"context,omitempty"`   // most recent occurrence context
-	RepoPath        string       `json:"repo_path,omitempty"` // most recent occurrence repo path
-	Severity        string       `json:"severity"`            // most recent occurrence severity
-	Fingerprint     string       `json:"fingerprint,omitempty"`
-	Service         string       `json:"service,omitempty"`
-	Kind            string       `json:"kind,omitempty"`
-	FirstSeen       time.Time    `json:"first_seen,omitempty"`
-	LastSeen        time.Time    `json:"last_seen,omitempty"`
-	OccurrenceCount int          `json:"occurrence_count,omitempty"`
-	Occurrences     []Occurrence `json:"occurrences,omitempty"`
+	ID              string           `json:"id"`
+	Timestamp       time.Time        `json:"timestamp"`           // most recent occurrence timestamp
+	Source          string           `json:"source"`              // most recent occurrence source
+	Tool            string           `json:"tool,omitempty"`      // most recent occurrence tool
+	Input           string           `json:"input,omitempty"`     // most recent occurrence input
+	Error           string           `json:"error"`               // most recent occurrence error
+	Context         string           `json:"context,omitempty"`   // most recent occurrence context
+	RepoPath        string           `json:"repo_path,omitempty"` // most recent occurrence repo path
+	Severity        string           `json:"severity"`            // most recent occurrence severity
+	Fingerprint     string           `json:"fingerprint,omitempty"`
+	Service         string           `json:"service,omitempty"`
+	Kind            string           `json:"kind,omitempty"`
+	FirstSeen       time.Time        `json:"first_seen,omitempty"`
+	LastSeen        time.Time        `json:"last_seen,omitempty"`
+	OccurrenceCount int              `json:"occurrence_count,omitempty"`
+	Occurrences     []Occurrence     `json:"occurrences,omitempty"`
+	State           string           `json:"state"`
+	AcknowledgedAt  *time.Time       `json:"acknowledged_at,omitempty"`
+	AcknowledgedBy  string           `json:"acknowledged_by,omitempty"`
+	ResolvedAt      *time.Time       `json:"resolved_at,omitempty"`
+	ResolvedBy      string           `json:"resolved_by,omitempty"`
+	TrackerURL      string           `json:"tracker_url,omitempty"`
+	History         []LifecycleEvent `json:"history,omitempty"`
+}
+
+const (
+	StateActive       = "active"
+	StateAcknowledged = "acknowledged"
+	StateResolved     = "resolved"
+)
+
+type LifecycleEvent struct {
+	State     string    `json:"state"`
+	Timestamp time.Time `json:"timestamp"`
+	Actor     string    `json:"actor,omitempty"`
+	Note      string    `json:"note,omitempty"`
 }
 
 // Store is a thread-safe persistent issue registry.
@@ -120,6 +142,103 @@ func (s *Store) Clear() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.saveLocked(newStoreFile())
+}
+
+// Get returns one issue by its stable aggregate ID.
+func (s *Store) Get(id string) (*Issue, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	store, err := s.loadLocked()
+	if err != nil {
+		return nil, err
+	}
+	for _, iss := range store.Issues {
+		if iss.ID == id {
+			copy := cloneIssue(iss)
+			return &copy, nil
+		}
+	}
+	return nil, domain.MissingServicef("issue %q not found", id)
+}
+
+func (s *Store) Acknowledge(id, actor string) (*Issue, error) {
+	return s.transition(id, StateAcknowledged, actor, "acknowledged")
+}
+
+func (s *Store) Resolve(id, actor, trackerURL string) (*Issue, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	store, err := s.loadLocked()
+	if err != nil {
+		return nil, err
+	}
+	for i := range store.Issues {
+		if store.Issues[i].ID != id {
+			continue
+		}
+		if store.Issues[i].State == StateResolved {
+			return nil, domain.Conflictf("issue %q is already resolved", id)
+		}
+		now := time.Now()
+		store.Issues[i].State = StateResolved
+		store.Issues[i].ResolvedAt = &now
+		store.Issues[i].ResolvedBy = strings.TrimSpace(actor)
+		if strings.TrimSpace(trackerURL) != "" {
+			store.Issues[i].TrackerURL = strings.TrimSpace(trackerURL)
+		}
+		store.Issues[i].History = append(store.Issues[i].History, LifecycleEvent{State: StateResolved, Timestamp: now, Actor: actor})
+		if err := s.saveLocked(store); err != nil {
+			return nil, err
+		}
+		copy := cloneIssue(store.Issues[i])
+		return &copy, nil
+	}
+	return nil, domain.MissingServicef("issue %q not found", id)
+}
+
+func (s *Store) Reopen(id, actor string) (*Issue, error) {
+	return s.transition(id, StateActive, actor, "reopened")
+}
+
+func (s *Store) transition(id, state, actor, note string) (*Issue, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	store, err := s.loadLocked()
+	if err != nil {
+		return nil, err
+	}
+	for i := range store.Issues {
+		if store.Issues[i].ID != id {
+			continue
+		}
+		current := store.Issues[i].State
+		if current == "" {
+			current = StateActive
+		}
+		if state == StateAcknowledged && current != StateActive {
+			return nil, domain.Conflictf("issue %q cannot be acknowledged from state %s", id, current)
+		}
+		if state == StateActive && current != StateResolved {
+			return nil, domain.Conflictf("issue %q cannot be reopened from state %s", id, current)
+		}
+		now := time.Now()
+		store.Issues[i].State = state
+		if state == StateAcknowledged {
+			store.Issues[i].AcknowledgedAt = &now
+			store.Issues[i].AcknowledgedBy = strings.TrimSpace(actor)
+		}
+		if state == StateActive {
+			store.Issues[i].ResolvedAt = nil
+			store.Issues[i].ResolvedBy = ""
+		}
+		store.Issues[i].History = append(store.Issues[i].History, LifecycleEvent{State: state, Timestamp: now, Actor: actor, Note: note})
+		if err := s.saveLocked(store); err != nil {
+			return nil, err
+		}
+		copy := cloneIssue(store.Issues[i])
+		return &copy, nil
+	}
+	return nil, domain.MissingServicef("issue %q not found", id)
 }
 
 // Recent returns the last n aggregated issues, optionally filtered by a source
@@ -225,7 +344,18 @@ func normalizeStoreFile(file storeFile) storeFile {
 				occs[i] = normalizeOccurrence(occs[i])
 			}
 		}
-		out.Issues = append(out.Issues, rebuildIssue(stored.ID, occs))
+		rebuilt := rebuildIssue(stored.ID, occs)
+		rebuilt.State = stored.State
+		if rebuilt.State == "" {
+			rebuilt.State = StateActive
+		}
+		rebuilt.AcknowledgedAt = stored.AcknowledgedAt
+		rebuilt.AcknowledgedBy = stored.AcknowledgedBy
+		rebuilt.ResolvedAt = stored.ResolvedAt
+		rebuilt.ResolvedBy = stored.ResolvedBy
+		rebuilt.TrackerURL = stored.TrackerURL
+		rebuilt.History = append([]LifecycleEvent(nil), stored.History...)
+		out.Issues = append(out.Issues, rebuilt)
 	}
 	sortIssues(out.Issues)
 	return out
@@ -255,8 +385,26 @@ func (f *storeFile) mergeOccurrence(occ Occurrence) {
 		if f.Issues[i].Fingerprint != fingerprint {
 			continue
 		}
-		occs := append(cloneOccurrences(f.Issues[i].Occurrences), occ)
-		f.Issues[i] = rebuildIssue(f.Issues[i].ID, occs)
+		previous := f.Issues[i]
+		occs := append(cloneOccurrences(previous.Occurrences), occ)
+		f.Issues[i] = rebuildIssue(previous.ID, occs)
+		f.Issues[i].State = previous.State
+		if f.Issues[i].State == "" {
+			f.Issues[i].State = StateActive
+		}
+		f.Issues[i].AcknowledgedAt = previous.AcknowledgedAt
+		f.Issues[i].AcknowledgedBy = previous.AcknowledgedBy
+		f.Issues[i].ResolvedAt = previous.ResolvedAt
+		f.Issues[i].ResolvedBy = previous.ResolvedBy
+		f.Issues[i].TrackerURL = previous.TrackerURL
+		f.Issues[i].History = append([]LifecycleEvent(nil), previous.History...)
+		if previous.State == StateResolved {
+			now := time.Now()
+			f.Issues[i].State = StateActive
+			f.Issues[i].ResolvedAt = nil
+			f.Issues[i].ResolvedBy = ""
+			f.Issues[i].History = append(f.Issues[i].History, LifecycleEvent{State: StateActive, Timestamp: now, Actor: "system", Note: "reopened by new occurrence"})
+		}
 		return
 	}
 	f.Issues = append(f.Issues, rebuildIssue(occ.ID, []Occurrence{occ}))
@@ -304,6 +452,7 @@ func rebuildIssue(id string, occs []Occurrence) Issue {
 		LastSeen:        latest.Timestamp,
 		OccurrenceCount: len(normalized),
 		Occurrences:     normalized,
+		State:           StateActive,
 	}
 }
 
@@ -483,6 +632,7 @@ func sortIssues(issues []Issue) {
 
 func cloneIssue(iss Issue) Issue {
 	iss.Occurrences = cloneOccurrences(iss.Occurrences)
+	iss.History = append([]LifecycleEvent(nil), iss.History...)
 	return iss
 }
 

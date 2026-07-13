@@ -79,6 +79,13 @@ export interface Issue {
   context:   string
   repo_path: string
   severity:  'error' | 'warning' | 'info'
+  state: string
+  first_seen?: string
+  last_seen?: string
+  occurrence_count?: number
+  acknowledged_at?: string
+  resolved_at?: string
+  tracker_url?: string
 }
 
 export interface IssuesResponse {
@@ -248,6 +255,16 @@ export function useClearIssues() {
     mutationFn: () => apiDelete<{ status: string }>('/issues'),
     onSuccess: () => qc.invalidateQueries({ queryKey: ['issues'] }),
   })
+}
+
+export function useIssueLifecycle() {
+  const qc = useQueryClient()
+  const transition = useMutation({
+    mutationFn: ({ id, action, trackerUrl }: { id: string; action: 'acknowledge' | 'resolve' | 'reopen'; trackerUrl?: string }) =>
+      apiPost<Issue>(`/issues/${encodeURIComponent(id)}/${action}`, { tracker_url: trackerUrl }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['issues'] }),
+  })
+  return transition
 }
 
 // ── Helpers ────────────────────────────────────────────────────────────────
