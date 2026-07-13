@@ -63,8 +63,8 @@ The AWF dependency graph is authoritative. The table gives the coordinator a con
 | 6 | Add Shared Diagnosis and Typed Domain Errors | `019f5bb3-a0b2-76b5-a7f5-248edb27e9e4` | Go Engineer + SRE | `gpt-5.4` | high | Architect | in_progress |
 | 7 | Enforce CLI, HTTP, MCP, and Dashboard Parity | `019f5bb3-a0ce-7331-8026-13a7d8062d4b` | MCP / AI Integration + DX | `gpt-5.4` | high | Go Engineer + QA / Test | pending |
 | 8 | Split Application Responsibilities Along Shared Primitives | `019f5bb5-0b7e-706f-8dc9-245f3431a85f` | Architect + Go Engineer | `gpt-5.4` | high | SRE + MCP / AI Integration | pending |
-| 8 | Add Frontend, Accessibility, and Browser Test Coverage | `019f5bb5-0b92-7afd-83db-2a475f7a1e9c` | QA / Test + DX | `gpt-5.4` | medium | MCP / AI Integration | pending |
-| 9 | Add Reproducible GitHub CI and Release Gates | `019f5bb5-0bb8-7744-9eb5-13bb7668287d` | DevOps + QA / Test | `gpt-5.4-mini` | medium | SRE | pending |
+| 8 | Add Frontend, Accessibility, and Browser Test Coverage | `019f5bb5-0b92-7afd-83db-2a475f7a1e9c` | QA / Test + DX | `gpt-5.4` | medium | MCP / AI Integration | in_progress |
+| 9 | Add Reproducible GitHub CI and Release Gates | `019f5bb5-0bb8-7744-9eb5-13bb7668287d` | DevOps + QA / Test | `gpt-5.4-mini` | medium | SRE | in_progress |
 
 ## Dispatch procedure
 
@@ -111,3 +111,4 @@ Research briefs must additionally leave a decision record or implementation-read
 | 2026-07-13 | Closed RestoreAll design, MCP telemetry design, and restore proof in AWF. Commit `f59c45a` adds mixed-fixture, listener-first, startup-gate, bounded-concurrency, isolation, and slow-failure coverage; focused and race suites pass. Dispatched setup extraction and immutable routing generation workers as the next shared-primitive gate. |
 | 2026-07-13 | Closed setup extraction and atomic routing in AWF. Commits `0648c48` and `782d8a4` establish shared setup DryRun/Apply with rollback and immutable multi-port route generations; focused and race suites pass. The next executable work is typed domain diagnosis/errors, issue lifecycle, archive/prune, parity, and delivery gates. |
 | 2026-07-13 | Dispatched typed diagnosis/domain errors to worker `019f5d35-6a77-7622-8d84-f57232987efb` (Schrodinger), planned `gpt-5.5` high effort. AWF brief `019f5bb3-a0b2-76b5-a7f5-248edb27e9e4` is in progress; issue lifecycle and archive/prune remain dependency-gated. |
+| 2026-07-13 | Dispatched frontend/browser coverage to `019f5d35-c942-7f70-aac4-33a8de9f325e` (Pasteur) and reproducible CI/release gates to `019f5d35-c9b6-7553-9f86-3e3c1f81de14` (Faraday), both planned `gpt-5.4` medium effort. Their scopes are UI test configuration and CI workflow/config respectively. |
