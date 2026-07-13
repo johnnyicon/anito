@@ -33,6 +33,7 @@ export function FilterBar({ services, filter, search, onFilter, onSearch }: Filt
           <button
             key={c.key}
             onClick={() => onFilter(c.key)}
+            aria-pressed={filter === c.key}
             className={`px-2.5 py-1 rounded-md text-xs font-medium transition-colors whitespace-nowrap ${
               filter === c.key
                 ? 'bg-foreground text-background'
@@ -53,11 +54,13 @@ export function FilterBar({ services, filter, search, onFilter, onSearch }: Filt
           placeholder="Filter…"
           value={search}
           onChange={e => onSearch(e.target.value)}
+          aria-label="Filter services"
           className="h-7 rounded-md border border-border bg-muted/40 px-2.5 pr-6 text-xs placeholder:text-muted-foreground focus:outline-none focus:border-foreground/30 focus:bg-background transition-colors min-w-0 w-36"
         />
         {search && (
           <button
             onClick={() => onSearch('')}
+            aria-label="Clear service filter"
             className="absolute right-1.5 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground text-xs leading-none"
           >
             ✕

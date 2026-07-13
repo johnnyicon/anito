@@ -84,14 +84,14 @@ export function ServiceList({ services, daemonDown, onOpenLogs, onOpenDetail, on
         </div>
         {daemonDown ? (
           <>
-            <p className="text-base font-medium mb-2">Daemon unreachable</p>
+            <p className="text-base font-medium mb-2" role="status">Daemon unreachable</p>
             <p className="text-sm text-muted-foreground max-w-xs">
               No service data available. Restart the daemon to see your services.
             </p>
           </>
         ) : (
           <>
-            <p className="text-base font-medium mb-2">No services yet</p>
+            <p className="text-base font-medium mb-2" role="status">No services yet</p>
             <p className="text-sm text-muted-foreground max-w-xs mb-6">
               Deploy your first service to get started.
             </p>

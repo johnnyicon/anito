@@ -44,8 +44,13 @@ export function RemoveModal({ name, services, onClose }: RemoveModalProps) {
 
       {/* Modal */}
       <div className="fixed left-1/2 top-1/3 z-50 -translate-x-1/2 w-full max-w-md mx-4">
-        <div className="mx-4 rounded-xl border border-border bg-popover shadow-xl p-6 space-y-4">
-          <h2 className="text-base font-medium">Remove {name}?</h2>
+        <div
+          className="mx-4 rounded-xl border border-border bg-popover shadow-xl p-6 space-y-4"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="remove-modal-title"
+        >
+          <h2 className="text-base font-medium" id="remove-modal-title">Remove {name}?</h2>
 
           <div className="text-sm text-muted-foreground space-y-2">
             <p>This is permanent. The service will be stopped and removed from the registry.</p>

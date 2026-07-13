@@ -39,6 +39,7 @@ export function CommandBar({
       <button
         className="flex-1 max-w-md h-8 rounded-lg border border-border bg-muted/40 px-3 text-left text-xs text-muted-foreground hover:border-foreground/20 hover:bg-muted/60 transition-colors"
         onClick={onOpenPalette}
+        aria-label="Open command palette"
       >
         Search services or press ⌘K…
       </button>
