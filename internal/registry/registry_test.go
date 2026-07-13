@@ -54,6 +54,37 @@ func TestArchiveRestoreAndPrunePreservePortAndTombstone(t *testing.T) {
 	}
 }
 
+func TestArchiveLifecycleRejectsInvalidTransitions(t *testing.T) {
+	r := newTestRegistry(t)
+	if _, err := r.Archive("missing"); err == nil {
+		t.Fatal("archive missing service unexpectedly succeeded")
+	}
+	if err := r.Register(&Service{Name: "running", StablePort: 8124, Status: StatusRunning}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.Archive("running"); err == nil {
+		t.Fatal("archive running service unexpectedly succeeded")
+	}
+	if err := r.UpdateStatus("running", StatusStopped, 0); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.RestoreArchived("running"); err == nil {
+		t.Fatal("restore active service unexpectedly succeeded")
+	}
+	if _, err := r.Prune("missing"); err == nil {
+		t.Fatal("prune missing service unexpectedly succeeded")
+	}
+	if _, err := r.Archive("running"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.Archive("running"); err == nil {
+		t.Fatal("archive archived service unexpectedly succeeded")
+	}
+	if got := r.AllIncludingArchived(); len(got) != 1 || got[0].Status != StatusArchived {
+		t.Fatalf("all including archived = %+v", got)
+	}
+}
+
 // TestStablePortPreservedOnRedeploy verifies the core invariant: re-registering
 // a service with a different StablePort value must not change the port that was
 // stored on the first registration.

@@ -348,3 +348,53 @@ func TestApplySourcePatchReplacesManagedBlockAndReportsUnapplied(t *testing.T) {
 		t.Fatalf("managed block not replaced:\n%s", string(data))
 	}
 }
+
+func TestApplyValidatesPlanAndRepository(t *testing.T) {
+	if _, err := Apply(nil, nil); err == nil {
+		t.Fatal("nil plan unexpectedly succeeded")
+	}
+	if _, err := Apply(&Plan{RepoPath: filepath.Join(t.TempDir(), "missing")}, nil); err == nil {
+		t.Fatal("missing repository unexpectedly succeeded")
+	}
+	root := t.TempDir()
+	for _, rel := range []string{"", filepath.Join(root, "absolute.txt")} {
+		_, err := Apply(&Plan{RepoPath: root, GeneratedFiles: []GeneratedFile{{RelPath: rel}}}, nil)
+		if err == nil {
+			t.Fatalf("path %q unexpectedly succeeded", rel)
+		}
+	}
+	_, err := Apply(&Plan{Mode: ModeComposite, RepoPath: root, Allocations: PortAllocation{"svc": 8125}}, nil)
+	if err == nil {
+		t.Fatal("composite setup without reserver unexpectedly succeeded")
+	}
+	fileRoot := filepath.Join(root, "file-root")
+	if err := os.WriteFile(fileRoot, []byte("not a directory"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Apply(&Plan{RepoPath: fileRoot}, nil); err == nil {
+		t.Fatal("file repository unexpectedly succeeded")
+	}
+	configured := filepath.Join(root, "configured")
+	if err := os.MkdirAll(filepath.Join(configured, ".anito"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(configured, ".anito", "config.yaml"), []byte("name: svc\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	configuredPlan, err := DryRun(PlanRequest{Path: configured}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Apply(configuredPlan, nil); err == nil {
+		t.Fatal("configured repository unexpectedly succeeded")
+	}
+}
+
+func TestGeneratedShellFileUsesExecutableMode(t *testing.T) {
+	if got := modeForGeneratedFile("scripts/setup.sh"); got != 0755 {
+		t.Fatalf("shell mode = %o, want 0755", got)
+	}
+	if got := modeForGeneratedFile("config.yaml"); got != 0644 {
+		t.Fatalf("config mode = %o, want 0644", got)
+	}
+}

@@ -486,6 +486,61 @@ func TestHandleDiagnoseMissingService(t *testing.T) {
 	}
 }
 
+func TestHandleIssueLifecycleTransitions(t *testing.T) {
+	h := newTestHarness(t)
+	c, _ := h.request(http.MethodPost, "/issues", `{"source":"test","error":"boom"}`)
+	if err := h.srv.handlePostIssue(c); err != nil {
+		t.Fatal(err)
+	}
+	list, err := h.srv.iss.Recent(1, "")
+	if err != nil || len(list) != 1 {
+		t.Fatalf("recent = %v, %v", list, err)
+	}
+	id := list[0].ID
+	ctx, _ := h.request(http.MethodPost, "/issues/"+id+"/acknowledge", `{"actor":"test-agent"}`)
+	ctx.SetParamNames("id")
+	ctx.SetParamValues(id)
+	if err := h.srv.handleAcknowledgeIssue(ctx); err != nil {
+		t.Fatalf("acknowledge: %v", err)
+	}
+	ctx, _ = h.request(http.MethodPost, "/issues/"+id+"/resolve", `{"actor":"test-agent","tracker_url":"https://tracker.invalid/1"}`)
+	ctx.SetParamNames("id")
+	ctx.SetParamValues(id)
+	if err := h.srv.handleResolveIssue(ctx); err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+	ctx, _ = h.request(http.MethodPost, "/issues/"+id+"/reopen", `{}`)
+	ctx.SetParamNames("id")
+	ctx.SetParamValues(id)
+	if err := h.srv.handleReopenIssue(ctx); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestHandlePruneRequiresConfirmation(t *testing.T) {
+	h := newTestHarness(t)
+	c, _ := h.request(http.MethodPost, "/prune/ghost", "")
+	c.SetParamNames("name")
+	c.SetParamValues("ghost")
+	err := h.srv.handlePrune(c)
+	he, ok := err.(*echo.HTTPError)
+	if !ok || he.Code != http.StatusConflict {
+		t.Fatalf("prune error = %#v, want 409", err)
+	}
+}
+
+func TestHandleIssueTransitionRejectsInvalidBody(t *testing.T) {
+	h := newTestHarness(t)
+	c, _ := h.request(http.MethodPost, "/issues/ghost/acknowledge", "{")
+	c.SetParamNames("id")
+	c.SetParamValues("ghost")
+	err := h.srv.handleAcknowledgeIssue(c)
+	he, ok := err.(*echo.HTTPError)
+	if !ok || he.Code != http.StatusBadRequest {
+		t.Fatalf("invalid transition error = %#v, want 400", err)
+	}
+}
+
 func TestHandleStatusRegistered(t *testing.T) {
 	h := newTestHarness(t)
 
