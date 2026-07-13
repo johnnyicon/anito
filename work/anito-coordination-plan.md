@@ -9,7 +9,7 @@
 ## Current position
 
 - Canonical AWF plan: `019f5bb0-cf2a-7d33-ae7b-fa2aea3e5875` — **Anito Reliability and Control-Plane Consolidation**.
-- Plan status: `active`; the audit baseline, RestoreAll design/implementation/proof, MCP telemetry design, issue aggregation, shared setup planning, immutable routing generations, typed diagnosis/errors, frontend coverage, and CI gates are complete. Issue lifecycle, archive/prune, parity, responsibility split, and rollout remain queued.
+- Plan status: `active`; the audit baseline, RestoreAll design/implementation/proof, MCP telemetry design, issue aggregation, shared setup planning, immutable routing generations, typed diagnosis/errors, frontend coverage, and CI gates are complete. Issue lifecycle is now in progress; archive/prune, parity, responsibility split, and rollout remain queued.
 - AWF v2 routing work is in progress on M1 under `codex/awf-v2-planned-routing`. The plan currently stores useful model recommendations and dependency waves, but agent/persona, harness, effort, reviewer, write scope, fallback, and routing provenance are not consistently durable first-class fields yet.
 - AWF schema feature requests: `019f5bba-e76a-7697-a3dd-2fe10f1da3d5` and `019f5bc1-2156-7e72-b392-bf562099c141`.
 - The M1 AWF-plans session has acknowledged the routing/schema work and reported no implementation blocker. Its status evidence is inbox item `019f5cf5-88ca-7be3-abb9-37010e41c4c5`.
@@ -55,7 +55,7 @@ The AWF dependency graph is authoritative. The table gives the coordinator a con
 | 2 | Add Issue Fingerprints and Occurrence Aggregation | `019f5bb4-6b4a-73c6-b7c5-3d22bf27d2a0` | SRE + Go Engineer | `gpt-5.4` | medium | Architect | done |
 | 2 | Reframe MCP Session Telemetry as Client Activity | `019f5bb4-6c2f-7854-98bb-13535c8253fc` | MCP / AI Integration | `claude-sonnet-4-6` | medium | SRE | done |
 | 3 | Implement Two-Phase Bounded Restore | `019f5bb2-c5db-7a20-9ea8-30854640925e` | Go Engineer + SRE | `gpt-5.5` | high | Architect | done |
-| 3 | Add Issue Acknowledge, Resolve, Reopen, and Tracker Links | `019f5bb4-6b6a-7647-9667-2e453756af00` | Go Engineer + SRE | `gpt-5.4` | medium | QA / Test Engineer | pending |
+| 3 | Add Issue Acknowledge, Resolve, Reopen, and Tracker Links | `019f5bb4-6b6a-7647-9667-2e453756af00` | Go Engineer + SRE | `gpt-5.4` | medium | QA / Test Engineer | in_progress |
 | 4 | Prove Restore Failure and Remove Duplicate Lifecycle Code | `019f5bb2-c629-771b-a1ac-232178be4ded` | QA / Test + Go Engineer | `gpt-5.4` | high | Architect + SRE | done |
 | 4 | Add Reversible Service Archive and Prune Workflows | `019f5bb4-6ba5-7382-b2db-1d8dc96a54f2` | SRE + DevOps | `gpt-5.5` | medium | QA / Test Engineer | pending |
 | 5 | Extract Shared Setup Plan and Apply | `019f5bb3-a094-755d-9329-2d57457495f1` | DX + MCP / AI Integration | `gpt-5.5` | high | Architect + Go Engineer | done |
@@ -113,3 +113,4 @@ Research briefs must additionally leave a decision record or implementation-read
 | 2026-07-13 | Dispatched typed diagnosis/domain errors to worker `019f5d35-6a77-7622-8d84-f57232987efb` (Schrodinger), planned `gpt-5.5` high effort. AWF brief `019f5bb3-a0b2-76b5-a7f5-248edb27e9e4` is in progress; issue lifecycle and archive/prune remain dependency-gated. |
 | 2026-07-13 | Dispatched frontend/browser coverage to `019f5d35-c942-7f70-aac4-33a8de9f325e` (Pasteur) and reproducible CI/release gates to `019f5d35-c9b6-7553-9f86-3e3c1f81de14` (Faraday), both planned `gpt-5.4` medium effort. Their scopes are UI test configuration and CI workflow/config respectively. |
 | 2026-07-13 | Closed typed diagnosis/domain errors, frontend coverage, and CI gates. Commits `54c3778`, `fb10799`, and `41af38b` add shared diagnosis/error mappings with redaction, five UI state/accessibility tests, and reproducible PR/release gates. All focused backend/UI verification passed; broader CI gates now expose remaining repository/toolchain risks documented in AWF. |
+| 2026-07-13 | Dispatched issue lifecycle worker `019f5d3e-67e5-7203-ba21-cd59753a6e72` (Socrates), planned `gpt-5.4` high reasoning for the dependency-cleared issue state transition slice. Archive/prune remains sequenced after this adapter surface. |
