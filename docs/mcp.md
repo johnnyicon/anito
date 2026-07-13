@@ -214,6 +214,27 @@ Retrieve recent issues logged by Anito — tool errors, deploy failures, and man
 
 ---
 
+### Issue lifecycle tools
+
+`anito_issue_acknowledge`, `anito_issue_resolve`, and `anito_issue_reopen` update one aggregate issue by ID. Resolution accepts an optional opaque `tracker_url`; a later matching occurrence reopens the issue while preserving its history and link.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `id` | string | yes | Aggregate issue ID returned by `anito_issues` |
+| `actor` | string | no | Operator or agent identity recorded in history |
+| `tracker_url` | string | no | Opaque external tracker link, used by resolve |
+
+### `anito_archive`, `anito_restore_archived`, `anito_prune`
+
+Archive and restore preserve service registration metadata and stable ports. `anito_archive` requires a non-running service. `anito_prune` requires `confirm=true`, only accepts archived services, and leaves a registry tombstone.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `name` | string | yes | Service name |
+| `confirm` | bool | prune only | Must be `true` for destructive prune |
+
+---
+
 ### `anito_report`
 Report an issue to Anito from a consuming repo. Use when you observe a problem related to an Anito tool or service that Anito itself cannot see — failed deploys, unexpected restarts, port conflicts, or any state the consuming repo's agent has context about.
 
