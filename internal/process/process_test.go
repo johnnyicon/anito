@@ -764,6 +764,41 @@ func TestDetachAndRestore(t *testing.T) {
 	}
 }
 
+func TestRestoreFailsIfDetachedProcessExitsBeforeReattach(t *testing.T) {
+	mgr, reg := newTestManager(t)
+	registerAndStart(t, mgr, reg, "restore-race", "fake_service")
+	detached := mgr.Detach("restore-race")
+	if detached == nil {
+		t.Fatal("Detach returned nil")
+	}
+
+	restoreStarted := make(chan struct{})
+	releaseRestore := make(chan struct{})
+	testHookBeforeRestoreAttach = func(*DetachedProcess) {
+		close(restoreStarted)
+		<-releaseRestore
+	}
+	t.Cleanup(func() { testHookBeforeRestoreAttach = nil })
+
+	restoreErr := make(chan error, 1)
+	go func() {
+		restoreErr <- mgr.Restore(detached)
+	}()
+
+	<-restoreStarted
+	if err := drainProc(detached.proc.cmd, detached.proc.done); err != nil {
+		t.Fatalf("drain detached process: %v", err)
+	}
+	close(releaseRestore)
+
+	if err := <-restoreErr; err == nil || err.Error() != `service "restore-race" previous process already exited` {
+		t.Fatalf("Restore error = %v, want previous process already exited", err)
+	}
+	if mgr.IsRunning("restore-race") {
+		t.Fatal("manager still tracks exited detached process")
+	}
+}
+
 func TestCandidateExitDoesNotTriggerActiveCrashHandler(t *testing.T) {
 	mgr, reg := newTestManager(t)
 	t.Setenv("TEST_HELPER", "crash")

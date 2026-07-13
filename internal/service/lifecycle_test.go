@@ -262,6 +262,57 @@ func TestFailedRedeployRestoresServingProcessAndRegistry(t *testing.T) {
 	}
 }
 
+func TestRestorePreviousMarksFailedWhenDetachedProcessAlreadyExited(t *testing.T) {
+	t.Setenv("TEST_HELPER", "fake_service_lifecycle")
+	svc := newTestService(t)
+
+	deployed, err := svc.Deploy(DeployRequest{
+		Name:               "restore-previous-exited",
+		Version:            "good",
+		Type:               registry.TypeBinary,
+		Path:               os.Args[0],
+		Args:               []string{"-test.run=TestHelperFakeServiceLifecycle", "-test.v"},
+		HealthCheck:        "/health",
+		HealthCheckTimeout: 5 * time.Second,
+		DrainWindow:        time.Millisecond,
+	})
+	if err != nil {
+		t.Fatalf("initial deploy: %v", err)
+	}
+	t.Cleanup(func() { _ = svc.Stop("restore-previous-exited") })
+
+	previous := *deployed
+	old := svc.mgr.Detach("restore-previous-exited")
+	if old == nil {
+		t.Fatal("Detach returned nil")
+	}
+	if err := svc.mgr.Drain(old); err != nil {
+		t.Fatalf("Drain detached process: %v", err)
+	}
+
+	svc.restorePrevious("restore-previous-exited", &previous, old)
+
+	restored, err := svc.Status("restore-previous-exited")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if restored.Status != registry.StatusFailed || restored.PID != 0 {
+		t.Fatalf("restored runtime = status %q pid %d, want failed pid 0", restored.Status, restored.PID)
+	}
+	if svc.mgr.IsRunning("restore-previous-exited") {
+		t.Fatal("manager still tracks exited detached process")
+	}
+
+	resp, err := http.Get(restored.Address() + "/health") //nolint:noctx
+	if err != nil {
+		t.Fatalf("stable proxy after failed restore: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("stable proxy status = %d, want 503 after failed restore", resp.StatusCode)
+	}
+}
+
 // Silence "fmt declared and not used" if compile target doesn't use it directly.
 var _ = fmt.Sprintf
 var _ net.Listener

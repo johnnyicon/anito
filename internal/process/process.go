@@ -18,6 +18,10 @@ import (
 
 var drainTimeout = 5 * time.Second // time between SIGTERM and SIGKILL
 
+// testHookBeforeRestoreAttach lets tests pause Restore after it has committed
+// to attempting a reattach but before it acquires m.mu.
+var testHookBeforeRestoreAttach func(*DetachedProcess)
+
 // runningProc tracks a live process and the ephemeral port(s) it is on.
 type runningProc struct {
 	cmd           *exec.Cmd
@@ -27,6 +31,7 @@ type runningProc struct {
 	startedAt     time.Time
 	candidate     bool
 	done          chan struct{} // closed by the Start goroutine when the process exits
+	exited        bool
 }
 
 // DetachedProcess is a live process temporarily removed from the manager while
@@ -159,6 +164,7 @@ func (m *Manager) start(svc *registry.Service, candidate bool) (map[string]int, 
 		defer close(done)
 		_ = cmd.Wait()
 		m.mu.Lock()
+		rp.exited = true
 		// Only delete our own entry — a re-deploy may have replaced it with a
 		// new process under the same name.
 		if current, ok := m.procs[svc.Name]; ok && current.cmd == cmd {
@@ -273,14 +279,15 @@ func (m *Manager) Restore(detached *DetachedProcess) error {
 	if detached == nil || detached.proc == nil {
 		return nil
 	}
-	select {
-	case <-detached.proc.done:
-		return fmt.Errorf("service %q previous process already exited", detached.name)
-	default:
+	if hook := testHookBeforeRestoreAttach; hook != nil {
+		hook(detached)
 	}
 
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if detached.proc.exited {
+		return fmt.Errorf("service %q previous process already exited", detached.name)
+	}
 	if _, exists := m.procs[detached.name]; exists {
 		return fmt.Errorf("service %q already has a tracked process", detached.name)
 	}

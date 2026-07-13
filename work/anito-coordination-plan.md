@@ -9,7 +9,7 @@
 ## Current position
 
 - Canonical AWF plan: `019f5bb0-cf2a-7d33-ae7b-fa2aea3e5875` — **Anito Reliability and Control-Plane Consolidation**.
-- Plan status: `active`; tracker reports `11/37` work packages complete (`29.7%`). The 16 remediation briefs in this plan are currently pending.
+- Plan status: `active`; tracker reports `11/37` work packages complete (`29.7%`). The audit baseline is committed; the RestoreAll and MCP activity-telemetry research briefs are now in progress.
 - AWF v2 routing work is in progress on M1 under `codex/awf-v2-planned-routing`. The plan currently stores useful model recommendations and dependency waves, but agent/persona, harness, effort, reviewer, write scope, fallback, and routing provenance are not consistently durable first-class fields yet.
 - AWF schema feature requests: `019f5bba-e76a-7697-a3dd-2fe10f1da3d5` and `019f5bc1-2156-7e72-b392-bf562099c141`.
 - The M1 AWF-plans session has acknowledged the routing/schema work and reported no implementation blocker. Its status evidence is inbox item `019f5cf5-88ca-7be3-abb9-37010e41c4c5`.
@@ -49,11 +49,11 @@ The AWF dependency graph is authoritative. The table gives the coordinator a con
 
 | Wave | Brief | AWF brief ID | Primary agent/persona | Planned model | Effort | Required reviewer | Status |
 |---:|---|---|---|---|---|---|---|
-| 1 | Review and Land the Audit Baseline | `019f5bb2-c580-7ae7-88fd-c5280c7979e1` | Architect + SRE | `gpt-5.5` | high | Senior Go Engineer | in_progress |
+| 1 | Review and Land the Audit Baseline | `019f5bb2-c580-7ae7-88fd-c5280c7979e1` | Architect + SRE | `gpt-5.5` | high | Senior Go Engineer | committed; review pending |
 | 2 | Roll Out and Verify Without Service Disruption | `019f5bb2-c5b2-7fa2-8087-2313990b2afc` | SRE + DevOps | `gpt-5.5` | high | Architect | pending |
-| 2 | Specify RestoreAll and Startup Reconciliation | `019f5bb3-0523-7e7c-bac0-308ea854cbde` | Architect + SRE | `claude-sonnet-4-6` | high | Senior Go Engineer | pending |
+| 2 | Specify RestoreAll and Startup Reconciliation | `019f5bb3-0523-7e7c-bac0-308ea854cbde` | Architect + SRE | `claude-sonnet-4-6` | high | Senior Go Engineer | in_progress |
 | 2 | Add Issue Fingerprints and Occurrence Aggregation | `019f5bb4-6b4a-73c6-b7c5-3d22bf27d2a0` | SRE + Go Engineer | `gpt-5.4` | medium | Architect | pending |
-| 2 | Reframe MCP Session Telemetry as Client Activity | `019f5bb4-6c2f-7854-98bb-13535c8253fc` | MCP / AI Integration | `claude-sonnet-4-6` | medium | SRE | pending |
+| 2 | Reframe MCP Session Telemetry as Client Activity | `019f5bb4-6c2f-7854-98bb-13535c8253fc` | MCP / AI Integration | `claude-sonnet-4-6` | medium | SRE | in_progress |
 | 3 | Implement Two-Phase Bounded Restore | `019f5bb2-c5db-7a20-9ea8-30854640925e` | Go Engineer + SRE | `gpt-5.5` | high | Architect | pending |
 | 3 | Add Issue Acknowledge, Resolve, Reopen, and Tracker Links | `019f5bb4-6b6a-7647-9667-2e453756af00` | Go Engineer + SRE | `gpt-5.4` | medium | QA / Test Engineer | pending |
 | 4 | Prove Restore Failure and Remove Duplicate Lifecycle Code | `019f5bb2-c629-771b-a1ac-232178be4ded` | QA / Test + Go Engineer | `gpt-5.4` | high | Architect + SRE | pending |
@@ -103,3 +103,5 @@ Research briefs must additionally leave a decision record or implementation-read
 |---|---|
 | 2026-07-13 | Created this document from the canonical AWF plan, current tracker state, team/persona guidance, and known session-control limitations. No remediation brief was dispatched or marked complete by this document creation. |
 | 2026-07-13 | Started Wave 1 baseline review. AWF brief `019f5bb2-c580-7ae7-88fd-c5280c7979e1` is `in_progress`; the branch contains the intended audit repair set plus unrelated user artifacts that must remain unstaged. |
+| 2026-07-13 | Committed the audit baseline as `c326d5a`. Required backend, race, vet, coverage-floor, vulnerability, Go build, frontend build, and diff checks passed. Independent review remains open before the brief is closed. Started RestoreAll and MCP activity-telemetry research briefs in parallel. |
+| 2026-07-13 | Independent review found one P1 rollback race: a detached old process can exit after the restore check and still be reattached as running. Routed the fix to Go lifecycle worker `019f5d1e-9a46-7a22-b259-6b0c3571fea2`; baseline remains open pending deterministic regression coverage. |
