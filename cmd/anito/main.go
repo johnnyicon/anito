@@ -265,12 +265,12 @@ func main() {
 // config to disk. It is the CLI counterpart of the anito_setup MCP tool.
 // For composite apps (multiple services), use the MCP tool or see docs/mcp.md.
 func runSetup(path string) {
-	result, err := setup.Inspect(path)
+	plan, err := setup.DryRun(setup.PlanRequest{Path: path}, nil)
 	if err != nil {
 		fatal(err)
 	}
 
-	fmt.Printf("inspecting %s...\n\n", result.RepoPath)
+	fmt.Printf("inspecting %s...\n\n", plan.RepoPath)
 
 	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
 	check := func(ok bool) string {
@@ -279,41 +279,38 @@ func runSetup(path string) {
 		}
 		return "✗"
 	}
-	fmt.Fprintf(w, "  language:\t%s\n", result.Language)
-	fmt.Fprintf(w, "  PORT env var:\t%s\n", check(result.HasPORT))
-	fmt.Fprintf(w, "  /health route:\t%s\n", check(result.HasHealthRoute))
-	fmt.Fprintf(w, "  .anito/config.yaml:\t%s\n", check(result.HasAnitoConfig))
+	fmt.Fprintf(w, "  language:\t%s\n", plan.Language)
+	fmt.Fprintf(w, "  PORT env var:\t%s\n", check(plan.HasPORT))
+	fmt.Fprintf(w, "  /health route:\t%s\n", check(plan.HasHealthRoute))
+	fmt.Fprintf(w, "  .anito/config.yaml:\t%s\n", check(plan.HasAnitoConfig))
 	_ = w.Flush()
 	fmt.Println()
 
-	if len(result.Issues) > 0 {
+	if len(plan.Issues) > 0 {
 		fmt.Println("issues:")
-		for _, iss := range result.Issues {
+		for _, iss := range plan.Issues {
 			fmt.Printf("  [%s] %s\n    → %s\n", iss.Severity, iss.What, iss.Fix)
 		}
 		fmt.Println()
 	}
 
 	// Write the generated config unless one already exists.
-	configPath := filepath.Join(result.RepoPath, ".anito", "config.yaml")
-	if result.SuggestedConfig != "" && !result.HasAnitoConfig {
-		if err := os.MkdirAll(filepath.Dir(configPath), 0755); err != nil {
-			fatal(err)
-		}
-		if err := os.WriteFile(configPath, []byte(result.SuggestedConfig), 0644); err != nil {
+	configPath := filepath.Join(plan.RepoPath, ".anito", "config.yaml")
+	if len(plan.GeneratedFiles) > 0 && !plan.HasAnitoConfig {
+		if _, err := setup.Apply(plan, nil); err != nil {
 			fatal(err)
 		}
 		fmt.Printf("wrote %s\n\n", configPath)
-	} else if result.HasAnitoConfig {
+	} else if plan.HasAnitoConfig {
 		fmt.Printf("config already exists at %s — skipping write\n\n", configPath)
 	}
 
 	fmt.Println("next steps:")
-	for _, step := range result.Instructions {
+	for _, step := range plan.Instructions {
 		fmt.Printf("  %s\n", step)
 	}
 
-	if len(result.Issues) == 0 {
+	if len(plan.Issues) == 0 {
 		fmt.Println("\n✓ repo is Anito-ready. Run `anito deploy` to start.")
 	}
 }

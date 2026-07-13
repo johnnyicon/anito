@@ -14,7 +14,6 @@ import (
 	"io"
 	"log"
 	"net/http"
-	"strings"
 	"time"
 
 	sdkmcp "github.com/modelcontextprotocol/go-sdk/mcp"
@@ -603,113 +602,25 @@ func (s *Server) registerTools(srv *sdkmcp.Server) {
 			"After setup, call anito_deploy to start services. " +
 			"One-time scaffolding only. If .anito/config.yaml already exists, call anito_deploy instead.",
 	}, func(ctx context.Context, req *sdkmcp.CallToolRequest, in setupInput) (*sdkmcp.CallToolResult, setupResult, error) {
-		// --- composite mode ---
+		mode := "single"
 		if len(in.Services) > 0 {
-			log.Printf("[MCP] tool=anito_setup mode=composite path=%s services=%d", in.Path, len(in.Services))
-			specs := make([]setup.ServiceSpec, len(in.Services))
-			for i, svc := range in.Services {
-				preferredPort := svc.PreferredPort
-				if preferredPort == 0 {
-					if existing, err := s.svc.Status(svc.Name); err == nil {
-						preferredPort = existing.StablePort
-					}
-				}
-				specs[i] = setup.ServiceSpec{
-					Name:          svc.Name,
-					Path:          svc.Path,
-					PreferredPort: preferredPort,
-				}
-			}
-			rels := make([]setup.Relationship, len(in.Relationships))
-			for i, rel := range in.Relationships {
-				rels[i] = setup.Relationship{
-					From:      rel.From,
-					To:        rel.To,
-					ProxyPath: rel.ProxyPath,
-				}
-			}
-			result, err := setup.CoordinateApp(in.Path, specs, rels, s.svc.UsedPorts())
-			if err != nil {
-				log.Printf("[MCP] tool=anito_setup mode=composite path=%s error=%q", in.Path, err)
-				return nil, setupResult{}, err
-			}
-			out := setupResult{
-				Mode:         "composite",
-				RepoPath:     in.Path,
-				Allocations:  map[string]int(result.Allocations),
-				Instructions: result.Instructions,
-			}
-			for _, f := range result.GeneratedFiles {
-				out.GeneratedFiles = append(out.GeneratedFiles, coordinateFile{RelPath: f.RelPath, Content: f.Content})
-			}
-			for _, p := range result.SourcePatches {
-				out.SourcePatches = append(out.SourcePatches, coordinatePatch{
-					RelPath: p.RelPath, Marker: p.Marker, Block: p.Block, Instruction: p.Instruction,
-				})
-			}
-			if in.Apply {
-				if err := s.applySetup(&out); err != nil {
-					log.Printf("[MCP] tool=anito_setup mode=composite path=%s apply error=%q", in.Path, err)
-					s.logErr("anito_setup", in, err)
-					return nil, setupResult{}, err
-				}
-			}
-			return nil, out, nil
+			mode = "composite"
 		}
-
-		// --- single-service mode ---
-		log.Printf("[MCP] tool=anito_setup mode=single path=%s", in.Path)
-		result, err := setup.Inspect(in.Path)
+		log.Printf("[MCP] tool=anito_setup mode=%s path=%s services=%d", mode, in.Path, len(in.Services))
+		plan, err := setup.DryRun(toSetupPlanRequest(in), setupPorts{s: s})
 		if err != nil {
-			log.Printf("[MCP] tool=anito_setup mode=single path=%s error=%q", in.Path, err)
+			log.Printf("[MCP] tool=anito_setup mode=%s path=%s error=%q", mode, in.Path, err)
 			return nil, setupResult{}, err
 		}
-		if in.Apply && result.HasAnitoConfig {
-			err := fmt.Errorf("%s already has .anito/config.yaml; call anito_deploy or anito_doctor instead of applying setup", result.RepoPath)
-			s.logErr("anito_setup", in, err)
-			return nil, setupResult{}, err
-		}
-		issues := make([]setupIssue, len(result.Issues))
-		for i, iss := range result.Issues {
-			issues[i] = setupIssue{Severity: iss.Severity, What: iss.What, Fix: iss.Fix}
-		}
-		out := setupResult{
-			Mode:           "single",
-			RepoPath:       result.RepoPath,
-			ServiceName:    result.ServiceName,
-			Language:       string(result.Language),
-			HasAnitoConfig: result.HasAnitoConfig,
-			HasPORT:        result.HasPORT,
-			HasHealthRoute: result.HasHealthRoute,
-			Issues:         issues,
-			Instructions:   result.Instructions,
-		}
-		// Surface the suggested config as a generated file so the LLM can
-		// write it directly — same pattern as composite mode.
-		if result.SuggestedConfig != "" {
-			content := result.SuggestedConfig
-			if in.Apply {
-				port, err := s.svc.Reserve(result.ServiceName, 0)
-				if err != nil {
-					log.Printf("[MCP] tool=anito_setup mode=single path=%s reserve error=%q", in.Path, err)
-					s.logErr("anito_setup", in, err)
-					return nil, setupResult{}, err
-				}
-				out.Allocations = map[string]int{result.ServiceName: port}
-				content = strings.Replace(content, "# port: 3000  # omit to auto-allocate from 8100-8200", fmt.Sprintf("port: %d", port), 1)
-				out.Instructions = append(out.Instructions, fmt.Sprintf("✓ Reserved stable port %d for %s.", port, result.ServiceName))
-			}
-			out.GeneratedFiles = append(out.GeneratedFiles, coordinateFile{
-				RelPath: ".anito/config.yaml",
-				Content: content,
-			})
-		}
+		out := toSetupResult(plan, nil)
 		if in.Apply {
-			if err := s.applySetup(&out); err != nil {
-				log.Printf("[MCP] tool=anito_setup mode=single path=%s apply error=%q", in.Path, err)
+			applied, err := s.applySetup(plan)
+			if err != nil {
+				log.Printf("[MCP] tool=anito_setup mode=%s path=%s apply error=%q", mode, in.Path, err)
 				s.logErr("anito_setup", in, err)
 				return nil, setupResult{}, err
 			}
+			out = toSetupResult(applied.Plan, applied)
 		}
 		return nil, out, nil
 	})
@@ -879,6 +790,72 @@ func (s *Server) registerTools(srv *sdkmcp.Server) {
 			Message: "Draft saved. The maintainer will review and publish when ready.",
 		}, nil
 	})
+}
+
+func toSetupPlanRequest(in setupInput) setup.PlanRequest {
+	req := setup.PlanRequest{
+		Path:          in.Path,
+		Services:      make([]setup.ServiceSpec, len(in.Services)),
+		Relationships: make([]setup.Relationship, len(in.Relationships)),
+	}
+	for i, svc := range in.Services {
+		req.Services[i] = setup.ServiceSpec{
+			Name:          svc.Name,
+			Path:          svc.Path,
+			PreferredPort: svc.PreferredPort,
+		}
+	}
+	for i, rel := range in.Relationships {
+		req.Relationships[i] = setup.Relationship{
+			From:      rel.From,
+			To:        rel.To,
+			ProxyPath: rel.ProxyPath,
+		}
+	}
+	return req
+}
+
+func toSetupResult(plan *setup.Plan, applied *setup.ApplyResult) setupResult {
+	if plan == nil {
+		return setupResult{}
+	}
+	out := setupResult{
+		Mode:           string(plan.Mode),
+		RepoPath:       plan.RepoPath,
+		ServiceName:    plan.ServiceName,
+		Language:       string(plan.Language),
+		HasAnitoConfig: plan.HasAnitoConfig,
+		HasPORT:        plan.HasPORT,
+		HasHealthRoute: plan.HasHealthRoute,
+		Instructions:   append([]string(nil), plan.Instructions...),
+	}
+	if len(plan.Issues) > 0 {
+		out.Issues = make([]setupIssue, len(plan.Issues))
+		for i, iss := range plan.Issues {
+			out.Issues[i] = setupIssue{Severity: iss.Severity, What: iss.What, Fix: iss.Fix}
+		}
+	}
+	if len(plan.Allocations) > 0 {
+		out.Allocations = make(map[string]int, len(plan.Allocations))
+		for name, port := range plan.Allocations {
+			out.Allocations[name] = port
+		}
+	}
+	for _, f := range plan.GeneratedFiles {
+		out.GeneratedFiles = append(out.GeneratedFiles, coordinateFile{RelPath: f.RelPath, Content: f.Content})
+	}
+	for _, p := range plan.SourcePatches {
+		out.SourcePatches = append(out.SourcePatches, coordinatePatch{
+			RelPath: p.RelPath, Marker: p.Marker, Block: p.Block, Instruction: p.Instruction,
+		})
+	}
+	if applied != nil {
+		out.Applied = applied.Applied
+		out.AppliedFiles = append([]string(nil), applied.AppliedFiles...)
+		out.AppliedPatches = append([]string(nil), applied.AppliedPatches...)
+		out.UnappliedPatches = append([]string(nil), applied.UnappliedPatches...)
+	}
+	return out
 }
 
 func toView(svc *registry.Service) serviceView {
