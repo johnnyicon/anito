@@ -1,0 +1,58 @@
+name: Release Gate
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Tag or version to stamp into the binaries
+        required: true
+        type: string
+
+concurrency:
+  group: release-gate-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  verify-and-package:
+    runs-on: macos-15
+    env:
+      GOFLAGS: -mod=readonly
+      GOTOOLCHAIN: local
+      VERSION: ${{ github.event_name == 'workflow_dispatch' && inputs.version || github.ref_name }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          check-latest: false
+          cache-dependency-path: go.sum
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version-file: .node-version
+          cache: npm
+          cache-dependency-path: internal/server/ui/package-lock.json
+
+      - name: Install UI dependencies
+        working-directory: internal/server/ui
+        run: npm ci
+
+      - name: Run release gate
+        run: bash scripts/ci/check release "$VERSION"
+
+      - name: Upload release artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: anito-${{ env.VERSION }}-darwin
+          path: dist/release/
+          if-no-files-found: error
