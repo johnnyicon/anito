@@ -9,7 +9,7 @@
 ## Current position
 
 - Canonical AWF plan: `019f5bb0-cf2a-7d33-ae7b-fa2aea3e5875` — **Anito Reliability and Control-Plane Consolidation**.
-- Plan status: `active`; the audit baseline, RestoreAll design/implementation/proof, MCP telemetry design, issue aggregation, shared setup planning, immutable routing generations, typed diagnosis/errors, frontend coverage, and CI gates are complete. Issue lifecycle is now in progress; archive/prune, parity, responsibility split, and rollout remain queued.
+- Plan status: `active`; the audit baseline, RestoreAll design/implementation/proof, MCP telemetry design, issue aggregation, shared setup planning, immutable routing generations, typed diagnosis/errors, frontend coverage, CI gates, issue lifecycle, and archive/prune are complete. Parity is now in progress; responsibility split and rollout remain queued.
 - AWF v2 routing work is in progress on M1 under `codex/awf-v2-planned-routing`. The plan currently stores useful model recommendations and dependency waves, but agent/persona, harness, effort, reviewer, write scope, fallback, and routing provenance are not consistently durable first-class fields yet.
 - AWF schema feature requests: `019f5bba-e76a-7697-a3dd-2fe10f1da3d5` and `019f5bc1-2156-7e72-b392-bf562099c141`.
 - The M1 AWF-plans session has acknowledged the routing/schema work and reported no implementation blocker. Its status evidence is inbox item `019f5cf5-88ca-7be3-abb9-37010e41c4c5`.
@@ -61,7 +61,7 @@ The AWF dependency graph is authoritative. The table gives the coordinator a con
 | 5 | Extract Shared Setup Plan and Apply | `019f5bb3-a094-755d-9329-2d57457495f1` | DX + MCP / AI Integration | `gpt-5.5` | high | Architect + Go Engineer | done |
 | 5 | Implement Immutable Multi-Port Routing Generations | `019f5bb5-0b58-7f6e-8f3f-ff596b6e4a1e` | Network / Infrastructure + Go Engineer | `gpt-5.5` | high | Architect + QA / Test | done |
 | 6 | Add Shared Diagnosis and Typed Domain Errors | `019f5bb3-a0b2-76b5-a7f5-248edb27e9e4` | Go Engineer + SRE | `gpt-5.4` | high | Architect | done |
-| 7 | Enforce CLI, HTTP, MCP, and Dashboard Parity | `019f5bb3-a0ce-7331-8026-13a7d8062d4b` | MCP / AI Integration + DX | `gpt-5.4` | high | Go Engineer + QA / Test | pending |
+| 7 | Enforce CLI, HTTP, MCP, and Dashboard Parity | `019f5bb3-a0ce-7331-8026-13a7d8062d4b` | MCP / AI Integration + DX | `gpt-5.4` | high | Go Engineer + QA / Test | in_progress |
 | 8 | Split Application Responsibilities Along Shared Primitives | `019f5bb5-0b7e-706f-8dc9-245f3431a85f` | Architect + Go Engineer | `gpt-5.4` | high | SRE + MCP / AI Integration | pending |
 | 8 | Add Frontend, Accessibility, and Browser Test Coverage | `019f5bb5-0b92-7afd-83db-2a475f7a1e9c` | QA / Test + DX | `gpt-5.4` | medium | MCP / AI Integration | done |
 | 9 | Add Reproducible GitHub CI and Release Gates | `019f5bb5-0bb8-7744-9eb5-13bb7668287d` | DevOps + QA / Test | `gpt-5.4-mini` | medium | SRE | done |
@@ -114,3 +114,4 @@ Research briefs must additionally leave a decision record or implementation-read
 | 2026-07-13 | Dispatched frontend/browser coverage to `019f5d35-c942-7f70-aac4-33a8de9f325e` (Pasteur) and reproducible CI/release gates to `019f5d35-c9b6-7553-9f86-3e3c1f81de14` (Faraday), both planned `gpt-5.4` medium effort. Their scopes are UI test configuration and CI workflow/config respectively. |
 | 2026-07-13 | Closed typed diagnosis/domain errors, frontend coverage, and CI gates. Commits `54c3778`, `fb10799`, and `41af38b` add shared diagnosis/error mappings with redaction, five UI state/accessibility tests, and reproducible PR/release gates. All focused backend/UI verification passed; broader CI gates now expose remaining repository/toolchain risks documented in AWF. |
 | 2026-07-13 | Dispatched issue lifecycle worker `019f5d3e-67e5-7203-ba21-cd59753a6e72` (Socrates), planned `gpt-5.4` high reasoning for the dependency-cleared issue state transition slice. Archive/prune remains sequenced after this adapter surface. |
+| 2026-07-13 | Closed issue lifecycle and archive/prune in commits `b6082d7`, `78a64f7`, and `bdbf25b`. Issue state transitions now persist history and reopen on new occurrences; services archive/restore without losing stable ports, and prune requires confirmation plus tombstones. Dispatched parity worker `019f5d45-3e9b-7913-bdaf-58d80a18fd61` (Nash), planned `gpt-5.4` high effort. |
