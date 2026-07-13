@@ -41,6 +41,34 @@ func get(addr string) (body string, status int, err error) {
 	return strings.TrimSpace(string(b)), resp.StatusCode, nil
 }
 
+func assertBody(t *testing.T, addr, want string) {
+	t.Helper()
+	body, status, err := get(addr)
+	if err != nil {
+		t.Fatalf("GET %s: %v", addr, err)
+	}
+	if status != http.StatusOK || body != want {
+		t.Fatalf("GET %s: status=%d body=%q, want 200 %q", addr, status, body, want)
+	}
+}
+
+func generationUpstreams(t *testing.T, generation string) (map[string]int, func()) {
+	t.Helper()
+	ws := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprintf(w, "%s-ws", generation)
+	}))
+	httpServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprintf(w, "%s-http", generation)
+	}))
+	return map[string]int{
+			"ws":   ws.Listener.Addr().(*net.TCPAddr).Port,
+			"http": httpServer.Listener.Addr().(*net.TCPAddr).Port,
+		}, func() {
+			ws.Close()
+			httpServer.Close()
+		}
+}
+
 // TestBeforeSwapReturns503 verifies that a registered proxy returns 503 before
 // any upstream has been swapped in.
 func TestBeforeSwapReturns503(t *testing.T) {
@@ -554,6 +582,193 @@ func TestRegisterPortsMultiPort(t *testing.T) {
 	}
 }
 
+func TestSwapPortsPublishesOneImmutableGenerationForNamedPorts(t *testing.T) {
+	m := NewManager()
+	stablePorts := map[string]int{"ws": freePort(t), "http": freePort(t)}
+	if err := m.RegisterPorts("atomic-svc", stablePorts); err != nil {
+		t.Fatalf("RegisterPorts: %v", err)
+	}
+	t.Cleanup(func() { m.RemovePorts("atomic-svc") })
+
+	oldWS := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, "old-ws")
+	}))
+	defer oldWS.Close()
+	oldHTTP := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, "old-http")
+	}))
+	defer oldHTTP.Close()
+	newWS := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, "new-ws")
+	}))
+	defer newWS.Close()
+	newHTTP := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, "new-http")
+	}))
+	defer newHTTP.Close()
+
+	if err := m.SwapPorts("atomic-svc", map[string]int{
+		"ws":   oldWS.Listener.Addr().(*net.TCPAddr).Port,
+		"http": oldHTTP.Listener.Addr().(*net.TCPAddr).Port,
+	}); err != nil {
+		t.Fatalf("SwapPorts old: %v", err)
+	}
+
+	route := m.routes["atomic-svc"]
+	if route == nil {
+		t.Fatal("route was not registered")
+	}
+	if m.entries[entryKey("atomic-svc", "ws")].route != route || m.entries[entryKey("atomic-svc", "http")].route != route {
+		t.Fatal("named ports do not share one service route")
+	}
+	oldGeneration := route.generation.Load().(*routingGeneration)
+
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	var once sync.Once
+	routingGenerationPublishHook.Store(routeGenerationPublishHook{before: func(service string, generation *routingGeneration) {
+		if service != "atomic-svc" {
+			return
+		}
+		once.Do(func() {
+			close(entered)
+			<-release
+		})
+	}})
+	defer routingGenerationPublishHook.Store(routeGenerationPublishHook{})
+
+	done := make(chan error, 1)
+	go func() {
+		done <- m.SwapPorts("atomic-svc", map[string]int{
+			"ws":   newWS.Listener.Addr().(*net.TCPAddr).Port,
+			"http": newHTTP.Listener.Addr().(*net.TCPAddr).Port,
+		})
+	}()
+
+	select {
+	case <-entered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for swap to reach generation publish point")
+	}
+
+	if got := route.generation.Load().(*routingGeneration); got != oldGeneration {
+		t.Fatal("route generation changed before the synchronized publish point")
+	}
+	assertBody(t, fmt.Sprintf("http://127.0.0.1:%d/", stablePorts["ws"]), "old-ws")
+	assertBody(t, fmt.Sprintf("http://127.0.0.1:%d/", stablePorts["http"]), "old-http")
+
+	close(release)
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("SwapPorts new: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for swap to finish")
+	}
+
+	newGeneration := route.generation.Load().(*routingGeneration)
+	if newGeneration == oldGeneration {
+		t.Fatal("route generation pointer did not change after publish")
+	}
+	assertBody(t, fmt.Sprintf("http://127.0.0.1:%d/", stablePorts["ws"]), "new-ws")
+	assertBody(t, fmt.Sprintf("http://127.0.0.1:%d/", stablePorts["http"]), "new-http")
+}
+
+func TestSwapPortsRepeatedStressNoMixedPublishedGeneration(t *testing.T) {
+	m := NewManager()
+	stablePorts := map[string]int{"ws": freePort(t), "http": freePort(t)}
+	if err := m.RegisterPorts("stress-svc", stablePorts); err != nil {
+		t.Fatalf("RegisterPorts: %v", err)
+	}
+	t.Cleanup(func() { m.RemovePorts("stress-svc") })
+
+	portsA, closeA := generationUpstreams(t, "A")
+	defer closeA()
+	portsB, closeB := generationUpstreams(t, "B")
+	defer closeB()
+
+	for i := 0; i < 80; i++ {
+		want := "A"
+		ports := portsA
+		if i%2 == 1 {
+			want = "B"
+			ports = portsB
+		}
+		if err := m.SwapPorts("stress-svc", ports); err != nil {
+			t.Fatalf("SwapPorts iteration %d: %v", i, err)
+		}
+
+		var wg sync.WaitGroup
+		errs := make(chan error, 12)
+		for j := 0; j < 6; j++ {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				wsBody, wsStatus, err := get(fmt.Sprintf("http://127.0.0.1:%d/", stablePorts["ws"]))
+				if err != nil {
+					errs <- fmt.Errorf("ws GET: %w", err)
+					return
+				}
+				httpBody, httpStatus, err := get(fmt.Sprintf("http://127.0.0.1:%d/", stablePorts["http"]))
+				if err != nil {
+					errs <- fmt.Errorf("http GET: %w", err)
+					return
+				}
+				if wsStatus != http.StatusOK || httpStatus != http.StatusOK {
+					errs <- fmt.Errorf("statuses ws=%d http=%d, want 200/200", wsStatus, httpStatus)
+					return
+				}
+				if wsBody != want+"-ws" || httpBody != want+"-http" {
+					errs <- fmt.Errorf("mixed generation: ws=%q http=%q want %q/%q", wsBody, httpBody, want+"-ws", want+"-http")
+				}
+			}()
+		}
+		wg.Wait()
+		close(errs)
+		for err := range errs {
+			if err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+}
+
+func TestSwapPortsValidationFailureDoesNotPublishGeneration(t *testing.T) {
+	m := NewManager()
+	stablePorts := map[string]int{"ws": freePort(t), "http": freePort(t)}
+	if err := m.RegisterPorts("validate-svc", stablePorts); err != nil {
+		t.Fatalf("RegisterPorts: %v", err)
+	}
+	t.Cleanup(func() { m.RemovePorts("validate-svc") })
+
+	oldPorts, closeOld := generationUpstreams(t, "old")
+	defer closeOld()
+	newWS := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, "new-ws")
+	}))
+	defer newWS.Close()
+
+	if err := m.SwapPorts("validate-svc", oldPorts); err != nil {
+		t.Fatalf("SwapPorts old: %v", err)
+	}
+	route := m.routes["validate-svc"]
+	before := route.generation.Load().(*routingGeneration)
+
+	err := m.SwapPorts("validate-svc", map[string]int{
+		"ws":   newWS.Listener.Addr().(*net.TCPAddr).Port,
+		"grpc": 65535,
+	})
+	if err == nil {
+		t.Fatal("SwapPorts should fail for an unregistered port name")
+	}
+	if after := route.generation.Load().(*routingGeneration); after != before {
+		t.Fatal("route generation changed after validation failure")
+	}
+	assertBody(t, fmt.Sprintf("http://127.0.0.1:%d/", stablePorts["ws"]), "old-ws")
+	assertBody(t, fmt.Sprintf("http://127.0.0.1:%d/", stablePorts["http"]), "old-http")
+}
+
 // TestSwapPortsErrorUnregisteredPortName verifies that SwapPorts returns an
 // error when given a port name that was not registered.
 func TestSwapPortsErrorUnregisteredPortName(t *testing.T) {
@@ -667,6 +882,45 @@ func TestXAnitoProxyHeaderAfterSwap(t *testing.T) {
 	val := resp.Header.Get("X-Anito-Proxy")
 	if val != "1" {
 		t.Errorf("X-Anito-Proxy = %q, want %q (after swap)", val, "1")
+	}
+}
+
+func TestXAnitoClientIPHeaderAfterSwap(t *testing.T) {
+	m := NewManager()
+	port := freePort(t)
+
+	if err := m.Register("client-ip-svc", port); err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+	t.Cleanup(func() { m.Remove("client-ip-svc") })
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, r.Header.Get("X-Anito-Client-IP"))
+	}))
+	defer upstream.Close()
+
+	if err := m.Swap("client-ip-svc", upstream.Listener.Addr().(*net.TCPAddr).Port); err != nil {
+		t.Fatalf("Swap: %v", err)
+	}
+
+	req, err := http.NewRequest("GET", fmt.Sprintf("http://127.0.0.1:%d/", port), nil)
+	if err != nil {
+		t.Fatalf("NewRequest: %v", err)
+	}
+	req.Header.Set("X-Anito-Client-IP", "spoofed")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("GET: %v", err)
+	}
+	defer resp.Body.Close()
+	b, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("ReadAll: %v", err)
+	}
+	body := strings.TrimSpace(string(b))
+	status := resp.StatusCode
+	if status != http.StatusOK || body != "127.0.0.1" {
+		t.Fatalf("status=%d body=%q, want 200 127.0.0.1", status, body)
 	}
 }
 
