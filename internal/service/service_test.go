@@ -95,6 +95,28 @@ func TestWaitHTTPReady_TimesOut(t *testing.T) {
 	}
 }
 
+func TestWaitHTTPReady_EnforcesTimeoutWhenServerHangs(t *testing.T) {
+	l, err := net.Listen("tcp", "localhost:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	port := l.Addr().(*net.TCPAddr).Port
+	srv := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		<-r.Context().Done()
+	})}
+	go srv.Serve(l) //nolint:errcheck
+	t.Cleanup(func() { _ = srv.Close() })
+
+	start := time.Now()
+	err = waitHTTPReady(port, "/health", 150*time.Millisecond)
+	if err == nil {
+		t.Fatal("expected hanging health check to time out")
+	}
+	if elapsed := time.Since(start); elapsed > 500*time.Millisecond {
+		t.Fatalf("health check exceeded configured deadline: %s", elapsed)
+	}
+}
+
 // TestWaitHTTPReady_ErrorMentionsPORT verifies that the timeout error message
 // contains "PORT" (instructing the developer to read PORT from the environment).
 func TestWaitHTTPReady_ErrorMentionsPORT(t *testing.T) {
@@ -1238,6 +1260,41 @@ func TestStop_NotRunning(t *testing.T) {
 	err := svc.Stop("stopped-already-svc")
 	// mgr.Stop returns an error when the process isn't tracked — that's expected.
 	_ = err // could be nil or non-nil depending on process manager; just verify no panic.
+}
+
+func TestDeployRejectsUnsafeServiceName(t *testing.T) {
+	svc := newTestService(t)
+	_, err := svc.Deploy(DeployRequest{
+		Name: "../outside",
+		Type: registry.TypeBinary,
+		Path: "/bin/true",
+	})
+	if err == nil || !strings.Contains(err.Error(), "invalid character") {
+		t.Fatalf("Deploy error = %v, want unsafe name rejection", err)
+	}
+}
+
+func TestDeployValidatesStaticDirectory(t *testing.T) {
+	svc := newTestService(t)
+	file := filepath.Join(t.TempDir(), "index.html")
+	if err := os.WriteFile(file, []byte("ok"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	_, err := svc.Deploy(DeployRequest{
+		Name: "bad-static",
+		Type: registry.TypeStatic,
+		Path: file,
+	})
+	if err == nil || !strings.Contains(err.Error(), "not a directory") {
+		t.Fatalf("Deploy error = %v, want static directory rejection", err)
+	}
+}
+
+func TestReserveRejectsUnsafeServiceName(t *testing.T) {
+	svc := newTestService(t)
+	if _, err := svc.Reserve("../../logs", 0); err == nil {
+		t.Fatal("Reserve accepted a path-like service name")
+	}
 }
 
 // --- handleCrash additional edge cases ---

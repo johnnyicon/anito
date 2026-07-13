@@ -534,23 +534,6 @@ func TestMarkDraining_PositivePID(t *testing.T) {
 	}
 }
 
-// --- StopPID ---
-
-// TestStopPID_Running verifies StopPID terminates a running process.
-func TestStopPID_Running(t *testing.T) {
-	mgr, reg := newTestManager(t)
-	_ = registerAndStart(t, mgr, reg, "stoppid", "fake_service")
-
-	pid := mgr.PID("stoppid")
-	if pid == 0 {
-		t.Fatal("expected non-zero PID after Start")
-	}
-
-	// Deregister so Stop doesn't also clean up — we want StopPID to be the actor.
-	mgr.Deregister("stoppid")
-	StopPID(pid) // should not block indefinitely
-}
-
 // --- DrainProc (exported wrapper) ---
 
 // TestDrainProc_NilProcess verifies DrainProc is a no-op for an unstarted cmd.
@@ -705,6 +688,154 @@ func TestBuildCmd_WithEnvFile(t *testing.T) {
 	if !strings.Contains(envStr, "MY_VAR=hello") {
 		t.Errorf("expected MY_VAR=hello in env, got: %s", envStr)
 	}
+}
+
+func TestBuildCmd_AnitoPortOverridesEnvironmentAndEnvFile(t *testing.T) {
+	mgr, _ := newTestManager(t)
+	t.Setenv("PORT", "11111")
+	t.Setenv("ASPNETCORE_HTTP_PORTS", "11111")
+	envFile := filepath.Join(t.TempDir(), ".env")
+	if err := os.WriteFile(envFile, []byte("PORT=22222\nASPNETCORE_HTTP_PORTS=22222\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	svc := &registry.Service{
+		Name:        "envfile-port-svc",
+		Type:        registry.TypeBinary,
+		BinaryPath:  "/bin/true",
+		EnvFile:     envFile,
+		StablePorts: map[string]int{"default": 8080},
+	}
+	cmd, logFile, err := mgr.buildCmd(svc, map[string]int{"default": 58101})
+	if logFile != nil {
+		logFile.Close()
+	}
+	if err != nil {
+		t.Fatalf("buildCmd returned error: %v", err)
+	}
+	if got := lastEnvValue(cmd.Env, "PORT"); got != "58101" {
+		t.Fatalf("PORT = %q, want Anito-owned value 58101", got)
+	}
+	if got := lastEnvValue(cmd.Env, "ASPNETCORE_HTTP_PORTS"); got != "58101" {
+		t.Fatalf("ASPNETCORE_HTTP_PORTS = %q, want Anito-owned value 58101", got)
+	}
+}
+
+func TestStartReportsCurrentInternalPort(t *testing.T) {
+	mgr, reg := newTestManager(t)
+	t.Setenv("TEST_HELPER", "fake_service")
+	svc := &registry.Service{
+		Name:          "current-port",
+		Type:          registry.TypeBinary,
+		BinaryPath:    os.Args[0],
+		Args:          []string{"-test.run=TestHelperFakeService", "-test.v"},
+		StablePorts:   map[string]int{"default": 8080},
+		InternalPorts: map[string]int{"default": 12345},
+		HealthCheck:   "/health",
+	}
+	if err := reg.Register(svc); err != nil {
+		t.Fatal(err)
+	}
+	ports, err := mgr.Start(svc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = mgr.Stop("current-port") })
+	if got, want := mgr.InternalPort("current-port"), ports["default"]; got != want {
+		t.Fatalf("InternalPort = %d, want newly allocated %d", got, want)
+	}
+}
+
+func TestDetachAndRestore(t *testing.T) {
+	mgr, reg := newTestManager(t)
+	registerAndStart(t, mgr, reg, "restore", "fake_service")
+	originalPID := mgr.PID("restore")
+	detached := mgr.Detach("restore")
+	if detached == nil || detached.PID() != originalPID {
+		t.Fatalf("Detach PID = %v, want %d", detached, originalPID)
+	}
+	if mgr.IsRunning("restore") {
+		t.Fatal("detached process is still tracked")
+	}
+	if err := mgr.Restore(detached); err != nil {
+		t.Fatalf("Restore: %v", err)
+	}
+	if got := mgr.PID("restore"); got != originalPID {
+		t.Fatalf("restored PID = %d, want %d", got, originalPID)
+	}
+}
+
+func TestCandidateExitDoesNotTriggerActiveCrashHandler(t *testing.T) {
+	mgr, reg := newTestManager(t)
+	t.Setenv("TEST_HELPER", "crash")
+	crashed := make(chan string, 1)
+	mgr.OnCrash = func(name string) { crashed <- name }
+	svc := &registry.Service{
+		Name:        "candidate-crash",
+		Type:        registry.TypeBinary,
+		BinaryPath:  os.Args[0],
+		Args:        []string{"-test.run=TestHelperCrashImmediately", "-test.v"},
+		StablePorts: map[string]int{"default": 8080},
+		HealthCheck: "/health",
+	}
+	if err := reg.Register(svc); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := mgr.StartCandidate(svc); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for mgr.IsRunning("candidate-crash") && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if mgr.IsRunning("candidate-crash") {
+		t.Fatal("candidate process did not exit")
+	}
+	select {
+	case name := <-crashed:
+		t.Fatalf("candidate exit triggered active crash handler for %q", name)
+	default:
+	}
+}
+
+func TestStopCompletesStartHistory(t *testing.T) {
+	mgr, reg := newTestManager(t)
+	registerAndStart(t, mgr, reg, "history", "fake_service")
+	if err := mgr.Stop("history"); err != nil {
+		t.Fatal(err)
+	}
+	svc, _ := reg.Get("history")
+	if len(svc.StartHistory) != 1 {
+		t.Fatalf("start history length = %d, want 1", len(svc.StartHistory))
+	}
+	event := svc.StartHistory[0]
+	if event.ExitCode != 0 {
+		t.Fatalf("exit code = %d, want 0 for intentional stop", event.ExitCode)
+	}
+	if event.Duration <= 0 {
+		t.Fatal("completed start history has no duration")
+	}
+}
+
+func TestStopFailedMarksStartHistoryFailed(t *testing.T) {
+	mgr, reg := newTestManager(t)
+	registerAndStart(t, mgr, reg, "failed-history", "fake_service")
+	if err := mgr.StopFailed("failed-history"); err != nil {
+		t.Fatal(err)
+	}
+	svc, _ := reg.Get("failed-history")
+	if got := svc.StartHistory[0].ExitCode; got != 1 {
+		t.Fatalf("exit code = %d, want 1 for rejected candidate", got)
+	}
+}
+
+func lastEnvValue(env []string, key string) string {
+	prefix := key + "="
+	for i := len(env) - 1; i >= 0; i-- {
+		if strings.HasPrefix(env[i], prefix) {
+			return strings.TrimPrefix(env[i], prefix)
+		}
+	}
+	return ""
 }
 
 // Ensure net and filepath are referenced.

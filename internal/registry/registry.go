@@ -251,13 +251,26 @@ func (r *Registry) save() error {
 func (r *Registry) Register(s *Service) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	s = cloneService(s)
 
 	if existing, exists := r.services[s.Name]; exists {
 		// Preserve stable port assignments — they never change on redeploy.
 		if len(existing.StablePorts) > 0 {
-			s.StablePorts = existing.StablePorts
+			s.StablePorts = copyPorts(existing.StablePorts)
 		}
 		s.StablePort = existing.StablePort
+		// Register stages a new deployment configuration before its candidate
+		// process is ready. Keep the currently serving runtime state until the
+		// service layer commits the successful proxy swap.
+		s.InternalPorts = copyPorts(existing.InternalPorts)
+		s.InternalPort = existing.InternalPort
+		s.Status = existing.Status
+		s.PID = existing.PID
+		s.LastStartedAt = existing.LastStartedAt
+		s.StartHistory = append([]StartEvent(nil), existing.StartHistory...)
+		s.CrashAttempts = existing.CrashAttempts
+		s.GaveUp = existing.GaveUp
+		s.LastDeployedAt = existing.LastDeployedAt
 		if s.ProxyBindAddress == "" {
 			s.ProxyBindAddress = existing.ProxyBindAddress
 		}
@@ -271,6 +284,18 @@ func (r *Registry) Register(s *Service) error {
 	s.NormalizePorts()
 	s.UpdatedAt = time.Now()
 	r.services[s.Name] = s
+	return r.save()
+}
+
+// Restore replaces a service record exactly. It is used when a deployment
+// candidate fails after Register has staged its configuration.
+func (r *Registry) Restore(s *Service) error {
+	if s == nil {
+		return fmt.Errorf("cannot restore a nil service")
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.services[s.Name] = cloneService(s)
 	return r.save()
 }
 
@@ -307,7 +332,10 @@ func (r *Registry) Get(name string) (*Service, bool) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	s, ok := r.services[name]
-	return s, ok
+	if !ok {
+		return nil, false
+	}
+	return cloneService(s), true
 }
 
 // All returns all registered services.
@@ -316,7 +344,7 @@ func (r *Registry) All() []*Service {
 	defer r.mu.RUnlock()
 	out := make([]*Service, 0, len(r.services))
 	for _, s := range r.services {
-		out = append(out, s)
+		out = append(out, cloneService(s))
 	}
 	return out
 }
@@ -384,6 +412,43 @@ func (r *Registry) UpdateStartHistory(name string, event StartEvent) error {
 	return r.save()
 }
 
+// RecordStart atomically records the process start time and appends its
+// in-progress history entry.
+func (r *Registry) RecordStart(name string, startedAt time.Time) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	s, ok := r.services[name]
+	if !ok {
+		return fmt.Errorf("service %q not found", name)
+	}
+	s.LastStartedAt = startedAt
+	s.StartHistory = append(s.StartHistory, StartEvent{StartedAt: startedAt, ExitCode: -1})
+	if len(s.StartHistory) > 10 {
+		s.StartHistory = s.StartHistory[len(s.StartHistory)-10:]
+	}
+	s.UpdatedAt = time.Now()
+	return r.save()
+}
+
+// CompleteStart fills in the exit code and duration for a recorded start.
+func (r *Registry) CompleteStart(name string, startedAt time.Time, exitCode int, duration time.Duration) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	s, ok := r.services[name]
+	if !ok {
+		return fmt.Errorf("service %q not found", name)
+	}
+	for i := len(s.StartHistory) - 1; i >= 0; i-- {
+		if s.StartHistory[i].StartedAt.Equal(startedAt) {
+			s.StartHistory[i].ExitCode = exitCode
+			s.StartHistory[i].Duration = duration
+			s.UpdatedAt = time.Now()
+			return r.save()
+		}
+	}
+	return fmt.Errorf("service %q start record not found", name)
+}
+
 // UpdateLastStarted records when the current process started.
 func (r *Registry) UpdateLastStarted(name string, t time.Time) error {
 	r.mu.Lock()
@@ -438,10 +503,41 @@ func (r *Registry) UpdateInternalPorts(name string, ports map[string]int) error 
 	if !ok {
 		return fmt.Errorf("service %q not found", name)
 	}
-	s.InternalPorts = ports
+	s.InternalPorts = copyPorts(ports)
 	s.syncSingularFromMap()
 	s.UpdatedAt = time.Now()
 	return r.save()
+}
+
+func cloneService(s *Service) *Service {
+	if s == nil {
+		return nil
+	}
+	clone := *s
+	clone.Args = append([]string(nil), s.Args...)
+	clone.StablePorts = copyPorts(s.StablePorts)
+	clone.InternalPorts = copyPorts(s.InternalPorts)
+	clone.WatchPaths = append([]string(nil), s.WatchPaths...)
+	clone.StartHistory = append([]StartEvent(nil), s.StartHistory...)
+	if s.PreviousDeployment != nil {
+		prev := *s.PreviousDeployment
+		prev.Args = append([]string(nil), s.PreviousDeployment.Args...)
+		prev.StablePorts = copyPorts(s.PreviousDeployment.StablePorts)
+		prev.WatchPaths = append([]string(nil), s.PreviousDeployment.WatchPaths...)
+		clone.PreviousDeployment = &prev
+	}
+	return &clone
+}
+
+func copyPorts(ports map[string]int) map[string]int {
+	if len(ports) == 0 {
+		return nil
+	}
+	clone := make(map[string]int, len(ports))
+	for name, port := range ports {
+		clone[name] = port
+	}
+	return clone
 }
 
 // Remove deletes a service from the registry.

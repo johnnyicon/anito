@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/johnnyicon/anito/internal/registry"
 )
@@ -144,6 +145,7 @@ func (m *Manager) RegisterPortsWithBind(name string, ports map[string]int, bindA
 
 func serverFor(e *entry) *http.Server {
 	return &http.Server{
+		ReadHeaderTimeout: 5 * time.Second,
 		Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("X-Anito-Proxy", "1")
 			e.handler.Load().(handlerWrapper).h.ServeHTTP(w, r)

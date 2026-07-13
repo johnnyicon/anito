@@ -62,6 +62,9 @@ Deploy a service. The binary must already be built. Anito handles the start, hea
 | `env_file` | string | no | Path to a `KEY=VALUE` env file |
 | `health_check` | string | no | Health check path (default: `/health`) |
 | `watch_paths` | []string | no | Directories to watch for file changes. Any write triggers an automatic restart (debounced 500ms). Also enables crash auto-restart. |
+| `replace_config` | bool | no | Redeploy only. Default `false` preserves omitted optional fields from the registered service. Set `true` to replace the optional configuration and intentionally clear omitted values. |
+
+On redeploy, optional fields omitted from the MCP call preserve their registered values (arguments, env file, health policy, watch paths, restart policy, and config provenance). This makes the common `name` + new `path` workflow safe. Pass `replace_config: true` when the call is a complete replacement and omitted values should be cleared.
 
 Returns the service record including the assigned stable port(s). Response includes both singular fields (`stable_port`, `pinned_address`) and map fields (`stable_ports`, `pinned_addresses`) for backward compatibility.
 
@@ -70,14 +73,16 @@ Watch paths are persisted in the registry and survive daemon restarts — the wa
 ---
 
 ### `anito_services`
-List all services Anito is managing, including their stable ports and current status.
+List all services Anito is managing, including stable ports, current status,
+health and restart policy, crash state, and recent start history.
 
 No parameters.
 
 ---
 
 ### `anito_status`
-Get detailed status for one service: stable port, internal port, PID, binary path, deploy time.
+Get detailed status for one service: stable and internal ports, PID, binary path,
+deploy time, health and restart policy, crash state, and recent start history.
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|

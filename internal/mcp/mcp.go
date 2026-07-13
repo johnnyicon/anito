@@ -150,27 +150,39 @@ type deployInput struct {
 	HealthCheckTimeout string         `json:"health_check_timeout"  jsonschema:"how long to wait for /health to return 200 (e.g. '30s', '60s'). Default: '15s'. Increase for slow-starting services."`
 	RestartPolicy      string         `json:"restart_policy"        jsonschema:"crash restart behavior: 'on-watch' (default, restart only if watch paths set), 'always' (always restart on crash), 'never' (never auto-restart)"`
 	ConfigPath         string         `json:"config_path,omitempty" jsonschema:"absolute path to the .anito/config.yaml that defines this service. Doctor will flag services without a recorded config path."`
+	ReplaceConfig      bool           `json:"replace_config"        jsonschema:"for redeploys only: replace optional configuration instead of preserving omitted fields from the registered service. Default false."`
 }
 
 type serviceView struct {
-	Name             string            `json:"name"`
-	Version          string            `json:"version,omitempty"`
-	Type             string            `json:"type"`
-	StablePort       int               `json:"stable_port"`                // primary port (backward compat)
-	PinnedAddress    string            `json:"pinned_address"`             // primary address (backward compat)
-	StablePorts      map[string]int    `json:"stable_ports,omitempty"`     // all named ports
-	PinnedAddresses  map[string]string `json:"pinned_addresses,omitempty"` // all named addresses
-	ProxyBindAddress string            `json:"proxy_bind_address,omitempty"`
-	InternalPort     int               `json:"internal_port,omitempty"`     // primary internal port (backward compat)
-	InternalPorts    map[string]int    `json:"internal_ports,omitempty"`    // all named internal ports
-	HealthCheckPort  string            `json:"health_check_port,omitempty"` // which named port is health-checked
-	Status           string            `json:"status"`
-	PID              int               `json:"pid,omitempty"`
-	BinaryPath       string            `json:"binary_path"`
-	ConfigPath       string            `json:"config_path,omitempty"`
-	DeployedAt       time.Time         `json:"deployed_at,omitempty"`
-	UpdatedAt        time.Time         `json:"updated_at,omitempty"`
-	LastDeployedAt   time.Time         `json:"last_deployed_at,omitempty"`
+	Name               string                `json:"name"`
+	Version            string                `json:"version,omitempty"`
+	Type               string                `json:"type"`
+	StablePort         int                   `json:"stable_port"`                // primary port (backward compat)
+	PinnedAddress      string                `json:"pinned_address"`             // primary address (backward compat)
+	StablePorts        map[string]int        `json:"stable_ports,omitempty"`     // all named ports
+	PinnedAddresses    map[string]string     `json:"pinned_addresses,omitempty"` // all named addresses
+	ProxyBindAddress   string                `json:"proxy_bind_address,omitempty"`
+	InternalPort       int                   `json:"internal_port,omitempty"`     // primary internal port (backward compat)
+	InternalPorts      map[string]int        `json:"internal_ports,omitempty"`    // all named internal ports
+	HealthCheckPort    string                `json:"health_check_port,omitempty"` // which named port is health-checked
+	HealthCheck        string                `json:"health_check,omitempty"`
+	HealthCheckTimeout string                `json:"health_check_timeout,omitempty"`
+	DrainWindow        string                `json:"drain_window,omitempty"`
+	WatchPaths         []string              `json:"watch_paths,omitempty"`
+	RestartPolicy      string                `json:"restart_policy,omitempty"`
+	Status             string                `json:"status"`
+	PID                int                   `json:"pid,omitempty"`
+	CrashAttempts      int                   `json:"crash_attempts,omitempty"`
+	GaveUp             bool                  `json:"gave_up,omitempty"`
+	BinaryPath         string                `json:"binary_path"`
+	Args               []string              `json:"args,omitempty"`
+	EnvFile            string                `json:"env_file,omitempty"`
+	ConfigPath         string                `json:"config_path,omitempty"`
+	DeployedAt         time.Time             `json:"deployed_at,omitempty"`
+	UpdatedAt          time.Time             `json:"updated_at,omitempty"`
+	LastDeployedAt     time.Time             `json:"last_deployed_at,omitempty"`
+	LastStartedAt      time.Time             `json:"last_started_at,omitempty"`
+	StartHistory       []registry.StartEvent `json:"start_history,omitempty"`
 }
 
 // setupInput is the unified input for anito_setup.
@@ -379,11 +391,15 @@ func (s *Server) registerTools(srv *sdkmcp.Server) {
 			"Re-deploying an existing service is zero-downtime. " +
 			"If stable_port is 0 or omitted, a port is auto-allocated from the range 8100-8200. " +
 			"IMPORTANT: the stable_port returned is permanent and pinned to this service name. " +
+			"On redeploy, omitted optional fields preserve their registered values; set replace_config=true only for a complete configuration replacement. " +
 			"It will never change on subsequent deploys. Record it — other services and agents " +
 			"should connect to this service at localhost:<stable_port> going forward. " +
 			"Ports 7700 (management API) and 7701 (MCP) are reserved and cannot be used.",
 	}, func(ctx context.Context, req *sdkmcp.CallToolRequest, in deployInput) (*sdkmcp.CallToolResult, serviceView, error) {
 		log.Printf("[MCP] tool=anito_deploy name=%s path=%s port=%d", in.Name, in.Path, in.StablePort)
+		if existing, err := s.svc.Status(in.Name); err == nil {
+			in = mergeDeployInput(in, existing)
+		}
 
 		var drainWindow time.Duration
 		if in.DrainWindow != "" {
@@ -867,21 +883,32 @@ func (s *Server) registerTools(srv *sdkmcp.Server) {
 
 func toView(svc *registry.Service) serviceView {
 	v := serviceView{
-		Name:             svc.Name,
-		Version:          svc.Version,
-		Type:             string(svc.Type),
-		StablePort:       svc.StablePort,
-		PinnedAddress:    svc.Address(),
-		ProxyBindAddress: svc.ProxyBindAddress,
-		InternalPort:     svc.InternalPort,
-		HealthCheckPort:  svc.HealthCheckPort,
-		Status:           string(svc.Status),
-		PID:              svc.PID,
-		BinaryPath:       svc.BinaryPath,
-		ConfigPath:       svc.ConfigPath,
-		DeployedAt:       svc.DeployedAt,
-		UpdatedAt:        svc.UpdatedAt,
-		LastDeployedAt:   svc.LastDeployedAt,
+		Name:               svc.Name,
+		Version:            svc.Version,
+		Type:               string(svc.Type),
+		StablePort:         svc.StablePort,
+		PinnedAddress:      svc.Address(),
+		ProxyBindAddress:   svc.ProxyBindAddress,
+		InternalPort:       svc.InternalPort,
+		HealthCheckPort:    svc.HealthCheckPort,
+		HealthCheck:        svc.HealthCheck,
+		HealthCheckTimeout: durationString(svc.HealthCheckTimeout),
+		DrainWindow:        durationString(svc.DrainWindow),
+		WatchPaths:         svc.WatchPaths,
+		RestartPolicy:      svc.RestartPolicy,
+		Status:             string(svc.Status),
+		PID:                svc.PID,
+		CrashAttempts:      svc.CrashAttempts,
+		GaveUp:             svc.GaveUp,
+		BinaryPath:         svc.BinaryPath,
+		Args:               svc.Args,
+		EnvFile:            svc.EnvFile,
+		ConfigPath:         svc.ConfigPath,
+		DeployedAt:         svc.DeployedAt,
+		UpdatedAt:          svc.UpdatedAt,
+		LastDeployedAt:     svc.LastDeployedAt,
+		LastStartedAt:      svc.LastStartedAt,
+		StartHistory:       svc.StartHistory,
 	}
 	// Multi-port: include all named ports and addresses.
 	if len(svc.StablePorts) > 0 {
@@ -895,4 +922,51 @@ func toView(svc *registry.Service) serviceView {
 		v.InternalPorts = svc.InternalPorts
 	}
 	return v
+}
+
+func durationString(value time.Duration) string {
+	if value == 0 {
+		return ""
+	}
+	return value.String()
+}
+
+func mergeDeployInput(in deployInput, existing *registry.Service) deployInput {
+	if existing == nil || in.ReplaceConfig {
+		return in
+	}
+	if in.Type == "" {
+		in.Type = string(existing.Type)
+	}
+	if in.Args == nil {
+		in.Args = append([]string(nil), existing.Args...)
+	}
+	if in.ProxyBindAddress == "" {
+		in.ProxyBindAddress = existing.ProxyBindAddress
+	}
+	if in.HealthCheckPort == "" {
+		in.HealthCheckPort = existing.HealthCheckPort
+	}
+	if in.EnvFile == "" {
+		in.EnvFile = existing.EnvFile
+	}
+	if in.HealthCheck == "" {
+		in.HealthCheck = existing.HealthCheck
+	}
+	if in.WatchPaths == nil {
+		in.WatchPaths = append([]string(nil), existing.WatchPaths...)
+	}
+	if in.DrainWindow == "" {
+		in.DrainWindow = durationString(existing.DrainWindow)
+	}
+	if in.HealthCheckTimeout == "" {
+		in.HealthCheckTimeout = durationString(existing.HealthCheckTimeout)
+	}
+	if in.RestartPolicy == "" {
+		in.RestartPolicy = existing.RestartPolicy
+	}
+	if in.ConfigPath == "" {
+		in.ConfigPath = existing.ConfigPath
+	}
+	return in
 }

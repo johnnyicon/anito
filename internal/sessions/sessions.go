@@ -6,10 +6,13 @@ package sessions
 import (
 	"encoding/json"
 	"os"
+	"path/filepath"
 	"sort"
 	"sync"
 	"time"
 )
+
+const maxTrackedSessions = 500
 
 // Session is one tracked MCP client session.
 type Session struct {
@@ -28,7 +31,7 @@ type Store struct {
 
 // New returns a Store backed by <dataDir>/sessions.json.
 func New(dataDir string) *Store {
-	return &Store{path: dataDir + "/sessions.json"}
+	return &Store{path: filepath.Join(dataDir, "sessions.json")}
 }
 
 // Create records a newly initialised session.
@@ -102,6 +105,7 @@ func (s *Store) Cleanup(maxAge time.Duration) (int, error) {
 			removed++
 		}
 	}
+	removed += pruneOldest(m, maxTrackedSessions)
 	if removed > 0 {
 		if err := s.save(m); err != nil {
 			return 0, err
@@ -133,9 +137,34 @@ func (s *Store) load() (map[string]Session, error) {
 }
 
 func (s *Store) save(m map[string]Session) error {
+	pruneOldest(m, maxTrackedSessions)
 	data, err := json.MarshalIndent(storeFile{Sessions: m}, "", "  ")
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(s.path, data, 0644)
+	tmp := s.path + ".tmp"
+	if err := os.WriteFile(tmp, data, 0644); err != nil {
+		return err
+	}
+	return os.Rename(tmp, s.path)
+}
+
+func pruneOldest(m map[string]Session, limit int) int {
+	if limit <= 0 || len(m) <= limit {
+		return 0
+	}
+	all := make([]Session, 0, len(m))
+	for _, sess := range m {
+		all = append(all, sess)
+	}
+	sort.Slice(all, func(i, j int) bool {
+		if all[i].LastSeenAt.Equal(all[j].LastSeenAt) {
+			return all[i].ID < all[j].ID
+		}
+		return all[i].LastSeenAt.After(all[j].LastSeenAt)
+	})
+	for _, sess := range all[limit:] {
+		delete(m, sess.ID)
+	}
+	return len(all) - limit
 }

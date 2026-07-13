@@ -1,0 +1,276 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Anito System Audit - 2026-07-12</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --ink: #17201d;
+      --muted: #5d6964;
+      --line: #d7ded9;
+      --soft: #f4f7f5;
+      --white: #ffffff;
+      --green: #147d55;
+      --green-soft: #e8f5ee;
+      --red: #b13a35;
+      --red-soft: #fbeceb;
+      --amber: #96651b;
+      --amber-soft: #fbf2dd;
+      --blue: #296b9d;
+      --blue-soft: #eaf3fa;
+      --purple: #71528f;
+    }
+    * { box-sizing: border-box; }
+    html { scroll-behavior: smooth; }
+    body {
+      margin: 0;
+      background: var(--white);
+      color: var(--ink);
+      font-family: Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      line-height: 1.55;
+    }
+    a { color: var(--blue); }
+    code, .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; font-size: 0.92em; }
+    .shell { max-width: 1220px; margin: 0 auto; padding: 0 28px 80px; }
+    .masthead { border-bottom: 1px solid var(--line); background: #fbfcfb; }
+    .masthead-inner { max-width: 1220px; margin: 0 auto; padding: 44px 28px 36px; }
+    .eyebrow { margin: 0 0 10px; color: var(--green); font-size: 12px; font-weight: 750; text-transform: uppercase; letter-spacing: 0; }
+    h1 { margin: 0; font-size: 42px; line-height: 1.08; letter-spacing: 0; }
+    .dek { max-width: 860px; margin: 16px 0 0; color: var(--muted); font-size: 18px; }
+    .meta { display: flex; flex-wrap: wrap; gap: 18px; margin-top: 22px; color: var(--muted); font-size: 13px; }
+    nav { position: sticky; top: 0; z-index: 5; border-bottom: 1px solid var(--line); background: rgba(255,255,255,0.96); }
+    nav .inner { max-width: 1220px; margin: 0 auto; padding: 10px 28px; display: flex; gap: 18px; overflow-x: auto; }
+    nav a { color: var(--muted); font-size: 13px; font-weight: 650; text-decoration: none; white-space: nowrap; }
+    nav a:hover { color: var(--ink); }
+    section { padding: 46px 0 0; scroll-margin-top: 54px; }
+    h2 { margin: 0 0 16px; font-size: 27px; line-height: 1.2; letter-spacing: 0; }
+    h3 { margin: 28px 0 10px; font-size: 18px; letter-spacing: 0; }
+    p { margin: 0 0 14px; }
+    .lede { max-width: 900px; font-size: 17px; color: #34423c; }
+    .verdict { margin-top: 22px; padding: 20px 22px; border-left: 4px solid var(--amber); background: var(--amber-soft); }
+    .metrics { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); border: 1px solid var(--line); margin-top: 28px; }
+    .metric { min-height: 108px; padding: 18px; border-right: 1px solid var(--line); }
+    .metric:last-child { border-right: 0; }
+    .metric strong { display: block; font-size: 28px; line-height: 1; }
+    .metric span { display: block; margin-top: 9px; color: var(--muted); font-size: 12px; }
+    .metric.bad strong { color: var(--red); }
+    .metric.warn strong { color: var(--amber); }
+    .metric.good strong { color: var(--green); }
+    .flow { display: grid; grid-template-columns: 1fr 42px 1.2fr 42px 1.2fr; align-items: stretch; margin: 26px 0; }
+    .flow-box { border: 1px solid var(--line); padding: 18px; background: var(--soft); }
+    .flow-box strong { display: block; margin-bottom: 8px; }
+    .flow-box span { color: var(--muted); font-size: 13px; }
+    .arrow { display: grid; place-items: center; color: var(--muted); font-size: 22px; }
+    .callout { padding: 16px 18px; background: var(--blue-soft); border-left: 4px solid var(--blue); }
+    table { width: 100%; border-collapse: collapse; margin: 18px 0 28px; font-size: 14px; }
+    th { padding: 11px 12px; border-bottom: 2px solid var(--ink); text-align: left; font-size: 12px; text-transform: uppercase; letter-spacing: 0; }
+    td { padding: 13px 12px; border-bottom: 1px solid var(--line); vertical-align: top; }
+    tr:hover td { background: #fafbfa; }
+    .severity, .state { display: inline-block; padding: 3px 7px; border-radius: 4px; font-size: 11px; font-weight: 750; white-space: nowrap; }
+    .p1 { color: var(--red); background: var(--red-soft); }
+    .p2 { color: var(--amber); background: var(--amber-soft); }
+    .fixed { color: var(--green); background: var(--green-soft); }
+    .open { color: var(--amber); background: var(--amber-soft); }
+    .finding { display: grid; grid-template-columns: 92px minmax(0, 1fr); gap: 20px; padding: 22px 0; border-top: 1px solid var(--line); }
+    .finding:last-child { border-bottom: 1px solid var(--line); }
+    .finding h3 { margin: 0 0 7px; }
+    .finding p:last-child { margin-bottom: 0; }
+    .evidence { color: var(--muted); font-size: 13px; }
+    ul, ol { margin: 10px 0 18px; padding-left: 22px; }
+    li { margin: 7px 0; }
+    .plan-step { display: grid; grid-template-columns: 110px minmax(0, 1fr) 160px; gap: 22px; padding: 20px 0; border-top: 1px solid var(--line); }
+    .phase { color: var(--purple); font-size: 12px; font-weight: 800; text-transform: uppercase; }
+    .exit { color: var(--muted); font-size: 13px; }
+    .two-col { display: grid; grid-template-columns: 1fr 1fr; gap: 36px; }
+    .feature-list { border-top: 1px solid var(--line); }
+    .feature { padding: 17px 0; border-bottom: 1px solid var(--line); }
+    .feature strong { display: block; margin-bottom: 4px; }
+    .feature span { color: var(--muted); font-size: 14px; }
+    .verification { background: var(--soft); padding: 22px; }
+    .verification pre { margin: 0; white-space: pre-wrap; font-size: 13px; line-height: 1.7; }
+    footer { margin-top: 60px; padding-top: 22px; border-top: 1px solid var(--line); color: var(--muted); font-size: 13px; }
+    @media (max-width: 900px) {
+      h1 { font-size: 34px; }
+      .metrics { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+      .metric:nth-child(3) { border-right: 0; }
+      .metric:nth-child(-n+3) { border-bottom: 1px solid var(--line); }
+      .flow { grid-template-columns: 1fr; gap: 8px; }
+      .arrow { transform: rotate(90deg); min-height: 24px; }
+      .two-col { grid-template-columns: 1fr; gap: 10px; }
+      .plan-step { grid-template-columns: 90px 1fr; }
+      .exit { grid-column: 2; }
+    }
+    @media (max-width: 620px) {
+      .shell, .masthead-inner { padding-left: 18px; padding-right: 18px; }
+      nav .inner { padding-left: 18px; padding-right: 18px; }
+      h1 { font-size: 30px; }
+      .dek { font-size: 16px; }
+      .metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .metric, .metric:nth-child(3) { border-right: 1px solid var(--line); border-bottom: 1px solid var(--line); }
+      .metric:nth-child(even) { border-right: 0; }
+      .metric:nth-last-child(-n+2) { border-bottom: 0; }
+      .finding { grid-template-columns: 1fr; gap: 9px; }
+      .plan-step { grid-template-columns: 1fr; gap: 8px; }
+      .exit { grid-column: 1; }
+      .table-wrap { overflow-x: auto; }
+      table { min-width: 720px; }
+    }
+  </style>
+</head>
+<body>
+  <header class="masthead">
+    <div class="masthead-inner">
+      <p class="eyebrow">Engineering audit / local service platform</p>
+      <h1>Anito System Audit</h1>
+      <p class="dek">Architecture, runtime reliability, CLI/API/MCP consistency, live error evidence, test posture, code smells, completed repairs, and the next remediation sequence.</p>
+      <div class="meta"><span>Audit date: 12 July 2026</span><span>Branch: <code>codex/anito-system-audit</code></span><span>Scope: repository + live daemon on <code>localhost:7700</code></span></div>
+    </div>
+  </header>
+  <nav aria-label="Report sections"><div class="inner"><a href="#summary">Summary</a><a href="#system">System</a><a href="#evidence">Live evidence</a><a href="#findings">Findings</a><a href="#mcp">MCP review</a><a href="#repairs">Repairs</a><a href="#plan">Plan</a><a href="#ideas">Feature ideas</a></div></nav>
+  <main class="shell">
+    <section id="summary">
+      <h2>Executive summary</h2>
+      <p class="lede">The central architecture is the right one: a persistent proxy owns each stable port, a process manager owns ephemeral backends, and a shared service layer coordinates health-gated replacement. The implementation is well tested for its size and the operator surfaces are unusually complete for a local tool.</p>
+      <div class="verdict"><strong>Verdict:</strong> the product model is sound, but the pre-audit lifecycle was not fully transactional. A rejected deploy could leave the healthy process detached while the registry described the rejected build. Runtime evidence also shows accumulated operational debt: stale registrations, repeated health failures, session residue, and documentation that has drifted from shipped behavior. The highest-risk lifecycle, timeout, environment, security, and session-growth defects are repaired in this branch.</div>
+      <div class="metrics" aria-label="Audit metrics">
+        <div class="metric"><strong>28</strong><span>registered live services</span></div>
+        <div class="metric good"><strong>10</strong><span>currently running</span></div>
+        <div class="metric bad"><strong>17</strong><span>currently failed</span></div>
+        <div class="metric warn"><strong>119</strong><span>runtime issue events</span></div>
+        <div class="metric warn"><strong>2,341</strong><span>persisted MCP sessions</span></div>
+        <div class="metric good"><strong>0</strong><span>reachable vulnerabilities after repair</span></div>
+      </div>
+    </section>
+
+    <section id="system">
+      <h2>What the system is</h2>
+      <p>Anito is best understood as a local production control plane for developer-owned services. It is not the hot-reload process itself. It gives other apps, browsers, tests, and agents a stable address while swapping the implementation behind that address.</p>
+      <div class="flow" aria-label="Anito request flow">
+        <div class="flow-box"><strong>Operator surfaces</strong><span>CLI, React dashboard, HTTP API, and MCP tools initiate deploy, status, logs, restart, stop, and setup workflows.</span></div>
+        <div class="arrow">&#8594;</div>
+        <div class="flow-box"><strong>Shared control primitive</strong><span><code>internal/service</code> coordinates registry, process lifecycle, health checks, proxy swap, watcher, receipts, logs, and notifications.</span></div>
+        <div class="arrow">&#8594;</div>
+        <div class="flow-box"><strong>Stable runtime</strong><span><code>internal/proxy</code> permanently owns consumer ports while <code>internal/process</code> starts services on ephemeral ports.</span></div>
+      </div>
+      <div class="two-col">
+        <div><h3>What is working well</h3><ul><li>The stable-port proxy is a clean, differentiated product primitive.</li><li>Health gating protects consumers from most bad starts.</li><li>Registry writes are atomic and multi-port data is backward compatible.</li><li>CLI lifecycle operations use the HTTP client, so they normally converge on the daemon-owned service layer.</li><li>Logs are available through HTTP/SSE rather than assuming filesystem access.</li><li>Focused Go coverage is strong across most internal packages, and the race suite passes.</li></ul></div>
+        <div><h3>Where the model leaks</h3><ul><li>Startup restore is duplicated in <code>cmd/anito/main.go</code> instead of owned by the service layer.</li><li><code>anito_setup</code> performs orchestration and file mutation inside the MCP transport layer.</li><li>Multi-port handlers are swapped one entry at a time, despite documentation calling the group atomic.</li><li>Stateless MCP transport is paired with persistent session tracking, producing thousands of low-value handshake records.</li><li>The issue store is an event log, but the UI and docs often treat it like a bug tracker.</li></ul></div>
+      </div>
+    </section>
+
+    <section id="evidence">
+      <h2>Live operational evidence</h2>
+      <p>The audit queried the running daemon through its HTTP interfaces. It did not stop, redeploy, remove, or otherwise mutate the 28 registered services.</p>
+      <div class="table-wrap"><table>
+        <thead><tr><th>Signal</th><th>Observed</th><th>Interpretation</th></tr></thead>
+        <tbody>
+          <tr><td>Service state</td><td>10 running, 17 failed, 1 orphaned</td><td>The registry is functioning as both active inventory and historical residue. Failed/stale services dominate the index.</td></tr>
+          <tr><td>Runtime issues</td><td>119 total: 117 errors, 2 warnings</td><td>These are attempts/events, not 119 unique Anito bugs.</td></tr>
+          <tr><td>Largest issue clusters</td><td>50+ health timeouts; 25 restore failures; repeated unknown service names; stale env/binary paths</td><td>Contract diagnostics, restore behavior, and registry hygiene matter more than raw error count.</td></tr>
+          <tr><td>MCP sessions</td><td>2,341 persisted; 2,304 never called a tool; 1,563 older than seven days</td><td>Stateless initialize traffic was being retained as durable usage telemetry.</td></tr>
+          <tr><td>Gomanan bug tracker</td><td>1 Anito bug, resolved</td><td>The tracked bug was the stale Vite worktree restart issue. The runtime issue file is not synchronized into unique tracked defects.</td></tr>
+          <tr><td>Security scan before repair</td><td>13 reachable vulnerabilities</td><td>All traces came from Go 1.25.6 and the older <code>x/net</code> dependency set.</td></tr>
+        </tbody>
+      </table></div>
+      <div class="callout"><strong>Error-log conclusion:</strong> health-check timeouts are the dominant symptom, but they had several causes: service contract violations, stale paths, environment-port override, startup restore retries, and a health request that could hang beyond its declared deadline. Counting rows without fingerprinting them overstates unique defects and understates recurring root causes.</div>
+    </section>
+
+    <section id="findings">
+      <h2>Ranked findings</h2>
+      <div class="finding"><div><span class="severity p1">P1</span> <span class="state fixed">Fixed</span></div><div><h3>Rejected deploys were not transactional</h3><p>Redeploy staged new registry metadata and detached the healthy process before readiness was known. On candidate failure, the old process could continue serving but become untracked, while later restarts used the rejected binary or environment. A later successful deploy could leak the detached process.</p><p class="evidence"><code>internal/service/service.go</code>, <code>internal/process/process.go</code>. Repaired with explicit candidate, detach, activate, restore, and drain primitives plus a real failed-redeploy integration test.</p></div></div>
+      <div class="finding"><div><span class="severity p1">P1</span> <span class="state fixed">Fixed</span></div><div><h3>Consumer env files could override Anito-owned ports</h3><p><code>env_file</code> variables were appended after <code>PORT</code>, <code>PORT_&lt;NAME&gt;</code>, and ASP.NET Core port variables. Duplicate environment keys resolve to the last value, allowing an old fixed port in <code>.env</code> to defeat the ephemeral-port contract and cause health timeouts.</p><p class="evidence"><code>internal/process/process.go</code>. Consumer variables now load first and Anito-owned values are appended last.</p></div></div>
+      <div class="finding"><div><span class="severity p1">P1</span> <span class="state fixed">Fixed</span></div><div><h3>Partial MCP redeploys reset omitted service configuration</h3><p>The documented name-and-path redeploy workflow rebuilt the service record from zero values, silently dropping args, env file, custom health policy, watch paths, restart policy, and config provenance.</p><p class="evidence"><code>internal/mcp/mcp.go</code>. MCP redeploy now merges omitted registered fields by default and exposes <code>replace_config: true</code> for intentional full replacement.</p></div></div>
+      <div class="finding"><div><span class="severity p1">P1</span> <span class="state fixed">Fixed</span></div><div><h3>Health checks could exceed their configured timeout</h3><p>The readiness loop used <code>http.Get</code> without a request context. A backend that accepted TCP and withheld headers could block indefinitely despite <code>health_check_timeout</code>.</p><p class="evidence"><code>internal/service/service.go</code>. Each attempt now receives a deadline bounded by the remaining overall timeout.</p></div></div>
+      <div class="finding"><div><span class="severity p1">P1</span> <span class="state fixed">Fixed</span></div><div><h3>Toolchain vulnerabilities were reachable</h3><p><code>govulncheck</code> found 13 reachable standard-library and <code>x/net</code> vulnerabilities. The repository only declared Go 1.25.0 and was building with Go 1.25.6.</p><p class="evidence"><code>go.mod</code> now pins toolchain 1.25.12 and updates <code>x/net</code> plus linked <code>x/*</code> modules. Post-repair scan: zero reachable vulnerabilities.</p></div></div>
+      <div class="finding"><div><span class="severity p2">P2</span> <span class="state fixed">Fixed</span></div><div><h3>Lifecycle history never completed</h3><p>Every start was appended with <code>exit_code=-1</code>, but no production path filled in the exit code or duration. The dashboard therefore displayed historical processes as currently running.</p><p class="evidence"><code>internal/registry/registry.go</code>, <code>internal/process/process.go</code>. Starts are recorded and completed centrally by the process manager.</p></div></div>
+      <div class="finding"><div><span class="severity p2">P2</span> <span class="state fixed">Fixed</span></div><div><h3>Session telemetry grew without a bound</h3><p>Every session create/touch rewrote the entire JSON store. The live file reached 2,341 records and 508 KB, with 98% of entries never calling a tool.</p><p class="evidence"><code>internal/sessions/sessions.go</code>. Writes are now atomic and the store keeps the 500 most recently active sessions.</p></div></div>
+      <div class="finding"><div><span class="severity p2">P2</span> <span class="state fixed">Fixed</span></div><div><h3>Registry pointers and watcher debounce state escaped synchronization</h3><p>Registry reads returned mutable internal pointers and maps. The watcher timer callback accessed shared debounce state from a separate goroutine. Both patterns were vulnerable to future data races even though the current race suite did not trigger them.</p><p class="evidence"><code>internal/registry/registry.go</code>, <code>internal/watcher/watcher.go</code>. Registry values are deep-copied at boundaries and debounce state is synchronized with generation checks.</p></div></div>
+      <div class="finding"><div><span class="severity p1">P1</span> <span class="state open">Open</span></div><div><h3>Daemon startup restore is serialized and outside the service layer</h3><p><code>runDaemon</code> opens proxies, starts processes, waits for health, updates registry state, and logs issues itself. Running services are restored one by one before the management API or MCP server starts. Startup latency can become the sum of multiple 15-90 second health timeouts, and the logic can drift from deploy/restart behavior.</p><p class="evidence"><code>cmd/anito/main.go</code> is 952 lines and contains a second lifecycle orchestrator. This needs a tested <code>Service.RestoreAll</code> primitive and a bounded-concurrency rollout.</p></div></div>
+      <div class="finding"><div><span class="severity p1">P1</span> <span class="state open">Open</span></div><div><h3>Multi-port “atomic” swap is not atomic across the group</h3><p><code>SwapPorts</code> validates all entries first, then stores each new handler independently. Requests arriving during that short loop can observe a mixture of old and new backends across named ports.</p><p class="evidence"><code>internal/proxy/proxy.go</code>. Correct implementation requires a shared generation/routing snapshot, not more locking around individual stores.</p></div></div>
+      <div class="finding"><div><span class="severity p2">P2</span> <span class="state open">Open</span></div><div><h3>Operational records lack lifecycle and ownership</h3><p>The issue store supports append, list, source filtering, and clear-all. It has no fingerprint, occurrence count, acknowledgement, resolution, or link to a tracked bug. The service registry similarly has no explicit “archived” or “stale” state, leaving 17 failed entries mixed with active services.</p><p class="evidence"><code>internal/issues</code>, <code>GET /issues</code>, and the live registry. This is why the system appears to have “a lot of bugs” without a reliable count of unique bugs.</p></div></div>
+      <div class="finding"><div><span class="severity p2">P2</span> <span class="state open">Open</span></div><div><h3>Large transport and orchestration files blur ownership</h3><p>Production files now include <code>service.go</code> at roughly 1,350 lines, <code>main.go</code> at 952, and <code>mcp.go</code> above 920. The size is a symptom: setup, runtime lifecycle, logs, case studies, crash recovery, and transport mapping share files and make focused testing harder.</p><p class="evidence">7,593 production Go lines, 11,570 Go test lines, 466 Go tests. The test investment is good; the module boundaries should catch up.</p></div></div>
+      <div class="finding"><div><span class="severity p2">P2</span> <span class="state open">Open</span></div><div><h3>Frontend and delivery automation have no executable safety net</h3><p>The React app builds successfully but has no <code>test</code> script, component tests, accessibility checks, or browser smoke suite. No GitHub Actions workflow is checked in. The Go coverage gate had also drifted below three declared floors until focused tests were added in this audit.</p><p class="evidence"><code>internal/server/ui/package.json</code>, absent <code>.github/workflows</code>, and <code>scripts/coverage</code>.</p></div></div>
+    </section>
+
+    <section id="mcp">
+      <h2>MCP review</h2>
+      <p class="lede">The MCP concept is one of Anito's strongest product decisions. The current tool set covers the important operator loop, but transport code has accumulated business logic and the diagnostic responses were too thin.</p>
+      <div class="table-wrap"><table>
+        <thead><tr><th>Area</th><th>Assessment</th><th>Recommendation</th></tr></thead>
+        <tbody>
+          <tr><td>Lifecycle tools</td><td><code>deploy</code>, <code>services</code>, <code>status</code>, <code>logs</code>, <code>restart</code>, <code>rollback</code>, <code>stop</code>, and <code>remove</code> map to the shared service layer.</td><td>Keep this shape. Add typed error categories and consistent recovery hints rather than more narrow tools.</td></tr>
+          <tr><td>Status payloads</td><td>Before this audit they omitted restart policy, health policy, crash state, and start history.</td><td><span class="state fixed">Fixed</span> Responses now include the operational fields agents need.</td></tr>
+          <tr><td>Redeploy semantics</td><td>The common partial redeploy call previously cleared omitted registered settings.</td><td><span class="state fixed">Fixed</span> Omitted fields are preserved unless <code>replace_config</code> is true.</td></tr>
+          <tr><td>Setup</td><td><code>anito_setup</code> plans, writes files, patches source, and reserves ports inside <code>internal/mcp</code>.</td><td>Move plan/apply into a shared setup application service. Expose it through MCP, HTTP, and CLI with identical dry-run output.</td></tr>
+          <tr><td>Parity</td><td>HTTP has metrics, sessions, issue clearing, and streaming logs; MCP has setup, reserve, and case-study submission. CLI has a simpler local setup path.</td><td>Define a capability matrix intentionally. Core operations should share primitives; not every presentation-only endpoint needs an MCP tool.</td></tr>
+          <tr><td>Session model</td><td>The server is intentionally stateless, yet persistent sessions imply durable connection identity that does not really exist.</td><td>Track client activity or tool-call cohorts, not “connected sessions,” unless the transport becomes stateful.</td></tr>
+          <tr><td>Testing</td><td>MCP package coverage is 27.1% after this audit; most tool registrations are not exercised end to end.</td><td>Add an in-process Streamable HTTP harness that initializes, lists tools, validates schemas, and executes every read-only tool plus isolated lifecycle fixtures.</td></tr>
+        </tbody>
+      </table></div>
+      <div class="callout"><strong>Recommended MCP direction:</strong> prefer a smaller number of high-context tools over a proliferation of commands. A future read-only <code>anito_diagnose</code> could compose service status, doctor results, recent logs, matching issue fingerprints, and a safe next action through one shared diagnostic primitive.</div>
+    </section>
+
+    <section id="repairs">
+      <h2>Repairs completed in this audit</h2>
+      <div class="table-wrap"><table>
+        <thead><tr><th>Repair</th><th>Result</th><th>Primary files</th></tr></thead>
+        <tbody>
+          <tr><td>Transactional candidate lifecycle</td><td>Failed deploy/restart restores previous process, proxy target, and deployment metadata; candidates cannot trigger active crash policy.</td><td><code>process.go</code>, <code>service.go</code></td></tr>
+          <tr><td>Authoritative port environment</td><td>Parent and env-file values cannot override Anito's ephemeral port contract.</td><td><code>process.go</code></td></tr>
+          <tr><td>Bounded health requests</td><td>Hung response headers cannot exceed the configured readiness deadline.</td><td><code>service.go</code></td></tr>
+          <tr><td>Accurate lifecycle history</td><td>Starts receive real exit codes and durations; intentional stops and rejected candidates are distinguished.</td><td><code>registry.go</code>, <code>process.go</code></td></tr>
+          <tr><td>Input/path hardening</td><td>Unsafe service names and invalid binary/static paths are rejected before log or registry paths are derived.</td><td><code>service.go</code></td></tr>
+          <tr><td>Registry boundary safety</td><td>Callers receive deep copies rather than mutable internal state.</td><td><code>registry.go</code></td></tr>
+          <tr><td>Session retention</td><td>Atomic writes and a 500-record recency cap prevent unbounded JSON rewrites.</td><td><code>sessions.go</code></td></tr>
+          <tr><td>Watcher debounce safety</td><td>Timer bookkeeping is synchronized and coalesced counts reset per restart.</td><td><code>watcher.go</code></td></tr>
+          <tr><td>MCP diagnostics</td><td>Services/status output includes health, restart, crash, and recent lifecycle state.</td><td><code>mcp.go</code></td></tr>
+          <tr><td>MCP partial redeploy safety</td><td>Name-and-path redeploys preserve omitted runtime configuration; complete replacement is explicit.</td><td><code>mcp.go</code></td></tr>
+          <tr><td>Supply-chain update</td><td>Go 1.25.12 and patched <code>x/*</code> dependencies; reachable vulnerability count reduced from 13 to 0.</td><td><code>go.mod</code>, <code>go.sum</code></td></tr>
+          <tr><td>Coverage gate repair</td><td>Focused tests restore <code>issues</code>, <code>registry</code>, and <code>proxy</code> above their declared floors.</td><td>package test files</td></tr>
+          <tr><td>Documentation truth pass</td><td>Removed claims for unimplemented SSE first-event readiness and stale “not built” dashboard/CLI statements.</td><td><code>README.md</code>, <code>docs/</code></td></tr>
+        </tbody>
+      </table></div>
+    </section>
+
+    <section id="plan">
+      <h2>Remediation plan</h2>
+      <div class="plan-step"><div class="phase">Phase 0<br>Completed</div><div><strong>Protect the running service contract.</strong><br>Land candidate rollback, deadline enforcement, port ownership, accurate lifecycle history, path validation, security updates, session cap, watcher synchronization, and regression tests.</div><div class="exit">Exit: race suite, coverage floors, UI build, and vulnerability scan pass.</div></div>
+      <div class="plan-step"><div class="phase">Phase 1<br>Reliability</div><div><strong>Move daemon restore into the shared service layer.</strong><br>Build a two-phase restore primitive: register all listeners first, then restore binaries with bounded concurrency and candidate activation. Add a startup state model so liveness can respond while mutations wait for reconciliation.</div><div class="exit">Exit: restore time bounded by the slowest concurrency wave, dependency fixtures pass, no lifecycle code remains in <code>main.go</code>.</div></div>
+      <div class="plan-step"><div class="phase">Phase 2<br>Control plane</div><div><strong>Unify setup and diagnostics.</strong><br>Create shared plan/apply and diagnose primitives. Map CLI, HTTP, dashboard, and MCP to the same request/result types. Introduce typed domain errors for not-found, invalid config, readiness failure, and conflict.</div><div class="exit">Exit: a parity contract test proves equivalent behavior across surfaces.</div></div>
+      <div class="plan-step"><div class="phase">Phase 3<br>Operations</div><div><strong>Turn logs into manageable operational records.</strong><br>Add issue fingerprints, occurrence counters, first/last seen, acknowledge/resolve state, and an optional tracker link. Add explicit archive/prune flows for stale service registrations.</div><div class="exit">Exit: dashboard count represents unique active problems, not raw attempts.</div></div>
+      <div class="plan-step"><div class="phase">Phase 4<br>Architecture</div><div><strong>Make multi-port activation genuinely atomic.</strong><br>Replace per-entry handler updates with one immutable routing generation referenced by every named listener. Split lifecycle, logs, setup, crash policy, and case-study concerns into focused application services.</div><div class="exit">Exit: concurrency test cannot observe mixed generations; production files have clear ownership.</div></div>
+      <div class="plan-step"><div class="phase">Phase 5<br>Delivery</div><div><strong>Add executable UI and release gates.</strong><br>Introduce component tests for filters/actions/errors, Playwright smoke tests for service index and logs, accessibility checks, and CI for Go tests, race-critical packages, coverage floors, UI build, and <code>govulncheck</code>.</div><div class="exit">Exit: every pull request runs the same checks used in this audit.</div></div>
+    </section>
+
+    <section id="ideas">
+      <h2>Feature ideas - not implemented</h2>
+      <p>These build on the current product without turning Anito into a cluster manager or cloud platform.</p>
+      <div class="feature-list">
+        <div class="feature"><strong>One-shot diagnose and repair plan</strong><span>A read-only command/tool that combines status, doctor, recent logs, issue fingerprints, config provenance, and a proposed recovery sequence. Require explicit confirmation before any restart or file change.</span></div>
+        <div class="feature"><strong>Cold-start workspace onboarding</strong><span>Use the existing design work as a real setup surface: inspect repository, show service contract gaps, preview generated files and port allocations, apply, deploy, then graduate to the services index.</span></div>
+        <div class="feature"><strong>Service provenance and stale-state inbox</strong><span>Show which repo/worktree/config owns each registration, whether that source still exists, and offer “adopt,” “archive,” or “remove” instead of leaving failed rows indefinitely.</span></div>
+        <div class="feature"><strong>Dependency-aware restore groups</strong><span>Let composite setups declare startup dependencies and health dependencies. Restore independent services concurrently and gate dependents without requiring general-purpose orchestration.</span></div>
+        <div class="feature"><strong>Typed activity stream</strong><span>Publish structured deploy, watch, restart, crash, restore, and issue-state events instead of parsing daemon log text. The dashboard and agents can consume one bounded event feed.</span></div>
+        <div class="feature"><strong>Local service aliases</strong><span>Optional human-readable aliases such as <code>my-api.anito.local</code> would remove port memorization while preserving stable ports underneath. This needs careful macOS resolver design and should remain optional.</span></div>
+      </div>
+    </section>
+
+    <section id="verification">
+      <h2>Verification record</h2>
+      <div class="verification"><pre>go test ./... -count=1                     PASS
+go test -race ./... -count=1               PASS
+go vet ./...                               PASS
+make coverage-check                        PASS after focused floor repairs
+npm run build                              PASS (123 modules)
+govulncheck ./...                          PASS - 0 reachable vulnerabilities
+live daemon /health                        PASS - status ok
+Gomanan bug list, project anito             1 resolved / 0 open</pre></div>
+      <p style="margin-top:14px;color:var(--muted);font-size:13px">The live daemon was audited read-only. This branch was not installed or reloaded during the audit, so existing internal development services were not interrupted.</p>
+    </section>
+
+    <footer>Prepared from repository source, project documentation and ADRs, test and coverage output, <code>govulncheck</code>, Gomanan bug records, and the live Anito management APIs. Report file: <code>work/anito-system-audit-2026-07-12.html</code>.</footer>
+  </main>
+</body>
+</html>

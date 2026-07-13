@@ -24,14 +24,31 @@ type runningProc struct {
 	internalPort  int            // primary port (backward compat)
 	internalPorts map[string]int // all named ephemeral ports
 	logFile       *os.File
+	startedAt     time.Time
+	candidate     bool
 	done          chan struct{} // closed by the Start goroutine when the process exits
+}
+
+// DetachedProcess is a live process temporarily removed from the manager while
+// a replacement candidate is health-checked. It can be restored if the
+// candidate fails or drained after a successful proxy swap.
+type DetachedProcess struct {
+	name string
+	proc *runningProc
+}
+
+func (p *DetachedProcess) PID() int {
+	if p == nil || p.proc == nil || p.proc.cmd == nil || p.proc.cmd.Process == nil {
+		return 0
+	}
+	return p.proc.cmd.Process.Pid
 }
 
 // Manager supervises running processes.
 type Manager struct {
 	mu       sync.RWMutex
 	procs    map[string]*runningProc
-	draining map[int]bool // PIDs being intentionally killed; crash monitor ignores these
+	draining map[int]int // PID -> recorded exit code; crash monitor ignores these
 	logDir   string
 	reg      *registry.Registry
 	OnCrash  func(name string) // called when a process exits unexpectedly; may be nil
@@ -43,7 +60,7 @@ func New(logDir string, reg *registry.Registry) (*Manager, error) {
 	}
 	return &Manager{
 		procs:    make(map[string]*runningProc),
-		draining: make(map[int]bool),
+		draining: make(map[int]int),
 		logDir:   logDir,
 		reg:      reg,
 	}, nil
@@ -56,7 +73,7 @@ func (m *Manager) MarkDraining(pid int) {
 		return
 	}
 	m.mu.Lock()
-	m.draining[pid] = true
+	m.draining[pid] = 0
 	m.mu.Unlock()
 }
 
@@ -64,6 +81,16 @@ func (m *Manager) MarkDraining(pid int) {
 // For single-port services, returns a single-entry map {"default": port}.
 // The caller is responsible for health-checking the process before swapping the proxy.
 func (m *Manager) Start(svc *registry.Service) (map[string]int, error) {
+	return m.start(svc, false)
+}
+
+// StartCandidate launches a replacement process that must not trigger active
+// crash recovery until Activate is called after a successful proxy swap.
+func (m *Manager) StartCandidate(svc *registry.Service) (map[string]int, error) {
+	return m.start(svc, true)
+}
+
+func (m *Manager) start(svc *registry.Service, candidate bool) (map[string]int, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -105,20 +132,25 @@ func (m *Manager) Start(svc *registry.Service) (map[string]int, error) {
 		return nil, fmt.Errorf("failed to start %q: %w", svc.Name, err)
 	}
 
-	primaryPort := svc.PrimaryInternalPort()
-	if primaryPort == 0 {
-		// Use the first port from our allocated set.
-		for _, p := range ports {
-			primaryPort = p
-			break
-		}
-	}
+	primaryPort := primaryPortFromMap(ports, svc.HealthCheckPort)
 
+	startedAt := time.Now()
 	done := make(chan struct{})
-	rp := &runningProc{cmd: cmd, internalPort: primaryPort, internalPorts: ports, logFile: logFile, done: done}
+	rp := &runningProc{
+		cmd:           cmd,
+		internalPort:  primaryPort,
+		internalPorts: copyPorts(ports),
+		logFile:       logFile,
+		startedAt:     startedAt,
+		candidate:     candidate,
+		done:          done,
+	}
 	m.procs[svc.Name] = rp
 	if regErr := m.reg.UpdateInternalPorts(svc.Name, ports); regErr != nil {
 		log.Printf("[ERROR] name=%s registry port update failed: %v", svc.Name, regErr)
+	}
+	if regErr := m.reg.RecordStart(svc.Name, startedAt); regErr != nil {
+		log.Printf("[ERROR] name=%s registry start update failed: %v", svc.Name, regErr)
 	}
 
 	// Watch for unexpected exit. This is the sole goroutine that calls cmd.Wait().
@@ -132,9 +164,16 @@ func (m *Manager) Start(svc *registry.Service) (map[string]int, error) {
 		if current, ok := m.procs[svc.Name]; ok && current.cmd == cmd {
 			delete(m.procs, svc.Name)
 		}
-		isDraining := m.draining[pid]
+		exitCode, isDraining := m.draining[pid]
+		isCandidate := rp.candidate
 		delete(m.draining, pid)
 		m.mu.Unlock()
+		if !isDraining {
+			exitCode = processExitCode(cmd.ProcessState)
+		}
+		if regErr := m.reg.CompleteStart(svc.Name, startedAt, exitCode, time.Since(startedAt)); regErr != nil {
+			log.Printf("[ERROR] name=%s registry start completion failed: %v", svc.Name, regErr)
+		}
 
 		// Close this process's log file descriptor.
 		if logFile != nil {
@@ -144,6 +183,10 @@ func (m *Manager) Start(svc *registry.Service) (map[string]int, error) {
 		if isDraining {
 			log.Printf("[DRAIN] name=%s pid=%d", svc.Name, pid)
 			return // intentional kill — not a crash
+		}
+		if isCandidate {
+			log.Printf("[CANDIDATE_EXIT] name=%s pid=%d exit=%d", svc.Name, pid, exitCode)
+			return
 		}
 
 		if regErr := m.reg.UpdateStatus(svc.Name, registry.StatusFailed, 0); regErr != nil {
@@ -158,6 +201,19 @@ func (m *Manager) Start(svc *registry.Service) (map[string]int, error) {
 	return ports, nil
 }
 
+// Activate promotes a healthy candidate to the active process after its proxy
+// handlers have been swapped.
+func (m *Manager) Activate(name string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	rp, ok := m.procs[name]
+	if !ok {
+		return fmt.Errorf("service %q candidate exited before activation", name)
+	}
+	rp.candidate = false
+	return nil
+}
+
 // Stop sends SIGTERM to the named service, then SIGKILL after drainTimeout.
 func (m *Manager) Stop(name string) error {
 	m.mu.Lock()
@@ -165,7 +221,7 @@ func (m *Manager) Stop(name string) error {
 	if ok {
 		delete(m.procs, name)
 		if rp.cmd.Process != nil {
-			m.draining[rp.cmd.Process.Pid] = true
+			m.draining[rp.cmd.Process.Pid] = 0
 		}
 	}
 	m.mu.Unlock()
@@ -177,26 +233,70 @@ func (m *Manager) Stop(name string) error {
 	return drainProc(rp.cmd, rp.done)
 }
 
-// Deprecated: StopPID has a goroutine leak — proc.Wait() races with the
-// cmd.Wait() goroutine from Start(). Use Deregister() + DrainProc() instead,
-// which reuses the Start goroutine's done channel and avoids the double-wait.
-// Kept temporarily for backward compatibility; will be removed before v1.0.
-func StopPID(pid int) {
-	proc, err := os.FindProcess(pid)
-	if err != nil {
-		return
+// StopFailed terminates a candidate process that failed readiness. Its start
+// history entry is recorded as failed rather than as an intentional stop.
+func (m *Manager) StopFailed(name string) error {
+	m.mu.Lock()
+	rp, ok := m.procs[name]
+	if ok {
+		delete(m.procs, name)
+		if rp.cmd.Process != nil {
+			m.draining[rp.cmd.Process.Pid] = 1
+		}
 	}
-	_ = proc.Signal(syscall.SIGTERM)
-	done := make(chan struct{})
-	go func() {
-		_, _ = proc.Wait()
-		close(done)
-	}()
+	m.mu.Unlock()
+
+	if !ok {
+		return fmt.Errorf("service %q is not running", name)
+	}
+	return drainProc(rp.cmd, rp.done)
+}
+
+// Detach temporarily removes a live process so a replacement can use the same
+// service name. The detached process keeps serving through the existing proxy.
+func (m *Manager) Detach(name string) *DetachedProcess {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	rp, ok := m.procs[name]
+	if !ok {
+		return nil
+	}
+	delete(m.procs, name)
+	if rp.cmd != nil && rp.cmd.Process != nil {
+		m.draining[rp.cmd.Process.Pid] = 0
+	}
+	return &DetachedProcess{name: name, proc: rp}
+}
+
+// Restore reattaches a detached process after a replacement candidate fails.
+func (m *Manager) Restore(detached *DetachedProcess) error {
+	if detached == nil || detached.proc == nil {
+		return nil
+	}
 	select {
-	case <-done:
-	case <-time.After(drainTimeout):
-		_ = proc.Signal(syscall.SIGKILL)
+	case <-detached.proc.done:
+		return fmt.Errorf("service %q previous process already exited", detached.name)
+	default:
 	}
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if _, exists := m.procs[detached.name]; exists {
+		return fmt.Errorf("service %q already has a tracked process", detached.name)
+	}
+	if pid := detached.PID(); pid > 0 {
+		delete(m.draining, pid)
+	}
+	m.procs[detached.name] = detached.proc
+	return nil
+}
+
+// Drain terminates a detached process after its replacement becomes live.
+func (m *Manager) Drain(detached *DetachedProcess) error {
+	if detached == nil || detached.proc == nil {
+		return nil
+	}
+	return drainProc(detached.proc.cmd, detached.proc.done)
 }
 
 // Restart stops the old process (if running) then starts a new one.
@@ -266,7 +366,7 @@ func (m *Manager) InternalPorts(name string) map[string]int {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	if rp, ok := m.procs[name]; ok {
-		return rp.internalPorts
+		return copyPorts(rp.internalPorts)
 	}
 	return nil
 }
@@ -280,6 +380,17 @@ func (m *Manager) buildCmd(svc *registry.Service, ports map[string]int) (*exec.C
 
 	cmd := exec.Command(svc.BinaryPath, svc.Args...)
 	cmd.Env = os.Environ()
+
+	// Load consumer variables before adding Anito-owned port variables. os/exec
+	// resolves duplicate keys using the last value, so PORT and related values
+	// injected below cannot be overridden by the parent environment or env_file.
+	if svc.EnvFile != "" {
+		envVars, err := loadEnvFile(svc.EnvFile)
+		if err != nil {
+			return nil, nil, fmt.Errorf("loading env file: %w", err)
+		}
+		cmd.Env = append(cmd.Env, envVars...)
+	}
 
 	// Inject ephemeral port env vars.
 	isMultiPort := len(ports) > 1 || (len(ports) == 1 && !hasDefaultOnly(ports))
@@ -308,14 +419,6 @@ func (m *Manager) buildCmd(svc *registry.Service, ports map[string]int) (*exec.C
 			cmd.Env = append(cmd.Env, "ASPNETCORE_HTTP_PORTS="+portStr)
 			cmd.Env = append(cmd.Env, "ASPNETCORE_URLS=http://localhost:"+portStr)
 		}
-	}
-
-	if svc.EnvFile != "" {
-		envVars, err := loadEnvFile(svc.EnvFile)
-		if err != nil {
-			return nil, nil, fmt.Errorf("loading env file: %w", err)
-		}
-		cmd.Env = append(cmd.Env, envVars...)
 	}
 
 	outPath := filepath.Join(m.logDir, svc.Name+".log")
@@ -350,6 +453,30 @@ func primaryPortFromMap(ports map[string]int, healthCheckPort string) int {
 		return p
 	}
 	return 0
+}
+
+func copyPorts(ports map[string]int) map[string]int {
+	if len(ports) == 0 {
+		return nil
+	}
+	copy := make(map[string]int, len(ports))
+	for name, port := range ports {
+		copy[name] = port
+	}
+	return copy
+}
+
+func processExitCode(state *os.ProcessState) int {
+	if state == nil {
+		return 1
+	}
+	if code := state.ExitCode(); code >= 0 {
+		return code
+	}
+	if status, ok := state.Sys().(syscall.WaitStatus); ok && status.Signaled() {
+		return 128 + int(status.Signal())
+	}
+	return 1
 }
 
 // freePort asks the OS for an available TCP port.

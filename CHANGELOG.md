@@ -8,6 +8,14 @@ Format: `## [date] — description`, breaking changes marked **BREAKING**.
 
 ---
 
+## 2026-07-12 — Safer process replacement and richer MCP status
+
+**MCP:** `anito_services` and `anito_status` responses now include additive operational fields: `args`, `env_file`, `health_check`, `health_check_timeout`, `drain_window`, `watch_paths`, `restart_policy`, `crash_attempts`, `gave_up`, `last_started_at`, and `start_history`. Partial `anito_deploy` redeploys now preserve omitted registered configuration by default; callers can pass the new `replace_config: true` field to request complete replacement semantics.
+
+**Lifecycle:** Failed deploy and restart candidates now restore the previous tracked process and deployment metadata. Consumer-provided environment files can no longer override Anito-owned `PORT`, `PORT_<NAME>`, or ASP.NET Core port variables. Start-history entries are completed with exit code and duration when a process exits.
+
+**Operations:** Persistent MCP session history is capped at the 500 most recently active sessions and is written atomically, preventing handshake-heavy clients from growing `sessions.json` without bound.
+
 ## 2026-05-09 — Artifact-based generated versions
 
 **Config:** New optional `version_path` field. When `version` is omitted, Anito hashes `version_path` instead of `output` to generate the `sha:xxxxxxxx` service version. This is intended for services whose `output` is a stable wrapper script while the real deployable artifact is a built file or directory.

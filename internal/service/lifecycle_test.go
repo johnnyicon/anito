@@ -5,6 +5,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strconv"
 	"sync"
 	"testing"
@@ -27,6 +28,10 @@ func TestHelperFakeServiceLifecycle(t *testing.T) {
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
+		if os.Getenv("TEST_UNHEALTHY") == "1" {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			return
+		}
 		w.WriteHeader(http.StatusOK)
 	})
 	srv := &http.Server{Addr: fmt.Sprintf("localhost:%d", port), Handler: mux}
@@ -183,6 +188,77 @@ func TestConcurrentDeploy_Serialized(t *testing.T) {
 	}
 	if got.Status != registry.StatusRunning {
 		t.Errorf("status = %q after concurrent deploys, want %q", got.Status, registry.StatusRunning)
+	}
+}
+
+func TestFailedRedeployRestoresServingProcessAndRegistry(t *testing.T) {
+	t.Setenv("TEST_HELPER", "fake_service_lifecycle")
+	svc := newTestService(t)
+	healthyEnv := filepath.Join(t.TempDir(), "healthy.env")
+	unhealthyEnv := filepath.Join(t.TempDir(), "unhealthy.env")
+	if err := os.WriteFile(healthyEnv, []byte("TEST_UNHEALTHY=0\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(unhealthyEnv, []byte("TEST_UNHEALTHY=1\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	first, err := svc.Deploy(DeployRequest{
+		Name:               "failed-redeploy",
+		Version:            "good",
+		Type:               registry.TypeBinary,
+		Path:               os.Args[0],
+		Args:               []string{"-test.run=TestHelperFakeServiceLifecycle", "-test.v"},
+		EnvFile:            healthyEnv,
+		HealthCheck:        "/health",
+		HealthCheckTimeout: 5 * time.Second,
+		DrainWindow:        time.Millisecond,
+	})
+	if err != nil {
+		t.Fatalf("initial deploy: %v", err)
+	}
+	t.Cleanup(func() { _ = svc.Stop("failed-redeploy") })
+	originalPID := first.PID
+
+	_, err = svc.Deploy(DeployRequest{
+		Name:               "failed-redeploy",
+		Version:            "bad",
+		Type:               registry.TypeBinary,
+		Path:               os.Args[0],
+		Args:               []string{"-test.run=TestHelperFakeServiceLifecycle", "-test.v"},
+		EnvFile:            unhealthyEnv,
+		HealthCheck:        "/health",
+		HealthCheckTimeout: 300 * time.Millisecond,
+		DrainWindow:        time.Millisecond,
+	})
+	if err == nil {
+		t.Fatal("unhealthy redeploy unexpectedly succeeded")
+	}
+
+	restored, err := svc.Status("failed-redeploy")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if restored.Version != "good" || restored.EnvFile != healthyEnv {
+		t.Fatalf("registry retained rejected deploy: version=%q env=%q", restored.Version, restored.EnvFile)
+	}
+	if restored.Status != registry.StatusRunning || restored.PID != originalPID {
+		t.Fatalf("restored runtime = status %q pid %d, want running pid %d", restored.Status, restored.PID, originalPID)
+	}
+	if got := svc.mgr.PID("failed-redeploy"); got != originalPID {
+		t.Fatalf("tracked PID = %d, want restored PID %d", got, originalPID)
+	}
+	if len(restored.StartHistory) != 2 || restored.StartHistory[1].ExitCode != 1 {
+		t.Fatalf("start history = %+v, want rejected candidate recorded with exit 1", restored.StartHistory)
+	}
+
+	resp, err := http.Get(restored.Address() + "/health") //nolint:noctx
+	if err != nil {
+		t.Fatalf("stable proxy after failed redeploy: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("stable proxy status = %d, want 200 from restored process", resp.StatusCode)
 	}
 }
 

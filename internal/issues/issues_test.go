@@ -361,3 +361,23 @@ func TestRoundTripPreservesAllFields(t *testing.T) {
 		t.Errorf("Severity = %q, want %q", got.Severity, original.Severity)
 	}
 }
+
+func TestClearRemovesAllIssues(t *testing.T) {
+	s := New(t.TempDir())
+	if err := s.Append(Issue{Error: "first"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Append(Issue{Error: "second"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Clear(); err != nil {
+		t.Fatal(err)
+	}
+	got, err := s.Recent(0, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 0 {
+		t.Fatalf("issues after Clear = %d, want 0", len(got))
+	}
+}

@@ -201,6 +201,52 @@ func TestRegisterIdempotent(t *testing.T) {
 	}
 }
 
+func TestRegisterRebindsExistingServiceToNewPort(t *testing.T) {
+	m := NewManager()
+	oldPort := freePort(t)
+	newPort := freePort(t)
+	if err := m.Register("rebind", oldPort); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { m.Remove("rebind") })
+	if err := m.Register("rebind", newPort); err != nil {
+		t.Fatal(err)
+	}
+	if got := m.StablePort("rebind"); got != newPort {
+		t.Fatalf("StablePort = %d, want rebound port %d", got, newPort)
+	}
+	time.Sleep(10 * time.Millisecond)
+	resp, err := http.Get(fmt.Sprintf("http://127.0.0.1:%d/", newPort)) //nolint:noctx
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("rebound listener status = %d, want 503", resp.StatusCode)
+	}
+}
+
+func TestRegisterFailedRebindKeepsExistingListener(t *testing.T) {
+	m := NewManager()
+	oldPort := freePort(t)
+	if err := m.Register("failed-rebind", oldPort); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { m.Remove("failed-rebind") })
+	occupied, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer occupied.Close()
+	badPort := occupied.Addr().(*net.TCPAddr).Port
+	if err := m.Register("failed-rebind", badPort); err == nil {
+		t.Fatal("expected rebind to occupied port to fail")
+	}
+	if got := m.StablePort("failed-rebind"); got != oldPort {
+		t.Fatalf("StablePort = %d after failed rebind, want %d", got, oldPort)
+	}
+}
+
 func TestRegisterWithBindUsesExplicitAddress(t *testing.T) {
 	m := NewManager()
 	port := freePort(t)
