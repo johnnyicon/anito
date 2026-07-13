@@ -1,118 +1,496 @@
-// Package issues provides an append-only JSONL store for Anito runtime issues.
-// Issues are logged automatically when MCP tools or HTTP API handlers fail,
-// and can be logged manually by consuming repos via POST /issues or anito_report.
+// Package issues provides a persistent issue store for Anito runtime issues.
+// Legacy JSONL logs are migrated in-memory into aggregated issue records,
+// then rewritten as versioned JSON on the next mutation.
 package issues
 
 import (
 	"bufio"
+	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
-// Issue is one logged event.
-type Issue struct {
+const currentStoreVersion = 1
+
+var (
+	generatedIDSeq uint64
+
+	nonAlphaNumRE      = regexp.MustCompile(`[^a-z0-9]+`)
+	isoTimestampRE     = regexp.MustCompile(`\b\d{4}-\d{2}-\d{2}[tT ][0-9:.+\-zZ]+\b`)
+	timeOfDayRE        = regexp.MustCompile(`\b\d{2}:\d{2}:\d{2}(?:\.\d+)?\b`)
+	pidRE              = regexp.MustCompile(`\bpid(?:\s*|[=:])\d+\b`)
+	portWordRE         = regexp.MustCompile(`\bport(?:\s*|[=:])\d{2,5}\b`)
+	hostPortRE         = regexp.MustCompile(`\b(?:localhost|127\.0\.0\.1|0\.0\.0\.0|\[::1\])(?::\d{2,5})\b`)
+	listenPortRE       = regexp.MustCompile(`\blisten tcp ([^: ]+):\d{2,5}\b`)
+	tempPathRE         = regexp.MustCompile(`(?:/private)?/tmp/[^\s"']+|/var/folders/[^\s"']+`)
+	crashAttemptsRE    = regexp.MustCompile(`\bgave up after \d+ crash attempts\b`)
+	serviceFromErrorRE = regexp.MustCompile(`\bservice ([A-Za-z0-9._-]+) gave up after \d+ crash attempts\b`)
+	serviceNameRE      = regexp.MustCompile(`^[A-Za-z0-9._-]+$`)
+	whitespaceRE       = regexp.MustCompile(`\s+`)
+)
+
+// Occurrence preserves one raw issue event inside an aggregate issue record.
+type Occurrence struct {
 	ID        string    `json:"id"`
 	Timestamp time.Time `json:"timestamp"`
-	Source    string    `json:"source"`              // "mcp:anito_deploy" | "cli:deploy" | "consumer:sogs-api"
-	Tool      string    `json:"tool,omitempty"`      // "anito_deploy" | "deploy" | etc.
-	Input     string    `json:"input,omitempty"`     // JSON-encoded inputs (no secrets)
-	Error     string    `json:"error"`               // error message
-	Context   string    `json:"context,omitempty"`   // free-text context from the caller
-	RepoPath  string    `json:"repo_path,omitempty"` // optional — consuming repo root path
-	Severity  string    `json:"severity"`            // "error" | "warning" | "info"
+	Source    string    `json:"source"`
+	Tool      string    `json:"tool,omitempty"`
+	Input     string    `json:"input,omitempty"`
+	Error     string    `json:"error"`
+	Context   string    `json:"context,omitempty"`
+	RepoPath  string    `json:"repo_path,omitempty"`
+	Severity  string    `json:"severity"`
 }
 
-// Store is a thread-safe append-only JSONL issue log.
+// Issue is one aggregated runtime issue. The legacy top-level fields mirror the
+// most recent occurrence for backward compatibility with existing callers.
+type Issue struct {
+	ID              string       `json:"id"`
+	Timestamp       time.Time    `json:"timestamp"`           // most recent occurrence timestamp
+	Source          string       `json:"source"`              // most recent occurrence source
+	Tool            string       `json:"tool,omitempty"`      // most recent occurrence tool
+	Input           string       `json:"input,omitempty"`     // most recent occurrence input
+	Error           string       `json:"error"`               // most recent occurrence error
+	Context         string       `json:"context,omitempty"`   // most recent occurrence context
+	RepoPath        string       `json:"repo_path,omitempty"` // most recent occurrence repo path
+	Severity        string       `json:"severity"`            // most recent occurrence severity
+	Fingerprint     string       `json:"fingerprint,omitempty"`
+	Service         string       `json:"service,omitempty"`
+	Kind            string       `json:"kind,omitempty"`
+	FirstSeen       time.Time    `json:"first_seen,omitempty"`
+	LastSeen        time.Time    `json:"last_seen,omitempty"`
+	OccurrenceCount int          `json:"occurrence_count,omitempty"`
+	Occurrences     []Occurrence `json:"occurrences,omitempty"`
+}
+
+// Store is a thread-safe persistent issue registry.
 type Store struct {
 	mu   sync.Mutex
 	path string
 }
 
-// New returns a Store backed by <dataDir>/issues.jsonl.
-// The file is created on first write; the directory must already exist.
+type storeFile struct {
+	Version int     `json:"version"`
+	Issues  []Issue `json:"issues"`
+}
+
+type fingerprintParts struct {
+	Source  string
+	Service string
+	Kind    string
+	Error   string
+}
+
+// New returns a Store backed by <dataDir>/issues.jsonl. The on-disk path stays
+// unchanged for compatibility, but the file contents are versioned JSON.
 func New(dataDir string) *Store {
 	return &Store{path: filepath.Join(dataDir, "issues.jsonl")}
 }
 
-// Append adds an issue to the log. ID and Timestamp are set automatically
-// if not provided by the caller.
+// Append records an occurrence and aggregates it into a matching issue
+// fingerprint. ID, Timestamp, and Severity are defaulted when absent.
 func (s *Store) Append(iss Issue) error {
-	if iss.ID == "" {
-		iss.ID = strconv.FormatInt(time.Now().UnixNano(), 36)
-	}
-	if iss.Timestamp.IsZero() {
-		iss.Timestamp = time.Now()
-	}
-	if iss.Severity == "" {
-		iss.Severity = "error"
-	}
-
-	b, err := json.Marshal(iss)
-	if err != nil {
-		return fmt.Errorf("issues: marshal: %w", err)
-	}
-
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	f, err := os.OpenFile(s.path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	store, err := s.loadLocked()
 	if err != nil {
-		return fmt.Errorf("issues: open %s: %w", s.path, err)
+		return err
 	}
-	defer f.Close()
-	_, err = fmt.Fprintf(f, "%s\n", b)
-	return err
+
+	occ := normalizeOccurrence(issueToOccurrence(iss))
+	store.mergeOccurrence(occ)
+	return s.saveLocked(store)
 }
 
-// Clear removes all issues from the log.
+// Clear removes all issues from the store while keeping the versioned file
+// shape intact.
 func (s *Store) Clear() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return os.WriteFile(s.path, nil, 0644)
+	return s.saveLocked(newStoreFile())
 }
 
-// Recent returns the last n issues from the log, optionally filtered by a
-// source prefix (e.g. "mcp:", "consumer:", "cli:"). Pass source="" to return
-// all sources. Pass n<=0 to return all issues.
+// Recent returns the last n aggregated issues, optionally filtered by a source
+// prefix. Pass source="" to return all sources. Pass n<=0 to return all issues.
 func (s *Store) Recent(n int, source string) ([]Issue, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	f, err := os.Open(s.path)
-	if os.IsNotExist(err) {
+	store, err := s.loadLocked()
+	if err != nil {
+		return nil, err
+	}
+
+	filtered := make([]Issue, 0, len(store.Issues))
+	for _, iss := range store.Issues {
+		if source == "" || strings.HasPrefix(iss.Source, source) {
+			filtered = append(filtered, cloneIssue(iss))
+		}
+	}
+	if len(filtered) == 0 {
 		return nil, nil
 	}
-	if err != nil {
-		return nil, fmt.Errorf("issues: open %s: %w", s.path, err)
+	if n <= 0 || n >= len(filtered) {
+		return filtered, nil
 	}
-	defer f.Close()
+	return filtered[len(filtered)-n:], nil
+}
 
-	var all []Issue
-	scanner := bufio.NewScanner(f)
+func newStoreFile() storeFile {
+	return storeFile{Version: currentStoreVersion, Issues: []Issue{}}
+}
+
+func (s *Store) loadLocked() (storeFile, error) {
+	data, err := os.ReadFile(s.path)
+	if os.IsNotExist(err) {
+		return newStoreFile(), nil
+	}
+	if err != nil {
+		return storeFile{}, fmt.Errorf("issues: open %s: %w", s.path, err)
+	}
+	return decodeStoreFile(data)
+}
+
+func decodeStoreFile(data []byte) (storeFile, error) {
+	trimmed := bytes.TrimSpace(data)
+	if len(trimmed) == 0 {
+		return newStoreFile(), nil
+	}
+	if trimmed[0] == '{' {
+		var probe map[string]json.RawMessage
+		if err := json.Unmarshal(trimmed, &probe); err != nil {
+			return decodeLegacyJSONL(trimmed), nil
+		}
+		if _, hasVersion := probe["version"]; !hasVersion {
+			if _, hasIssues := probe["issues"]; !hasIssues {
+				return decodeLegacyJSONL(trimmed), nil
+			}
+		}
+		var file storeFile
+		if err := json.Unmarshal(trimmed, &file); err != nil {
+			return storeFile{}, fmt.Errorf("issues: unmarshal store: %w", err)
+		}
+		if file.Version == 0 {
+			file.Version = currentStoreVersion
+		}
+		if file.Version > currentStoreVersion {
+			return storeFile{}, fmt.Errorf("issues: unsupported store version %d", file.Version)
+		}
+		return normalizeStoreFile(file), nil
+	}
+	return decodeLegacyJSONL(trimmed), nil
+}
+
+func decodeLegacyJSONL(data []byte) storeFile {
+	store := newStoreFile()
+	scanner := bufio.NewScanner(bytes.NewReader(data))
 	for scanner.Scan() {
-		line := scanner.Bytes()
+		line := bytes.TrimSpace(scanner.Bytes())
 		if len(line) == 0 {
 			continue
 		}
-		var iss Issue
-		if err := json.Unmarshal(line, &iss); err == nil {
-			if source == "" || strings.HasPrefix(iss.Source, source) {
-				all = append(all, iss)
+		var legacy Issue
+		if err := json.Unmarshal(line, &legacy); err != nil {
+			continue
+		}
+		store.mergeOccurrence(normalizeOccurrence(issueToOccurrence(legacy)))
+	}
+	return store
+}
+
+func normalizeStoreFile(file storeFile) storeFile {
+	out := newStoreFile()
+	out.Version = file.Version
+	if len(file.Issues) == 0 {
+		return out
+	}
+	for _, stored := range file.Issues {
+		occs := cloneOccurrences(stored.Occurrences)
+		if len(occs) == 0 {
+			occs = []Occurrence{normalizeOccurrence(issueToOccurrence(stored))}
+		} else {
+			for i := range occs {
+				occs[i] = normalizeOccurrence(occs[i])
 			}
 		}
+		out.Issues = append(out.Issues, rebuildIssue(stored.ID, occs))
 	}
-	if err := scanner.Err(); err != nil {
-		return nil, fmt.Errorf("issues: scan: %w", err)
+	sortIssues(out.Issues)
+	return out
+}
+
+func (s *Store) saveLocked(store storeFile) error {
+	sortIssues(store.Issues)
+	data, err := json.MarshalIndent(store, "", "  ")
+	if err != nil {
+		return fmt.Errorf("issues: marshal: %w", err)
+	}
+	data = append(data, '\n')
+	tmp := s.path + ".tmp"
+	if err := os.WriteFile(tmp, data, 0o644); err != nil {
+		return fmt.Errorf("issues: write %s: %w", tmp, err)
+	}
+	if err := os.Rename(tmp, s.path); err != nil {
+		return fmt.Errorf("issues: rename %s: %w", s.path, err)
+	}
+	return nil
+}
+
+func (f *storeFile) mergeOccurrence(occ Occurrence) {
+	parts := buildFingerprintParts(occ)
+	fingerprint := parts.hash()
+	for i := range f.Issues {
+		if f.Issues[i].Fingerprint != fingerprint {
+			continue
+		}
+		occs := append(cloneOccurrences(f.Issues[i].Occurrences), occ)
+		f.Issues[i] = rebuildIssue(f.Issues[i].ID, occs)
+		return
+	}
+	f.Issues = append(f.Issues, rebuildIssue(occ.ID, []Occurrence{occ}))
+}
+
+func rebuildIssue(id string, occs []Occurrence) Issue {
+	if len(occs) == 0 {
+		return Issue{}
+	}
+	normalized := cloneOccurrences(occs)
+	for i := range normalized {
+		normalized[i] = normalizeOccurrence(normalized[i])
 	}
 
-	if n <= 0 || n >= len(all) {
-		return all, nil
+	firstSeen := normalized[0].Timestamp
+	lastIdx := 0
+	for i := 1; i < len(normalized); i++ {
+		if normalized[i].Timestamp.Before(firstSeen) {
+			firstSeen = normalized[i].Timestamp
+		}
+		if normalized[i].Timestamp.After(normalized[lastIdx].Timestamp) ||
+			normalized[i].Timestamp.Equal(normalized[lastIdx].Timestamp) {
+			lastIdx = i
+		}
 	}
-	return all[len(all)-n:], nil
+	latest := normalized[lastIdx]
+	parts := buildFingerprintParts(latest)
+	if id == "" {
+		id = normalized[0].ID
+	}
+	return Issue{
+		ID:              id,
+		Timestamp:       latest.Timestamp,
+		Source:          latest.Source,
+		Tool:            latest.Tool,
+		Input:           latest.Input,
+		Error:           latest.Error,
+		Context:         latest.Context,
+		RepoPath:        latest.RepoPath,
+		Severity:        latest.Severity,
+		Fingerprint:     parts.hash(),
+		Service:         parts.Service,
+		Kind:            parts.Kind,
+		FirstSeen:       firstSeen,
+		LastSeen:        latest.Timestamp,
+		OccurrenceCount: len(normalized),
+		Occurrences:     normalized,
+	}
+}
+
+func issueToOccurrence(iss Issue) Occurrence {
+	return Occurrence{
+		ID:        iss.ID,
+		Timestamp: iss.Timestamp,
+		Source:    iss.Source,
+		Tool:      iss.Tool,
+		Input:     iss.Input,
+		Error:     iss.Error,
+		Context:   iss.Context,
+		RepoPath:  iss.RepoPath,
+		Severity:  iss.Severity,
+	}
+}
+
+func normalizeOccurrence(occ Occurrence) Occurrence {
+	now := time.Now()
+	if occ.ID == "" {
+		occ.ID = newGeneratedID(now)
+	}
+	if occ.Timestamp.IsZero() {
+		occ.Timestamp = now
+	}
+	if occ.Severity == "" {
+		occ.Severity = "error"
+	}
+	occ.Source = strings.TrimSpace(occ.Source)
+	occ.Tool = strings.TrimSpace(occ.Tool)
+	occ.Input = strings.TrimSpace(occ.Input)
+	occ.Error = strings.TrimSpace(occ.Error)
+	occ.Context = strings.TrimSpace(occ.Context)
+	occ.RepoPath = strings.TrimSpace(occ.RepoPath)
+	return occ
+}
+
+func newGeneratedID(now time.Time) string {
+	seq := atomic.AddUint64(&generatedIDSeq, 1)
+	return strconv.FormatInt(now.UnixNano(), 36) + "-" + strconv.FormatUint(seq, 36)
+}
+
+func buildFingerprintParts(occ Occurrence) fingerprintParts {
+	sourcePrefix, sourceSuffix := splitSource(occ.Source)
+	sourceKey := normalizeKey(sourcePrefix)
+	if sourceKey == "" {
+		sourceKey = normalizeKey(occ.Source)
+	}
+
+	service := ""
+	switch sourceKey {
+	case "consumer":
+		service = normalizeKey(sourceSuffix)
+	default:
+		service = normalizeKey(extractServiceFromInput(occ.Input))
+	}
+	if service == "" {
+		service = normalizeKey(extractServiceFromError(occ.Error))
+	}
+
+	kind := ""
+	switch sourceKey {
+	case "daemon":
+		kind = normalizeKey(sourceSuffix)
+	case "consumer":
+		kind = normalizeKey(occ.Tool)
+		if kind == "" {
+			kind = "report"
+		}
+	default:
+		kind = normalizeKey(occ.Tool)
+		if kind == "" {
+			kind = normalizeKey(sourceSuffix)
+		}
+	}
+	if kind == "" {
+		kind = sourceKey
+	}
+	if kind == "" {
+		kind = "unknown"
+	}
+
+	errorKey := normalizeError(occ.Error)
+	if errorKey == "" {
+		errorKey = "empty"
+	}
+
+	return fingerprintParts{
+		Source:  sourceKey,
+		Service: service,
+		Kind:    kind,
+		Error:   errorKey,
+	}
+}
+
+func (p fingerprintParts) hash() string {
+	sum := sha256.Sum256([]byte(strings.Join([]string{
+		p.Source,
+		p.Service,
+		p.Kind,
+		p.Error,
+	}, "\x1f")))
+	return hex.EncodeToString(sum[:])
+}
+
+func splitSource(source string) (string, string) {
+	source = strings.TrimSpace(source)
+	prefix, suffix, ok := strings.Cut(source, ":")
+	if !ok {
+		return source, ""
+	}
+	return prefix, suffix
+}
+
+func extractServiceFromInput(input string) string {
+	input = strings.TrimSpace(input)
+	if input == "" {
+		return ""
+	}
+	var obj map[string]any
+	if strings.HasPrefix(input, "{") && json.Unmarshal([]byte(input), &obj) == nil {
+		for _, key := range []string{"name", "service", "service_name"} {
+			if v, ok := obj[key].(string); ok && serviceNameRE.MatchString(strings.TrimSpace(v)) {
+				return v
+			}
+		}
+		return ""
+	}
+	if serviceNameRE.MatchString(input) {
+		return input
+	}
+	return ""
+}
+
+func extractServiceFromError(msg string) string {
+	matches := serviceFromErrorRE.FindStringSubmatch(msg)
+	if len(matches) != 2 {
+		return ""
+	}
+	return matches[1]
+}
+
+func normalizeKey(value string) string {
+	value = strings.ToLower(strings.TrimSpace(value))
+	if value == "" {
+		return ""
+	}
+	value = nonAlphaNumRE.ReplaceAllString(value, "_")
+	return strings.Trim(value, "_")
+}
+
+func normalizeError(msg string) string {
+	msg = strings.ToLower(strings.TrimSpace(msg))
+	if msg == "" {
+		return ""
+	}
+	msg = tempPathRE.ReplaceAllString(msg, "<tmp>")
+	msg = isoTimestampRE.ReplaceAllString(msg, "<time>")
+	msg = timeOfDayRE.ReplaceAllString(msg, "<time>")
+	msg = hostPortRE.ReplaceAllString(msg, "<addr>")
+	msg = listenPortRE.ReplaceAllString(msg, "listen tcp $1:<port>")
+	msg = portWordRE.ReplaceAllString(msg, "port=<port>")
+	msg = pidRE.ReplaceAllString(msg, "pid=<pid>")
+	msg = crashAttemptsRE.ReplaceAllString(msg, "gave up after <n> crash attempts")
+	msg = whitespaceRE.ReplaceAllString(msg, " ")
+	return strings.TrimSpace(msg)
+}
+
+func sortIssues(issues []Issue) {
+	sort.Slice(issues, func(i, j int) bool {
+		if issues[i].LastSeen.Equal(issues[j].LastSeen) {
+			return issues[i].ID < issues[j].ID
+		}
+		return issues[i].LastSeen.Before(issues[j].LastSeen)
+	})
+}
+
+func cloneIssue(iss Issue) Issue {
+	iss.Occurrences = cloneOccurrences(iss.Occurrences)
+	return iss
+}
+
+func cloneOccurrences(occs []Occurrence) []Occurrence {
+	if len(occs) == 0 {
+		return nil
+	}
+	out := make([]Occurrence, len(occs))
+	copy(out, occs)
+	return out
 }
