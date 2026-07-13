@@ -8,6 +8,10 @@ Format: `## [date] — description`, breaking changes marked **BREAKING**.
 
 ---
 
+## 2026-07-13 — Issue lifecycle actions
+
+**HTTP API / MCP:** Fingerprinted issues now retain lifecycle state, acknowledgement/resolution timestamps, optional opaque tracker links, occurrence history, and automatic reopen-on-occurrence behavior. Use the issue transition endpoints or `anito_issue_acknowledge`, `anito_issue_resolve`, and `anito_issue_reopen`.
+
 ## 2026-07-13 — Shared diagnosis and typed domain errors
 
 **HTTP API / MCP / CLI:** Service failures now use stable domain codes for missing services, invalid configuration, readiness failures, and conflicts. HTTP error responses include additive structured fields (`code`, `error`, `message`) where the current surface can carry them. New read-only diagnosis surfaces are available as `GET /diagnose`, `anito_diagnose`, and `anito diagnose`.
