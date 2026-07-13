@@ -29,22 +29,32 @@ const (
 	proxyIdleTimeout       = 60 * time.Second
 )
 
-// handlerWrapper is stored in an atomic.Value so it can be swapped safely.
-type handlerWrapper struct {
-	h http.Handler
+type routingGeneration struct {
+	handlers map[string]http.Handler
 }
 
-// entry holds the permanent listener(s) and the currently active handler.
+type serviceRoute struct {
+	generation atomic.Value // stores *routingGeneration
+}
+
+type routeGenerationPublishHook struct {
+	before func(service string, generation *routingGeneration)
+}
+
+var routingGenerationPublishHook atomic.Value // stores routeGenerationPublishHook
+
+// entry holds the permanent listener(s) for one named service port.
 // We bind on both IPv4 (127.0.0.1) and IPv6 ([::1]) so that clients
 // connecting via either loopback family always hit Anito's proxy and not a
 // rogue process that grabbed the IPv6 side first.
 type entry struct {
 	stablePort  int
 	bindAddress string
+	portName    string
 	listener    net.Listener // 127.0.0.1:port
 	listener6   net.Listener // [::1]:port  — nil if IPv6 unavailable
 	server      *http.Server
-	handler     atomic.Value // stores handlerWrapper
+	route       *serviceRoute
 }
 
 // Manager owns one persistent listener per service port and swaps the upstream atomically.
@@ -52,10 +62,14 @@ type entry struct {
 type Manager struct {
 	mu      sync.Mutex
 	entries map[string]*entry
+	routes  map[string]*serviceRoute
 }
 
 func NewManager() *Manager {
-	return &Manager{entries: make(map[string]*entry)}
+	return &Manager{
+		entries: make(map[string]*entry),
+		routes:  make(map[string]*serviceRoute),
+	}
 }
 
 // entryKey returns the composite key for a service's named port.
@@ -98,8 +112,12 @@ func (m *Manager) RegisterPortsWithBind(name string, ports map[string]int, bindA
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	// Track newly created entries so we can roll back on failure.
-	var created []string
+	route := m.routes[name]
+	type pendingEntry struct {
+		key string
+		e   *entry
+	}
+	var pending []pendingEntry
 
 	for portName, stablePort := range ports {
 		key := entryKey(name, portName)
@@ -130,34 +148,42 @@ func (m *Manager) RegisterPortsWithBind(name string, ports map[string]int, bindA
 
 		l, l6, err := listen(bindAddress, stablePort)
 		if err != nil {
-			// Roll back all entries created in this call.
-			for _, k := range created {
-				if e, ok := m.entries[k]; ok {
-					_ = e.server.Close()
-					if e.listener6 != nil {
-						_ = e.listener6.Close()
-					}
-					delete(m.entries, k)
+			for _, created := range pending {
+				_ = created.e.listener.Close()
+				if created.e.listener6 != nil {
+					_ = created.e.listener6.Close()
 				}
 			}
 			return fmt.Errorf("proxy: cannot bind port %d for %q (port %s): %w", stablePort, name, portName, err)
 		}
 
-		e := &entry{stablePort: stablePort, bindAddress: bindAddress, listener: l, listener6: l6}
+		e := &entry{stablePort: stablePort, bindAddress: bindAddress, portName: portName, listener: l, listener6: l6}
 		logNonLoopbackBind(name, portName, stablePort, bindAddress)
+		pending = append(pending, pendingEntry{key: key, e: e})
+	}
 
-		// Placeholder handler until Swap is called after a successful health check.
-		e.handler.Store(handlerWrapper{h: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			http.Error(w, "service starting", http.StatusServiceUnavailable)
-		})})
+	if len(pending) == 0 {
+		return nil
+	}
 
-		e.server = serverFor(e)
+	if route == nil {
+		route = &serviceRoute{}
+		m.routes[name] = route
+	}
 
-		m.entries[key] = e
-		created = append(created, key)
-		go e.server.Serve(l) //nolint:errcheck
-		if l6 != nil {
-			go e.server.Serve(l6) //nolint:errcheck
+	next := cloneHandlers(currentHandlers(route))
+	for _, created := range pending {
+		created.e.route = route
+		next[created.e.portName] = serviceStartingHandler()
+	}
+	publishRouteGeneration(name, route, &routingGeneration{handlers: next})
+
+	for _, created := range pending {
+		created.e.server = serverFor(created.e)
+		m.entries[created.key] = created.e
+		go created.e.server.Serve(created.e.listener) //nolint:errcheck
+		if created.e.listener6 != nil {
+			go created.e.server.Serve(created.e.listener6) //nolint:errcheck
 		}
 	}
 	return nil
@@ -167,7 +193,13 @@ func serverFor(e *entry) *http.Server {
 	return &http.Server{
 		Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("X-Anito-Proxy", "1")
-			e.handler.Load().(handlerWrapper).h.ServeHTTP(w, r)
+			generation := e.route.generation.Load().(*routingGeneration)
+			h := generation.handlers[e.portName]
+			if h == nil {
+				http.Error(w, "service unavailable", http.StatusServiceUnavailable)
+				return
+			}
+			h.ServeHTTP(w, r)
 		}),
 		ReadHeaderTimeout: proxyReadHeaderTimeout,
 		ReadTimeout:       proxyReadTimeout,
@@ -275,45 +307,58 @@ func (m *Manager) Swap(name string, internalPort int) error {
 // SwapPorts atomically points all named proxies for a service at their new internal ports.
 func (m *Manager) SwapPorts(name string, internalPorts map[string]int) error {
 	m.mu.Lock()
-	// Collect entries first, then release lock before creating proxies.
-	entries := make(map[string]*entry, len(internalPorts))
+	defer m.mu.Unlock()
+
+	route := m.routes[name]
+	if route == nil {
+		return fmt.Errorf("proxy: service %q not registered", name)
+	}
+
 	for portName := range internalPorts {
 		key := entryKey(name, portName)
-		e, ok := m.entries[key]
-		if !ok {
-			m.mu.Unlock()
+		if _, ok := m.entries[key]; !ok {
 			return fmt.Errorf("proxy: service %q port %q not registered", name, portName)
 		}
-		entries[portName] = e
 	}
-	m.mu.Unlock()
 
-	// Build and swap all handlers.
-	for portName, e := range entries {
+	next := cloneHandlers(currentHandlers(route))
+	for portName := range internalPorts {
 		port := internalPorts[portName]
 		target, err := url.Parse(fmt.Sprintf("http://localhost:%d", port))
 		if err != nil {
 			return err
 		}
 		rp := httputil.NewSingleHostReverseProxy(target)
+		director := rp.Director
+		rp.Director = func(r *http.Request) {
+			director(r)
+			r.Header.Del("X-Anito-Client-IP")
+			if host, _, err := net.SplitHostPort(r.RemoteAddr); err == nil {
+				r.Header.Set("X-Anito-Client-IP", host)
+			}
+		}
 		rp.ErrorHandler = func(w http.ResponseWriter, r *http.Request, err error) {
 			http.Error(w, fmt.Sprintf("upstream error: %v", err), http.StatusBadGateway)
 		}
-		e.handler.Store(handlerWrapper{h: &flushProxy{rp: rp}})
+		next[portName] = &flushProxy{rp: rp}
 	}
+	publishRouteGeneration(name, route, &routingGeneration{handlers: next})
 	return nil
 }
 
 // SwapStatic points the proxy at a directory of static files (for SPA deployments).
 func (m *Manager) SwapStatic(name string, dir string) error {
 	m.mu.Lock()
+	defer m.mu.Unlock()
+
 	key := entryKey(name, "default")
 	e, ok := m.entries[key]
-	m.mu.Unlock()
 	if !ok {
 		return fmt.Errorf("proxy: service %q not registered", name)
 	}
-	e.handler.Store(handlerWrapper{h: http.FileServer(http.Dir(dir))})
+	next := cloneHandlers(currentHandlers(e.route))
+	next["default"] = http.FileServer(http.Dir(dir))
+	publishRouteGeneration(name, e.route, &routingGeneration{handlers: next})
 	return nil
 }
 
@@ -326,14 +371,18 @@ func (m *Manager) Unswap(name string) {
 func (m *Manager) UnswapPorts(name string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	route := m.routes[name]
+	if route == nil {
+		return
+	}
+	next := cloneHandlers(currentHandlers(route))
 	prefix := servicePrefix(name)
 	for key, e := range m.entries {
 		if strings.HasPrefix(key, prefix) {
-			e.handler.Store(handlerWrapper{h: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				http.Error(w, "service unavailable", http.StatusServiceUnavailable)
-			})})
+			next[e.portName] = serviceUnavailableHandler()
 		}
 	}
+	publishRouteGeneration(name, route, &routingGeneration{handlers: next})
 }
 
 // Remove shuts down the listener for name (default port) and removes it from the manager.
@@ -355,6 +404,47 @@ func (m *Manager) RemovePorts(name string) {
 			delete(m.entries, key)
 		}
 	}
+	delete(m.routes, name)
+}
+
+func currentHandlers(route *serviceRoute) map[string]http.Handler {
+	if route == nil {
+		return nil
+	}
+	generation, ok := route.generation.Load().(*routingGeneration)
+	if !ok || generation == nil {
+		return nil
+	}
+	return generation.handlers
+}
+
+func cloneHandlers(src map[string]http.Handler) map[string]http.Handler {
+	dst := make(map[string]http.Handler, len(src))
+	for name, h := range src {
+		dst[name] = h
+	}
+	return dst
+}
+
+func publishRouteGeneration(name string, route *serviceRoute, generation *routingGeneration) {
+	if v := routingGenerationPublishHook.Load(); v != nil {
+		if hook := v.(routeGenerationPublishHook); hook.before != nil {
+			hook.before(name, generation)
+		}
+	}
+	route.generation.Store(generation)
+}
+
+func serviceStartingHandler() http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "service starting", http.StatusServiceUnavailable)
+	})
+}
+
+func serviceUnavailableHandler() http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "service unavailable", http.StatusServiceUnavailable)
+	})
 }
 
 // StablePort returns the stable port for a registered service's default port, or 0.

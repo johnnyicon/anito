@@ -77,6 +77,9 @@ Deploy a service. The binary must already be built. Anito handles the start, hea
 | `env_file` | string | no | Path to a `KEY=VALUE` env file |
 | `health_check` | string | no | Health check path (default: `/health`) |
 | `watch_paths` | []string | no | Directories to watch for file changes. Any write triggers an automatic restart (debounced 500ms). Also enables crash auto-restart. |
+| `replace_config` | bool | no | Redeploy only. Default `false` preserves omitted optional fields from the registered service. Set `true` to replace the optional configuration and intentionally clear omitted values. |
+
+On redeploy, optional fields omitted from the MCP call preserve their registered values (arguments, env file, health policy, watch paths, restart policy, and config provenance). This makes the common `name` + new `path` workflow safe. Pass `replace_config: true` when the call is a complete replacement and omitted values should be cleared.
 
 Returns the service record including the assigned stable port(s). Response includes both singular fields (`stable_port`, `pinned_address`) and map fields (`stable_ports`, `pinned_addresses`) for backward compatibility.
 
@@ -85,14 +88,16 @@ Watch paths are persisted in the registry and survive daemon restarts — the wa
 ---
 
 ### `anito_services`
-List all services Anito is managing, including their stable ports and current status.
+List all services Anito is managing, including stable ports, current status,
+health and restart policy, crash state, and recent start history.
 
 No parameters.
 
 ---
 
 ### `anito_status`
-Get detailed status for one service: stable port, internal port, PID, binary path, deploy time.
+Get detailed status for one service: stable and internal ports, PID, binary path,
+deploy time, health and restart policy, crash state, and recent start history.
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
@@ -221,6 +226,27 @@ Retrieve recent issues logged by Anito — tool errors, deploy failures, and man
 |-----------|------|----------|-------------|
 | `lines` | int | no | Number of recent issues to return (default: 20) |
 | `source` | string | no | Filter by source prefix: `mcp:` for MCP tool errors, `cli:` for CLI errors, `consumer:` for reports from consuming repos. Omit for all sources. |
+
+---
+
+### Issue lifecycle tools
+
+`anito_issue_acknowledge`, `anito_issue_resolve`, and `anito_issue_reopen` update one aggregate issue by ID. Resolution accepts an optional opaque `tracker_url`; a later matching occurrence reopens the issue while preserving its history and link.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `id` | string | yes | Aggregate issue ID returned by `anito_issues` |
+| `actor` | string | no | Operator or agent identity recorded in history |
+| `tracker_url` | string | no | Opaque external tracker link, used by resolve |
+
+### `anito_archive`, `anito_restore_archived`, `anito_prune`
+
+Archive and restore preserve service registration metadata and stable ports. `anito_archive` requires a non-running service. `anito_prune` requires `confirm=true`, only accepts archived services, and leaves a registry tombstone.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `name` | string | yes | Service name |
+| `confirm` | bool | prune only | Must be `true` for destructive prune |
 
 ---
 

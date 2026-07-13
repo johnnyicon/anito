@@ -3,6 +3,7 @@ package client
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -12,6 +13,8 @@ import (
 	"time"
 
 	"github.com/johnnyicon/anito/internal/auth"
+	"github.com/johnnyicon/anito/internal/diagnosis"
+	"github.com/johnnyicon/anito/internal/domain"
 	"github.com/johnnyicon/anito/internal/issues"
 	"github.com/johnnyicon/anito/internal/registry"
 )
@@ -849,6 +852,41 @@ func TestParseError_WithBody(t *testing.T) {
 	want := "daemon error 422: port already in use"
 	if err.Error() != want {
 		t.Errorf("parseError = %q; want %q", err.Error(), want)
+	}
+}
+
+func TestParseError_WithDomainBody(t *testing.T) {
+	resp := &http.Response{
+		StatusCode: http.StatusNotFound,
+		Status:     "404 Not Found",
+		Body:       io.NopCloser(strings.NewReader(`{"code":"missing_service","error":"service \"ghost\" not found"}`)),
+	}
+	err := parseError(resp)
+	if err == nil {
+		t.Fatal("parseError: expected error, got nil")
+	}
+	var de *domain.Error
+	if !errors.As(err, &de) || de.Code != domain.CodeMissingService {
+		t.Fatalf("parseError = %T %v, want missing_service domain error", err, err)
+	}
+}
+
+func TestDiagnose_EncodesRequestAndDecodesResult(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/diagnose" || r.URL.Query().Get("service_name") != "api" || r.URL.Query().Get("path") != "/tmp/repo" {
+			t.Fatalf("diagnose request = %s?%s", r.URL.Path, r.URL.RawQuery)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"healthy":false,"errors":1,"findings":[{"code":"missing_service","severity":"error","message":"missing"}]}`))
+	}))
+	defer ts.Close()
+
+	result, err := newTestClient(ts).Diagnose(diagnosis.Request{ServiceName: "api", RepoPath: "/tmp/repo"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Healthy || result.Errors != 1 || len(result.Findings) != 1 || result.Findings[0].Code != domain.CodeMissingService {
+		t.Fatalf("diagnosis result = %+v", result)
 	}
 }
 

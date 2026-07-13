@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -11,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/johnnyicon/anito/internal/domain"
 	"github.com/johnnyicon/anito/internal/issues"
 	"github.com/johnnyicon/anito/internal/process"
 	"github.com/johnnyicon/anito/internal/proxy"
@@ -128,6 +130,10 @@ func TestWaitHTTPReady_FailsOn404(t *testing.T) {
 	if err == nil {
 		t.Error("expected error when server returns 404, got nil")
 	}
+	var de *domain.Error
+	if !errors.As(err, &de) || de.Code != domain.CodeReadinessFailure {
+		t.Fatalf("error = %v, want readiness_failure domain error", err)
+	}
 }
 
 // TestWaitHTTPReady_TimesOut verifies that waitHTTPReady returns an error when
@@ -144,6 +150,28 @@ func TestWaitHTTPReady_TimesOut(t *testing.T) {
 	err = waitHTTPReady(port, "/health", 300*time.Millisecond)
 	if err == nil {
 		t.Error("expected timeout error when nothing is listening, got nil")
+	}
+}
+
+func TestWaitHTTPReady_EnforcesTimeoutWhenServerHangs(t *testing.T) {
+	l, err := net.Listen("tcp", "localhost:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	port := l.Addr().(*net.TCPAddr).Port
+	srv := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		<-r.Context().Done()
+	})}
+	go srv.Serve(l) //nolint:errcheck
+	t.Cleanup(func() { _ = srv.Close() })
+
+	start := time.Now()
+	err = waitHTTPReady(port, "/health", 150*time.Millisecond)
+	if err == nil {
+		t.Fatal("expected hanging health check to time out")
+	}
+	if elapsed := time.Since(start); elapsed > 500*time.Millisecond {
+		t.Fatalf("health check exceeded configured deadline: %s", elapsed)
 	}
 }
 
@@ -541,6 +569,10 @@ func TestStatus_NotFound(t *testing.T) {
 	_, err := svc.Status("nonexistent")
 	if err == nil {
 		t.Error("expected error for nonexistent service, got nil")
+	}
+	var de *domain.Error
+	if !errors.As(err, &de) || de.Code != domain.CodeMissingService {
+		t.Fatalf("error = %v, want missing_service domain error", err)
 	}
 }
 
@@ -1370,6 +1402,10 @@ func TestRestart_NotFound(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error for nonexistent service")
 	}
+	var de *domain.Error
+	if !errors.As(err, &de) || de.Code != domain.CodeMissingService {
+		t.Fatalf("error = %v, want missing_service domain error", err)
+	}
 }
 
 // --- handleCrash additional edge cases ---
@@ -1409,6 +1445,34 @@ func TestStop_NotRunning(t *testing.T) {
 	err := svc.Stop("stopped-already-svc")
 	// mgr.Stop returns an error when the process isn't tracked — that's expected.
 	_ = err // could be nil or non-nil depending on process manager; just verify no panic.
+}
+
+func TestDeployRejectsUnsafeServiceName(t *testing.T) {
+	svc := newTestService(t)
+	_, err := svc.Deploy(DeployRequest{
+		Name: "../outside",
+		Type: registry.TypeBinary,
+		Path: "/bin/true",
+	})
+	if err == nil || !strings.Contains(err.Error(), "invalid service name") {
+		t.Fatalf("Deploy error = %v, want unsafe name rejection", err)
+	}
+}
+
+func TestDeployValidatesStaticDirectory(t *testing.T) {
+	svc := newTestService(t)
+	file := filepath.Join(t.TempDir(), "index.html")
+	if err := os.WriteFile(file, []byte("ok"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	_, err := svc.Deploy(DeployRequest{
+		Name: "bad-static",
+		Type: registry.TypeStatic,
+		Path: file,
+	})
+	if err == nil || !strings.Contains(err.Error(), "not a directory") {
+		t.Fatalf("Deploy error = %v, want static directory rejection", err)
+	}
 }
 
 // --- handleCrash additional edge cases ---

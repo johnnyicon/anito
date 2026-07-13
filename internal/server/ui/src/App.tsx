@@ -71,11 +71,12 @@ function applyFilter(services: Service[], filter: FilterStatus, search: string):
 // ── App ─────────────────────────────────────────────────────────────────────
 
 const PANEL_KEY = 'anito:panel-open'
+const EMPTY_SERVICES: Service[] = []
 
 export default function App() {
   // ── Data ──────────────────────────────────────────────────────────────────
   const { data: health,  isError: daemonDown } = useQuery(healthQuery)
-  const { data: rawServices = [] }             = useQuery(servicesQuery)
+  const { data: rawServices = EMPTY_SERVICES, isPending: servicesPending } = useQuery(servicesQuery)
   const { data: issuesData }                   = useQuery(issuesQuery(50))
 
   // ── Stable sort ───────────────────────────────────────────────────────────
@@ -228,7 +229,7 @@ export default function App() {
         <div className="flex flex-col min-h-0 flex-1">
           {/* Daemon unreachable banner */}
           {daemonDown && (
-            <div className="shrink-0 bg-red-50 border-b border-red-200 px-4 py-3">
+            <div className="shrink-0 bg-red-50 border-b border-red-200 px-4 py-3" role="alert">
               <p className="text-sm font-medium text-red-800">
                 Daemon unreachable — localhost:7700 is not responding
               </p>
@@ -246,7 +247,12 @@ export default function App() {
             onSearch={setSearch}
           />
 
-          <div className="flex-1 overflow-y-auto">
+          <div
+            className="flex-1 overflow-y-auto"
+            role="region"
+            aria-label="Services"
+            aria-busy={servicesPending}
+          >
             <ServiceList
               services={filtered}
               daemonDown={daemonDown}

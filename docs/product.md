@@ -90,19 +90,21 @@ Run a dev-tier service (`go run`, `pnpm dev`) with `watch:` for instant feedback
 A single service can expose multiple named ports (e.g. WebSocket + HTTP API). Each named port gets its own reverse proxy and ephemeral internal port. All ports swap atomically on deploy — zero downtime across all ports. WebSocket upgrades are proxied transparently.
 
 ### Composite app coordination
-For multi-service apps (e.g. Go API + Vite frontend), `anito setup` assigns stable ports to all services, writes a shared `ports.env` address map, generates per-service configs, and patches framework config files (Vite proxy, Next.js rewrites) with `[anito:managed]` blocks. Services know each other's addresses from the start.
+For multi-service apps (e.g. Go API + Vite frontend), the `anito_setup` MCP tool assigns stable ports to all services, writes a shared `ports.env` address map, generates per-service configs, and patches framework config files (Vite proxy, Next.js rewrites) with `[anito:managed]` blocks. Services know each other's addresses from the start.
 
 ### MCP server — LLM-native control
 The Anito MCP server runs at `localhost:7701`. Any Claude Code or Cursor session can deploy, restart, inspect, and tail logs through the same tools the daemon uses. One `claude mcp add` command is all setup requires.
 
-### SSE-aware health checks
-For MCP servers and other SSE services, Anito reads the first event from the SSE stream before declaring the service ready — not just a TCP connection. The stable port only receives traffic once the service is fully initialised.
+### Health-gated activation
+Anito requires the configured HTTP health endpoint to return `200 OK` before a
+new process receives stable-port traffic. The configured timeout is enforced
+even when an upstream accepts a connection but does not return headers.
 
 ### Drain window for long-lived connections
 Configurable grace period between proxy swap and SIGTERM. SSE clients and WebSocket connections finish naturally rather than being abruptly closed during a deploy.
 
 ### `[anito:managed]` source blocks
-Framework config patches (Vite proxy config, etc.) are marked with `// [anito:managed start]` / `// [anito:managed end]` delimiters. Anito owns these blocks — running `anito setup` again regenerates them automatically. Developers should not edit them manually.
+Framework config patches (Vite proxy config, etc.) are marked with `// [anito:managed start]` / `// [anito:managed end]` delimiters. Anito owns these blocks — running `anito_setup` again regenerates them automatically. Developers should not edit them manually.
 
 ---
 
@@ -172,8 +174,7 @@ Current hypothesis: the CLI + daemon is free and open source. A team plan adds s
 
 See [ideas.md](ideas.md) for the full parked ideas list. Current next priorities:
 
-- **`anito init` CLI scaffolding** — `anito_setup` MCP tool is shipped; CLI equivalent is not
+- **Full composite setup parity across CLI, HTTP, and MCP** — the CLI supports single-service `anito setup`; composite dry-run/apply remains MCP-only
 - **Schema versioning pre-commit hook** — auto-bumps schema version and updates migration log on schema changes
-- **Admin SPA v2 write operations** — restart/stop/remove from the browser dashboard (v1 read-only is shipped)
 - **Native macOS .app distribution** — SwiftUI menu bar shell wrapping the Go binary
 - **Self-healing daemon** — error threshold → agent-driven patch → redeploy cycle

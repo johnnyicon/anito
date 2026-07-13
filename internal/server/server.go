@@ -3,6 +3,7 @@ package server
 import (
 	"embed"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io/fs"
 	"log"
@@ -15,7 +16,9 @@ import (
 	echomiddleware "github.com/labstack/echo/v4/middleware"
 
 	"github.com/johnnyicon/anito/internal/auth"
+	"github.com/johnnyicon/anito/internal/diagnosis"
 	"github.com/johnnyicon/anito/internal/doctor"
+	"github.com/johnnyicon/anito/internal/domain"
 	"github.com/johnnyicon/anito/internal/issues"
 	"github.com/johnnyicon/anito/internal/registry"
 	"github.com/johnnyicon/anito/internal/service"
@@ -93,11 +96,18 @@ func (s *Server) Start() error {
 	e.POST("/rollback/:name", s.handleRollback)
 	e.GET("/status/:name", s.handleStatus)
 	e.POST("/remove/:name", s.handleRemove)
+	e.POST("/archive/:name", s.handleArchive)
+	e.POST("/restore/:name", s.handleRestoreArchived)
+	e.POST("/prune/:name", s.handlePrune)
 	e.GET("/logs/:name", s.handleLogs)
 	e.POST("/issues", s.handlePostIssue)
 	e.GET("/issues", s.handleGetIssues)
 	e.DELETE("/issues", s.handleClearIssues)
+	e.POST("/issues/:id/acknowledge", s.handleAcknowledgeIssue)
+	e.POST("/issues/:id/resolve", s.handleResolveIssue)
+	e.POST("/issues/:id/reopen", s.handleReopenIssue)
 	e.GET("/doctor", s.handleDoctor)
+	e.GET("/diagnose", s.handleDiagnose)
 	e.GET("/metrics", s.handleMetrics)
 	e.GET("/sessions", s.handleSessions)
 	e.POST("/teardown", s.handleTeardown)
@@ -195,7 +205,20 @@ type DeployRequest struct {
 }
 
 func (s *Server) handleHealth(c echo.Context) error {
-	return c.JSON(http.StatusOK, map[string]string{"status": "ok", "version": s.version})
+	startup := s.svc.StartupState()
+	return c.JSON(http.StatusOK, map[string]any{
+		"status":  "ok",
+		"version": s.version,
+		"startup": map[string]any{
+			"phase":             startup.Phase,
+			"started_at":        startup.StartedAt,
+			"completed_at":      startup.CompletedAt,
+			"total":             startup.Total,
+			"completed":         startup.Completed,
+			"max_parallel":      startup.MaxParallel,
+			"mutations_blocked": startup.MutationsBlocked,
+		},
+	})
 }
 
 func (s *Server) handleServices(c echo.Context) error {
@@ -208,14 +231,14 @@ func (s *Server) handleDeploy(c echo.Context) error {
 		return echo.NewHTTPError(http.StatusBadRequest, "invalid request body")
 	}
 	if req.Name == "" || req.Path == "" {
-		return echo.NewHTTPError(http.StatusBadRequest, "name and path are required")
+		return domainHTTPError(domain.InvalidConfigf("name and path are required"))
 	}
 
 	var drainWindow time.Duration
 	if req.DrainWindow != "" {
 		d, err := time.ParseDuration(req.DrainWindow)
 		if err != nil {
-			return echo.NewHTTPError(http.StatusBadRequest, fmt.Sprintf("invalid drain_window %q: use a duration string like '3s' or '500ms'", req.DrainWindow))
+			return domainHTTPError(domain.InvalidConfigf("invalid drain_window %q: use a duration string like '3s' or '500ms'", req.DrainWindow))
 		}
 		drainWindow = d
 	}
@@ -223,7 +246,7 @@ func (s *Server) handleDeploy(c echo.Context) error {
 	if req.HealthCheckTimeout != "" {
 		d, err := time.ParseDuration(req.HealthCheckTimeout)
 		if err != nil {
-			return echo.NewHTTPError(http.StatusBadRequest, fmt.Sprintf("invalid health_check_timeout %q: use a duration string like '30s'", req.HealthCheckTimeout))
+			return domainHTTPError(domain.InvalidConfigf("invalid health_check_timeout %q: use a duration string like '30s'", req.HealthCheckTimeout))
 		}
 		hcTimeout = d
 	}
@@ -254,11 +277,11 @@ func (s *Server) handleDeploy(c echo.Context) error {
 				Source:   "cli:deploy",
 				Tool:     "deploy",
 				Input:    req.Name,
-				Error:    err.Error(),
+				Error:    domain.Redact(err.Error()),
 				Severity: "error",
 			})
 		}
-		return echo.NewHTTPError(http.StatusInternalServerError, err.Error())
+		return serviceHTTPError(err)
 	}
 	return c.JSON(http.StatusOK, svc)
 }
@@ -267,7 +290,7 @@ func (s *Server) handleStop(c echo.Context) error {
 	name := c.Param("name")
 	if err := s.svc.Stop(name); err != nil {
 		log.Printf("[ERROR] stop name=%s error=%q", name, err)
-		return echo.NewHTTPError(http.StatusInternalServerError, err.Error())
+		return serviceHTTPError(err)
 	}
 	return c.JSON(http.StatusOK, map[string]string{"status": "stopped", "name": name})
 }
@@ -276,7 +299,7 @@ func (s *Server) handleRestart(c echo.Context) error {
 	name := c.Param("name")
 	if err := s.svc.Restart(name); err != nil {
 		log.Printf("[ERROR] restart name=%s error=%q", name, err)
-		return echo.NewHTTPError(http.StatusInternalServerError, err.Error())
+		return serviceHTTPError(err)
 	}
 	svc, err := s.svc.Status(name)
 	if err != nil {
@@ -290,7 +313,7 @@ func (s *Server) handleRollback(c echo.Context) error {
 	svc, err := s.svc.Rollback(name)
 	if err != nil {
 		log.Printf("[ERROR] rollback name=%s error=%q", name, err)
-		return echo.NewHTTPError(http.StatusInternalServerError, err.Error())
+		return serviceHTTPError(err)
 	}
 	return c.JSON(http.StatusOK, svc)
 }
@@ -299,7 +322,7 @@ func (s *Server) handleStatus(c echo.Context) error {
 	name := c.Param("name")
 	svc, err := s.svc.Status(name)
 	if err != nil {
-		return echo.NewHTTPError(http.StatusNotFound, err.Error())
+		return serviceHTTPError(err)
 	}
 	return c.JSON(http.StatusOK, svc)
 }
@@ -308,9 +331,37 @@ func (s *Server) handleRemove(c echo.Context) error {
 	name := c.Param("name")
 	if err := s.svc.Remove(name); err != nil {
 		log.Printf("[ERROR] remove name=%s error=%q", name, err)
-		return echo.NewHTTPError(http.StatusInternalServerError, err.Error())
+		return serviceHTTPError(err)
 	}
 	return c.JSON(http.StatusOK, map[string]string{"status": "removed", "name": name})
+}
+
+func (s *Server) handleArchive(c echo.Context) error {
+	name := c.Param("name")
+	archived, err := s.svc.Archive(name)
+	if err != nil {
+		return serviceHTTPError(err)
+	}
+	return c.JSON(http.StatusOK, archived)
+}
+
+func (s *Server) handleRestoreArchived(c echo.Context) error {
+	service, err := s.svc.RestoreArchived(c.Param("name"))
+	if err != nil {
+		return serviceHTTPError(err)
+	}
+	return c.JSON(http.StatusOK, service)
+}
+
+func (s *Server) handlePrune(c echo.Context) error {
+	if c.QueryParam("confirm") != "prune" && c.Request().Header.Get("X-Anito-Confirm") != "prune" {
+		return domainHTTPError(domain.Conflictf("prune requires confirm=prune or X-Anito-Confirm: prune"))
+	}
+	tomb, err := s.svc.Prune(c.Param("name"))
+	if err != nil {
+		return serviceHTTPError(err)
+	}
+	return c.JSON(http.StatusOK, tomb)
 }
 
 func (s *Server) handleLogs(c echo.Context) error {
@@ -339,7 +390,7 @@ func (s *Server) handleLogs(c echo.Context) error {
 
 	logLines, err := s.svc.Logs(name, lines)
 	if err != nil {
-		return echo.NewHTTPError(http.StatusNotFound, err.Error())
+		return serviceHTTPError(err)
 	}
 	return c.JSON(http.StatusOK, logLines)
 }
@@ -351,7 +402,18 @@ func (s *Server) handleDoctor(c echo.Context) error {
 	}
 	result, err := doctor.Check(path, s.svc)
 	if err != nil {
-		return echo.NewHTTPError(http.StatusBadRequest, err.Error())
+		return domainHTTPError(domain.InvalidConfigf("%s", err.Error()))
+	}
+	return c.JSON(http.StatusOK, result)
+}
+
+func (s *Server) handleDiagnose(c echo.Context) error {
+	result, err := s.svc.Diagnose(diagnosis.Request{
+		ServiceName: c.QueryParam("service_name"),
+		RepoPath:    c.QueryParam("path"),
+	})
+	if err != nil {
+		return serviceHTTPError(err)
 	}
 	return c.JSON(http.StatusOK, result)
 }
@@ -384,10 +446,51 @@ func (s *Server) handleTeardown(c echo.Context) error {
 	removed, err := s.svc.Teardown(req.RepoPath)
 	if err != nil {
 		log.Printf("[ERROR] teardown repo=%s error=%q", req.RepoPath, err)
-		return echo.NewHTTPError(http.StatusInternalServerError, err.Error())
+		return serviceHTTPError(err)
 	}
 	log.Printf("[TEARDOWN] repo=%s removed=%v", req.RepoPath, removed)
 	return c.JSON(http.StatusOK, map[string]any{"removed": removed, "count": len(removed)})
+}
+
+func serviceHTTPError(err error) error {
+	var gate *service.StartupGateError
+	if errors.As(err, &gate) {
+		return echo.NewHTTPError(http.StatusConflict, map[string]any{
+			"code":      string(domain.CodeConflict),
+			"error":     gate.Error(),
+			"message":   gate.Error(),
+			"phase":     gate.Phase,
+			"completed": gate.Completed,
+			"total":     gate.Total,
+		})
+	}
+	if _, ok := domain.CodeOf(err); ok {
+		return domainHTTPError(err)
+	}
+	return echo.NewHTTPError(http.StatusInternalServerError, err.Error())
+}
+
+func domainHTTPError(err error) error {
+	return echo.NewHTTPError(domainHTTPStatus(err), domain.ToWire(err))
+}
+
+func domainHTTPStatus(err error) int {
+	code, ok := domain.CodeOf(err)
+	if !ok {
+		return http.StatusInternalServerError
+	}
+	switch code {
+	case domain.CodeMissingService:
+		return http.StatusNotFound
+	case domain.CodeInvalidConfig:
+		return http.StatusBadRequest
+	case domain.CodeReadinessFailure:
+		return http.StatusServiceUnavailable
+	case domain.CodeConflict:
+		return http.StatusConflict
+	default:
+		return http.StatusInternalServerError
+	}
 }
 
 func (s *Server) handlePostIssue(c echo.Context) error {
@@ -431,6 +534,58 @@ func (s *Server) handleClearIssues(c echo.Context) error {
 		return echo.NewHTTPError(http.StatusInternalServerError, err.Error())
 	}
 	return c.JSON(http.StatusOK, map[string]any{"status": "cleared"})
+}
+
+type issueTransitionRequest struct {
+	Actor      string `json:"actor,omitempty"`
+	TrackerURL string `json:"tracker_url,omitempty"`
+}
+
+func decodeIssueTransition(c echo.Context) (issueTransitionRequest, error) {
+	var req issueTransitionRequest
+	if c.Request().Body == nil || c.Request().ContentLength == 0 {
+		return req, nil
+	}
+	if err := json.NewDecoder(c.Request().Body).Decode(&req); err != nil {
+		return req, domainHTTPError(domain.InvalidConfigf("invalid issue transition body"))
+	}
+	return req, nil
+}
+
+func (s *Server) handleAcknowledgeIssue(c echo.Context) error {
+	req, err := decodeIssueTransition(c)
+	if err != nil {
+		return err
+	}
+	iss, err := s.iss.Acknowledge(c.Param("id"), req.Actor)
+	if err != nil {
+		return serviceHTTPError(err)
+	}
+	return c.JSON(http.StatusOK, iss)
+}
+
+func (s *Server) handleResolveIssue(c echo.Context) error {
+	req, err := decodeIssueTransition(c)
+	if err != nil {
+		return err
+	}
+	iss, err := s.iss.Resolve(c.Param("id"), req.Actor, req.TrackerURL)
+	if err != nil {
+		return serviceHTTPError(err)
+	}
+	return c.JSON(http.StatusOK, iss)
+}
+
+func (s *Server) handleReopenIssue(c echo.Context) error {
+	req, err := decodeIssueTransition(c)
+	if err != nil {
+		return err
+	}
+	iss, err := s.iss.Reopen(c.Param("id"), req.Actor)
+	if err != nil {
+		return serviceHTTPError(err)
+	}
+	return c.JSON(http.StatusOK, iss)
 }
 
 // setSSEHeaders configures the response for Server-Sent Events streaming.

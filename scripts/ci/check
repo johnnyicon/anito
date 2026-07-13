@@ -1,0 +1,141 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+UI_DIR="$ROOT_DIR/internal/server/ui"
+GOVULNCHECK_VERSION="${GOVULNCHECK_VERSION:-v1.1.4}"
+GO_TEST_TIMEOUT="${GO_TEST_TIMEOUT:-120s}"
+GO_RACE_TIMEOUT="${GO_RACE_TIMEOUT:-240s}"
+COVERAGE_TIMEOUT="${COVERAGE_TIMEOUT:-180s}"
+OUTPUT_DIR="${OUTPUT_DIR:-$ROOT_DIR/dist/release}"
+
+usage() {
+  cat <<'EOF'
+usage: scripts/ci/check <target> [version]
+
+targets:
+  go-test        run go test ./...
+  go-race        run go test -race ./...
+  go-vet         run go vet ./...
+  coverage       run the coverage floor gate
+  ui-build       run the embedded UI production build
+  govulncheck    run the pinned govulncheck scan
+  release-build  build darwin release artifacts only
+  pr             run the full pull-request gate
+  release        run the full release gate and build darwin artifacts
+EOF
+}
+
+run_go_test() {
+  (
+    cd "$ROOT_DIR"
+    go test ./... -count=1 -timeout "$GO_TEST_TIMEOUT"
+  )
+}
+
+run_go_race() {
+  (
+    cd "$ROOT_DIR"
+    go test -race ./... -count=1 -timeout "$GO_RACE_TIMEOUT"
+  )
+}
+
+run_go_vet() {
+  (
+    cd "$ROOT_DIR"
+    go vet ./...
+  )
+}
+
+run_coverage() {
+  (
+    cd "$ROOT_DIR"
+    TIMEOUT="$COVERAGE_TIMEOUT" CHECK=1 bash scripts/coverage
+  )
+}
+
+run_ui_build() {
+  (
+    cd "$UI_DIR"
+    npm run build
+  )
+}
+
+run_govulncheck() {
+  (
+    cd "$ROOT_DIR"
+    go run "golang.org/x/vuln/cmd/govulncheck@${GOVULNCHECK_VERSION}" ./...
+  )
+}
+
+run_release_build() {
+  local version="${1:-${VERSION:-dev}}"
+  local normalized="${version#v}"
+  mkdir -p "$OUTPUT_DIR"
+
+  (
+    cd "$ROOT_DIR"
+    GOOS=darwin GOARCH=arm64 go build -trimpath -ldflags "-X main.version=${version}" -o "$OUTPUT_DIR/anito_${normalized}_darwin_arm64" ./cmd/anito
+    GOOS=darwin GOARCH=amd64 go build -trimpath -ldflags "-X main.version=${version}" -o "$OUTPUT_DIR/anito_${normalized}_darwin_amd64" ./cmd/anito
+  )
+
+  (
+    cd "$OUTPUT_DIR"
+    shasum -a 256 anito_* > SHA256SUMS.txt
+  )
+}
+
+run_pr_gate() {
+  run_go_test
+  run_go_race
+  run_go_vet
+  run_coverage
+  run_ui_build
+  run_govulncheck
+}
+
+run_release_gate() {
+  local version="${1:-${VERSION:-dev}}"
+  run_pr_gate
+  run_release_build "$version"
+}
+
+if [ "$#" -lt 1 ]; then
+  usage
+  exit 1
+fi
+
+case "$1" in
+  go-test)
+    run_go_test
+    ;;
+  go-race)
+    run_go_race
+    ;;
+  go-vet)
+    run_go_vet
+    ;;
+  coverage)
+    run_coverage
+    ;;
+  ui-build)
+    run_ui_build
+    ;;
+  govulncheck)
+    run_govulncheck
+    ;;
+  release-build)
+    run_release_build "${2:-}"
+    ;;
+  pr)
+    run_pr_gate
+    ;;
+  release)
+    run_release_gate "${2:-}"
+    ;;
+  *)
+    usage
+    exit 1
+    ;;
+esac

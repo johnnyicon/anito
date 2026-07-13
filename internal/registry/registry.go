@@ -28,6 +28,7 @@ const (
 	StatusStopped  ServiceStatus = "stopped"
 	StatusFailed   ServiceStatus = "failed"
 	StatusOrphaned ServiceStatus = "orphaned" // binary path no longer exists on disk
+	StatusArchived ServiceStatus = "archived"
 )
 
 // StartEvent records a single start attempt for a service.
@@ -75,6 +76,15 @@ type Service struct {
 	StartHistory  []StartEvent `json:"start_history,omitempty"`  // ring buffer, last 10 starts
 
 	PreviousDeployment *DeploymentSnapshot `json:"previous_deployment,omitempty"`
+	ArchivedAt         time.Time           `json:"archived_at,omitzero"`
+	ArchivedFrom       ServiceStatus       `json:"archived_from,omitempty"`
+}
+
+type Tombstone struct {
+	Name        string         `json:"name"`
+	ArchivedAt  time.Time      `json:"archived_at"`
+	PrunedAt    time.Time      `json:"pruned_at"`
+	StablePorts map[string]int `json:"stable_ports,omitempty"`
 }
 
 // DeploymentSnapshot is the prior deploy configuration needed for rollback.
@@ -188,19 +198,22 @@ func PickPort(ports map[string]int, healthCheckPort string) int {
 
 // Registry manages the on-disk service registry.
 type Registry struct {
-	mu       sync.RWMutex
-	path     string
-	services map[string]*Service
+	mu         sync.RWMutex
+	path       string
+	services   map[string]*Service
+	tombstones map[string]Tombstone
 }
 
 type registryFile struct {
-	Services map[string]*Service `json:"services"`
+	Services   map[string]*Service  `json:"services"`
+	Tombstones map[string]Tombstone `json:"tombstones,omitempty"`
 }
 
 func New(dataDir string) (*Registry, error) {
 	r := &Registry{
-		path:     filepath.Join(dataDir, "registry.json"),
-		services: make(map[string]*Service),
+		path:       filepath.Join(dataDir, "registry.json"),
+		services:   make(map[string]*Service),
+		tombstones: make(map[string]Tombstone),
 	}
 	if err := os.MkdirAll(dataDir, 0755); err != nil {
 		return nil, err
@@ -224,6 +237,13 @@ func (r *Registry) load() error {
 		return err
 	}
 	r.services = f.Services
+	if r.services == nil {
+		r.services = make(map[string]*Service)
+	}
+	r.tombstones = f.Tombstones
+	if r.tombstones == nil {
+		r.tombstones = make(map[string]Tombstone)
+	}
 	// Normalize all services so StablePorts/InternalPorts maps are populated
 	// from old registry files that only had the singular fields.
 	for _, svc := range r.services {
@@ -237,7 +257,7 @@ func (r *Registry) save() error {
 	for _, svc := range r.services {
 		svc.syncSingularFromMap()
 	}
-	f := registryFile{Services: r.services}
+	f := registryFile{Services: r.services, Tombstones: r.tombstones}
 	data, err := json.MarshalIndent(f, "", "  ")
 	if err != nil {
 		return err
@@ -254,13 +274,26 @@ func (r *Registry) save() error {
 func (r *Registry) Register(s *Service) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	s = cloneService(s)
 
 	if existing, exists := r.services[s.Name]; exists {
 		// Preserve stable port assignments — they never change on redeploy.
 		if len(existing.StablePorts) > 0 {
-			s.StablePorts = existing.StablePorts
+			s.StablePorts = copyPorts(existing.StablePorts)
 		}
 		s.StablePort = existing.StablePort
+		// Register stages a new deployment configuration before its candidate
+		// process is ready. Keep the currently serving runtime state until the
+		// service layer commits the successful proxy swap.
+		s.InternalPorts = copyPorts(existing.InternalPorts)
+		s.InternalPort = existing.InternalPort
+		s.Status = existing.Status
+		s.PID = existing.PID
+		s.LastStartedAt = existing.LastStartedAt
+		s.StartHistory = append([]StartEvent(nil), existing.StartHistory...)
+		s.CrashAttempts = existing.CrashAttempts
+		s.GaveUp = existing.GaveUp
+		s.LastDeployedAt = existing.LastDeployedAt
 		if s.ProxyBindAddress == "" {
 			s.ProxyBindAddress = existing.ProxyBindAddress
 		}
@@ -274,6 +307,18 @@ func (r *Registry) Register(s *Service) error {
 	s.NormalizePorts()
 	s.UpdatedAt = time.Now()
 	r.services[s.Name] = s
+	return r.save()
+}
+
+// Restore replaces a service record exactly. It is used when a deployment
+// candidate fails after Register has staged its configuration.
+func (r *Registry) Restore(s *Service) error {
+	if s == nil {
+		return fmt.Errorf("cannot restore a nil service")
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.services[s.Name] = cloneService(s)
 	return r.save()
 }
 
@@ -339,24 +384,15 @@ func copyPortMap(in map[string]int) map[string]int {
 	return out
 }
 
-// Restore replaces a service record exactly with a previously cloned value.
-func (r *Registry) Restore(s *Service) error {
-	if s == nil {
-		return fmt.Errorf("cannot restore nil service")
-	}
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	s.NormalizePorts()
-	r.services[s.Name] = s
-	return r.save()
-}
-
 // Get returns a service by name.
 func (r *Registry) Get(name string) (*Service, bool) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	s, ok := r.services[name]
-	return s, ok
+	if !ok {
+		return nil, false
+	}
+	return cloneService(s), true
 }
 
 // All returns all registered services.
@@ -365,9 +401,90 @@ func (r *Registry) All() []*Service {
 	defer r.mu.RUnlock()
 	out := make([]*Service, 0, len(r.services))
 	for _, s := range r.services {
-		out = append(out, s)
+		if s.Status == StatusArchived {
+			continue
+		}
+		out = append(out, cloneService(s))
 	}
 	return out
+}
+
+// AllIncludingArchived returns all registered entries, including archived ones.
+func (r *Registry) AllIncludingArchived() []*Service {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	out := make([]*Service, 0, len(r.services))
+	for _, s := range r.services {
+		out = append(out, cloneService(s))
+	}
+	return out
+}
+
+func (r *Registry) Archive(name string) (*Service, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	s, ok := r.services[name]
+	if !ok {
+		return nil, fmt.Errorf("service %q not found", name)
+	}
+	if s.Status == StatusArchived {
+		return nil, fmt.Errorf("service %q is already archived", name)
+	}
+	if s.Status == StatusRunning {
+		return nil, fmt.Errorf("service %q is running; stop it before archiving", name)
+	}
+	s.ArchivedFrom = s.Status
+	s.Status = StatusArchived
+	s.ArchivedAt = time.Now()
+	s.PID = 0
+	s.UpdatedAt = time.Now()
+	if err := r.save(); err != nil {
+		return nil, err
+	}
+	return cloneService(s), nil
+}
+
+func (r *Registry) RestoreArchived(name string) (*Service, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	s, ok := r.services[name]
+	if !ok {
+		return nil, fmt.Errorf("service %q not found", name)
+	}
+	if s.Status != StatusArchived {
+		return nil, fmt.Errorf("service %q is not archived", name)
+	}
+	s.Status = StatusStopped
+	s.ArchivedFrom = ""
+	s.ArchivedAt = time.Time{}
+	s.UpdatedAt = time.Now()
+	if err := r.save(); err != nil {
+		return nil, err
+	}
+	return cloneService(s), nil
+}
+
+func (r *Registry) Prune(name string) (Tombstone, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	s, ok := r.services[name]
+	if !ok {
+		return Tombstone{}, fmt.Errorf("service %q not found", name)
+	}
+	if s.Status != StatusArchived {
+		return Tombstone{}, fmt.Errorf("service %q must be archived before pruning", name)
+	}
+	now := time.Now()
+	tomb := Tombstone{Name: name, ArchivedAt: s.ArchivedAt, PrunedAt: now, StablePorts: copyPorts(s.StablePorts)}
+	delete(r.services, name)
+	if r.tombstones == nil {
+		r.tombstones = make(map[string]Tombstone)
+	}
+	r.tombstones[name] = tomb
+	if err := r.save(); err != nil {
+		return Tombstone{}, err
+	}
+	return tomb, nil
 }
 
 // UpdateStatus updates the runtime status and PID of a service.
@@ -457,6 +574,43 @@ func (r *Registry) MarkRunning(name string, pid int, lastDeployedAt time.Time) e
 	return r.save()
 }
 
+// RecordStart atomically records the process start time and appends its
+// in-progress history entry.
+func (r *Registry) RecordStart(name string, startedAt time.Time) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	s, ok := r.services[name]
+	if !ok {
+		return fmt.Errorf("service %q not found", name)
+	}
+	s.LastStartedAt = startedAt
+	s.StartHistory = append(s.StartHistory, StartEvent{StartedAt: startedAt, ExitCode: -1})
+	if len(s.StartHistory) > 10 {
+		s.StartHistory = s.StartHistory[len(s.StartHistory)-10:]
+	}
+	s.UpdatedAt = time.Now()
+	return r.save()
+}
+
+// CompleteStart fills in the exit code and duration for a recorded start.
+func (r *Registry) CompleteStart(name string, startedAt time.Time, exitCode int, duration time.Duration) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	s, ok := r.services[name]
+	if !ok {
+		return fmt.Errorf("service %q not found", name)
+	}
+	for i := len(s.StartHistory) - 1; i >= 0; i-- {
+		if s.StartHistory[i].StartedAt.Equal(startedAt) {
+			s.StartHistory[i].ExitCode = exitCode
+			s.StartHistory[i].Duration = duration
+			s.UpdatedAt = time.Now()
+			return r.save()
+		}
+	}
+	return fmt.Errorf("service %q start record not found", name)
+}
+
 // UpdateLastStarted records when the current process started.
 func (r *Registry) UpdateLastStarted(name string, t time.Time) error {
 	r.mu.Lock()
@@ -511,10 +665,41 @@ func (r *Registry) UpdateInternalPorts(name string, ports map[string]int) error 
 	if !ok {
 		return fmt.Errorf("service %q not found", name)
 	}
-	s.InternalPorts = ports
+	s.InternalPorts = copyPorts(ports)
 	s.syncSingularFromMap()
 	s.UpdatedAt = time.Now()
 	return r.save()
+}
+
+func cloneService(s *Service) *Service {
+	if s == nil {
+		return nil
+	}
+	clone := *s
+	clone.Args = append([]string(nil), s.Args...)
+	clone.StablePorts = copyPorts(s.StablePorts)
+	clone.InternalPorts = copyPorts(s.InternalPorts)
+	clone.WatchPaths = append([]string(nil), s.WatchPaths...)
+	clone.StartHistory = append([]StartEvent(nil), s.StartHistory...)
+	if s.PreviousDeployment != nil {
+		prev := *s.PreviousDeployment
+		prev.Args = append([]string(nil), s.PreviousDeployment.Args...)
+		prev.StablePorts = copyPorts(s.PreviousDeployment.StablePorts)
+		prev.WatchPaths = append([]string(nil), s.PreviousDeployment.WatchPaths...)
+		clone.PreviousDeployment = &prev
+	}
+	return &clone
+}
+
+func copyPorts(ports map[string]int) map[string]int {
+	if len(ports) == 0 {
+		return nil
+	}
+	clone := make(map[string]int, len(ports))
+	for name, port := range ports {
+		clone[name] = port
+	}
+	return clone
 }
 
 // Remove deletes a service from the registry.

@@ -1139,3 +1139,45 @@ func TestCheckConfig_WorktreeViteCache(t *testing.T) {
 		t.Errorf("expected 'worktree' info issue for Vite cache; got issues: %v", cr.Issues)
 	}
 }
+
+func TestCheckConfig_WorktreeViteCacheWithForceWrapper(t *testing.T) {
+	base := t.TempDir()
+	wtDir := filepath.Join(base, "worktrees", "agent-test3", ".anito")
+	if err := os.MkdirAll(wtDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	serviceDir := filepath.Dir(wtDir)
+	if err := os.WriteFile(filepath.Join(serviceDir, "package.json"), []byte(`{}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	nmDir := filepath.Join(serviceDir, "node_modules")
+	for i := 0; i < 6; i++ {
+		pkgDir := filepath.Join(nmDir, fmt.Sprintf("pkg%d", i))
+		if err := os.MkdirAll(pkgDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.MkdirAll(filepath.Join(nmDir, ".vite"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	wrapperPath := filepath.Join(wtDir, "wt-svc3-dev.sh")
+	wrapper := "#!/usr/bin/env bash\nexec pnpm exec vite dev --force\n"
+	if err := os.WriteFile(wrapperPath, []byte(wrapper), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	cfgPath := filepath.Join(wtDir, "config.yaml")
+	cfg := fmt.Sprintf("name: wt-svc3\nport: 0\ntype: binary\noutput: %s\n", wrapperPath)
+	if err := os.WriteFile(cfgPath, []byte(cfg), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cr := checkConfig(cfgPath, ".anito/config.yaml", base, nil)
+	found := findIssue(cr.Issues, "worktree", "info")
+	if found != nil {
+		t.Errorf("unexpected worktree info issue when Vite wrapper uses --force: %v", found)
+	}
+}

@@ -230,14 +230,14 @@ func generateServiceFiles(svc ServiceSpec, port int, repoRoot string) (Generated
 		rel, _ := filepath.Rel(repoRoot, svc.Path)
 		var runCmd string
 		if rel == "." || rel == "" {
-			runCmd = "pnpm exec vite dev"
+			runCmd = "pnpm exec vite dev --force"
 		} else {
 			// Try to read package.json name for workspace filter
 			pkgName := readPackageJSONName(svc.Path)
 			if pkgName != "" {
-				runCmd = fmt.Sprintf("pnpm --filter %s exec vite dev", pkgName)
+				runCmd = fmt.Sprintf("pnpm --filter %s exec vite dev --force", pkgName)
 			} else {
-				runCmd = fmt.Sprintf("pnpm --filter ./%s exec vite dev", rel)
+				runCmd = fmt.Sprintf("pnpm --filter ./%s exec vite dev --force", rel)
 			}
 		}
 
@@ -245,6 +245,7 @@ func generateServiceFiles(svc ServiceSpec, port int, repoRoot string) (Generated
 		script.WriteString("#!/usr/bin/env bash\n")
 		script.WriteString("# [anito:managed] DO NOT EDIT — regenerate with: anito setup\n")
 		script.WriteString(fmt.Sprintf("# Dev server wrapper for %s. Anito injects PORT via env.\n", svc.Name))
+		script.WriteString("# Vite --force clears stale module/dependency cache after worktree branch changes.\n")
 		script.WriteString(fmt.Sprintf("cd %s\n", repoRoot))
 		script.WriteString(fmt.Sprintf("exec %s\n", runCmd))
 
@@ -301,10 +302,10 @@ func generateNodeFrameworkPatch(svc ServiceSpec, alloc PortAllocation, relations
 
 	// Collect proxy entries: services that this service depends on.
 	type proxyEntry struct {
-		path    string
-		toName  string
+		path     string
+		toName   string
 		toPrefix string
-		toPort  int
+		toPort   int
 	}
 	var proxies []proxyEntry
 	for _, rel := range relationships {

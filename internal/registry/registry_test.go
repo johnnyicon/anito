@@ -5,6 +5,86 @@ import (
 	"time"
 )
 
+func newTestRegistry(t *testing.T) *Registry {
+	t.Helper()
+	r, err := New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return r
+}
+
+func TestArchiveRestoreAndPrunePreservePortAndTombstone(t *testing.T) {
+	r := newTestRegistry(t)
+	if err := r.Register(&Service{Name: "archivable", Type: TypeBinary, BinaryPath: "/bin/true", StablePort: 8123, Status: StatusStopped}); err != nil {
+		t.Fatal(err)
+	}
+	archived, err := r.Archive("archivable")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if archived.Status != StatusArchived || archived.StablePort != 8123 {
+		t.Fatalf("archived = %+v", archived)
+	}
+	if got := r.All(); len(got) != 0 {
+		t.Fatalf("active services = %d, want 0", len(got))
+	}
+	restored, err := r.RestoreArchived("archivable")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if restored.Status != StatusStopped || restored.StablePort != 8123 {
+		t.Fatalf("restored = %+v", restored)
+	}
+	if _, err := r.Prune("archivable"); err == nil {
+		t.Fatal("prune unexpectedly succeeded for non-archived service")
+	}
+	if _, err := r.Archive("archivable"); err != nil {
+		t.Fatal(err)
+	}
+	tomb, err := r.Prune("archivable")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tomb.Name != "archivable" || tomb.StablePorts["default"] != 8123 {
+		t.Fatalf("tombstone = %+v", tomb)
+	}
+	if _, ok := r.Get("archivable"); ok {
+		t.Fatal("pruned service still registered")
+	}
+}
+
+func TestArchiveLifecycleRejectsInvalidTransitions(t *testing.T) {
+	r := newTestRegistry(t)
+	if _, err := r.Archive("missing"); err == nil {
+		t.Fatal("archive missing service unexpectedly succeeded")
+	}
+	if err := r.Register(&Service{Name: "running", StablePort: 8124, Status: StatusRunning}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.Archive("running"); err == nil {
+		t.Fatal("archive running service unexpectedly succeeded")
+	}
+	if err := r.UpdateStatus("running", StatusStopped, 0); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.RestoreArchived("running"); err == nil {
+		t.Fatal("restore active service unexpectedly succeeded")
+	}
+	if _, err := r.Prune("missing"); err == nil {
+		t.Fatal("prune missing service unexpectedly succeeded")
+	}
+	if _, err := r.Archive("running"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.Archive("running"); err == nil {
+		t.Fatal("archive archived service unexpectedly succeeded")
+	}
+	if got := r.AllIncludingArchived(); len(got) != 1 || got[0].Status != StatusArchived {
+		t.Fatalf("all including archived = %+v", got)
+	}
+}
+
 // TestStablePortPreservedOnRedeploy verifies the core invariant: re-registering
 // a service with a different StablePort value must not change the port that was
 // stored on the first registration.
@@ -695,5 +775,123 @@ func TestPrimaryPortAlphabeticalFallback(t *testing.T) {
 	got := PickPort(ports, "")
 	if got != 2222 {
 		t.Errorf("PickPort alphabetical fallback: got %d, want 2222 (alpha)", got)
+	}
+}
+
+func TestGetReturnsDeepCopy(t *testing.T) {
+	r := newTestRegistry(t)
+	if err := r.Register(&Service{
+		Name:          "copy-test",
+		StablePorts:   map[string]int{"default": 8100},
+		InternalPorts: map[string]int{"default": 51000},
+		Args:          []string{"one"},
+		WatchPaths:    []string{"src"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	first, _ := r.Get("copy-test")
+	first.StablePorts["default"] = 9999
+	first.Args[0] = "changed"
+	first.WatchPaths[0] = "changed"
+
+	second, _ := r.Get("copy-test")
+	if second.StablePorts["default"] != 8100 || second.Args[0] != "one" || second.WatchPaths[0] != "src" {
+		t.Fatalf("registry state was mutated through Get: %+v", second)
+	}
+}
+
+func TestRecordAndCompleteStart(t *testing.T) {
+	r := newTestRegistry(t)
+	if err := r.Register(&Service{Name: "history-test"}); err != nil {
+		t.Fatal(err)
+	}
+	startedAt := time.Now()
+	if err := r.RecordStart("history-test", startedAt); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.CompleteStart("history-test", startedAt, 7, 2*time.Second); err != nil {
+		t.Fatal(err)
+	}
+	svc, _ := r.Get("history-test")
+	if len(svc.StartHistory) != 1 || svc.StartHistory[0].ExitCode != 7 || svc.StartHistory[0].Duration != 2*time.Second {
+		t.Fatalf("completed history = %+v", svc.StartHistory)
+	}
+}
+
+func TestProcessStartAndClonePreserveRuntimeData(t *testing.T) {
+	r := newTestRegistry(t)
+	if err := r.Register(&Service{
+		Name:        "runtime-data",
+		Type:        TypeBinary,
+		StablePorts: map[string]int{"default": 8100, "metrics": 8101},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	startedAt := time.Now().Add(-time.Second)
+	if err := r.UpdateProcessStarted("runtime-data", map[string]int{"default": 51000, "metrics": 51001}, startedAt); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.MarkRunning("runtime-data", 1234, startedAt.Add(time.Millisecond)); err != nil {
+		t.Fatal(err)
+	}
+
+	svc, ok := r.Get("runtime-data")
+	if !ok {
+		t.Fatal("runtime-data not found")
+	}
+	if svc.Status != StatusRunning || svc.PID != 1234 || svc.InternalPorts["metrics"] != 51001 {
+		t.Fatalf("runtime state = %+v", svc)
+	}
+	if len(svc.StartHistory) != 1 || !svc.StartHistory[0].StartedAt.Equal(startedAt) {
+		t.Fatalf("start history = %+v", svc.StartHistory)
+	}
+
+	clone := Clone(svc)
+	clone.Args = []string{"changed"}
+	clone.StablePorts["default"] = 9999
+	clone.InternalPorts["default"] = 9998
+	clone.StartHistory[0].ExitCode = 7
+	if svc.Args != nil || svc.StablePorts["default"] != 8100 || svc.InternalPorts["default"] != 51000 || svc.StartHistory[0].ExitCode != -1 {
+		t.Fatalf("Clone did not isolate mutable fields: original=%+v clone=%+v", svc, clone)
+	}
+	if Clone(nil) != nil {
+		t.Fatal("Clone(nil) returned a value")
+	}
+}
+
+func TestAddressesReturnsEveryNamedPort(t *testing.T) {
+	svc := &Service{
+		ProxyBindAddress: "127.0.0.1",
+		StablePorts:      map[string]int{"http": 8100, "metrics": 9100},
+	}
+	got := svc.Addresses()
+	if got["http"] != "http://127.0.0.1:8100" || got["metrics"] != "http://127.0.0.1:9100" {
+		t.Fatalf("Addresses = %v", got)
+	}
+	if (&Service{}).Addresses() != nil {
+		t.Fatal("empty service returned non-nil addresses")
+	}
+}
+
+func TestRestoreReplacesRecordExactly(t *testing.T) {
+	r := newTestRegistry(t)
+	if err := r.Register(&Service{Name: "restore-test", Version: "bad", StablePort: 8100}); err != nil {
+		t.Fatal(err)
+	}
+	want := &Service{
+		Name:          "restore-test",
+		Version:       "good",
+		StablePorts:   map[string]int{"default": 8100},
+		InternalPorts: map[string]int{"default": 51000},
+		Status:        StatusRunning,
+		PID:           42,
+	}
+	want.NormalizePorts()
+	if err := r.Restore(want); err != nil {
+		t.Fatal(err)
+	}
+	got, _ := r.Get("restore-test")
+	if got.Version != "good" || got.Status != StatusRunning || got.PID != 42 || got.InternalPort != 51000 {
+		t.Fatalf("restored record = %+v", got)
 	}
 }

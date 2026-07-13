@@ -20,6 +20,7 @@ Ideas worth keeping but not building yet. Each has its own document with full de
 
 - **`anito_setup` MCP tool** — single-service and composite app setup, `[anito:managed]` source patches
 - **Admin SPA v1** — services list, log viewer, daemon log, issue drawer, activity feed
+- **Admin SPA write operations** — restart, stop, and remove from the browser
 - **Multi-port services** — named ports, per-port proxies, atomic hot-swap
 - **Issue logging** — structured `issues.jsonl`, auto-logged crashes and deploy failures, `DELETE /issues`
 - **Session tracking** — persistent `sessions.json`, middleware observation, `GET /sessions`
@@ -31,6 +32,5 @@ Ideas worth keeping but not building yet. Each has its own document with full de
 
 ## Parked (needs more design)
 
-- **Admin SPA v2 write operations** — restart, stop, remove from the browser (CLI covers these for now)
 - **Sessions panel in dashboard** — `GET /sessions` endpoint is live; UI panel not yet built
-- **`anito init` CLI command** — CLI equivalent of `anito_setup` MCP tool (scaffold `.anito/` from terminal)
+- **Composite setup CLI/API parity** — single-service `anito setup` exists; composite dry-run/apply remains MCP-only

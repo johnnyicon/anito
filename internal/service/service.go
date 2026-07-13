@@ -22,6 +22,8 @@ import (
 	"time"
 
 	"github.com/johnnyicon/anito/internal/config"
+	"github.com/johnnyicon/anito/internal/diagnosis"
+	"github.com/johnnyicon/anito/internal/domain"
 	"github.com/johnnyicon/anito/internal/issues"
 	"github.com/johnnyicon/anito/internal/notify"
 	"github.com/johnnyicon/anito/internal/process"
@@ -106,6 +108,8 @@ type Service struct {
 
 	deployLocks sync.Map // map[string]*sync.Mutex — per-service deploy serialization
 
+	startup startupTracker
+
 	deploysTotal atomic.Int64
 	crashesTotal atomic.Int64
 }
@@ -152,6 +156,7 @@ func New(reg *registry.Registry, mgr *process.Manager, prx *proxy.Manager, logDi
 		wtch:          wtch,
 		iss:           iss,
 		crashAttempts: make(map[string]int),
+		startup:       newStartupTracker(),
 	}
 	mgr.OnCrash = svc.handleCrash
 	return svc
@@ -192,11 +197,17 @@ func (s *Service) lockDeploy(name string) func() {
 //   - If StablePorts is nil and StablePort == 0, a port is auto-allocated.
 //   - Re-deploying an existing service always preserves its stable port(s).
 func (s *Service) Deploy(req DeployRequest) (*registry.Service, error) {
+	if err := s.ensureMutable(); err != nil {
+		return nil, err
+	}
 	if err := ValidateServiceName(req.Name); err != nil {
 		return nil, err
 	}
 	defer s.lockDeploy(req.Name)()
 
+	if err := validateDeployRequest(req); err != nil {
+		return nil, err
+	}
 	if req.HealthCheck == "" {
 		req.HealthCheck = "/health"
 	}
@@ -261,6 +272,7 @@ func (s *Service) Deploy(req DeployRequest) (*registry.Service, error) {
 		HealthCheckTimeout: hcTimeout,
 		RestartPolicy:      restartPolicy,
 		ConfigPath:         req.ConfigPath,
+		Status:             registry.StatusStopped,
 	}
 	svc.NormalizePorts()
 
@@ -269,6 +281,7 @@ func (s *Service) Deploy(req DeployRequest) (*registry.Service, error) {
 	}
 	svc, _ = s.reg.Get(req.Name)
 	if err := s.prx.RegisterPortsWithBind(svc.Name, svc.StablePorts, svc.ProxyBindAddress); err != nil {
+		s.restorePrevious(req.Name, previous, nil)
 		return nil, err
 	}
 
@@ -289,19 +302,16 @@ func (s *Service) Deploy(req DeployRequest) (*registry.Service, error) {
 	// Binary: start new process, health-check it, swap proxy, drain old process.
 	oldProc := s.mgr.Detach(svc.Name)
 
-	startedAt := time.Now()
-	internalPorts, err := s.mgr.Start(svc)
+	internalPorts, err := s.mgr.StartCandidate(svc)
 	if err != nil {
 		s.restoreFailedDeploy(req.Name, previous, hadPrevious, oldProc)
 		return nil, err
 	}
-	_ = s.reg.UpdateProcessStarted(req.Name, internalPorts, startedAt)
-
 	// Health-check on the designated port.
 	hcInternalPort := registry.PickPort(internalPorts, req.HealthCheckPort)
 
 	if err := waitHealthy(hcInternalPort, req.HealthCheck, hcTimeout); err != nil {
-		_ = s.mgr.Stop(req.Name)
+		_ = s.mgr.StopFailed(req.Name)
 		s.restoreFailedDeploy(req.Name, previous, hadPrevious, oldProc)
 		return nil, err
 	}
@@ -312,13 +322,21 @@ func (s *Service) Deploy(req DeployRequest) (*registry.Service, error) {
 	}
 
 	if err := s.prx.SwapPorts(req.Name, internalPorts); err != nil {
-		_ = s.mgr.Stop(req.Name)
+		_ = s.mgr.StopFailed(req.Name)
 		s.restoreFailedDeploy(req.Name, previous, hadPrevious, oldProc)
 		return nil, err
 	}
-
 	newPID := s.mgr.PID(req.Name)
+	if newPID == 0 {
+		s.restoreFailedDeploy(req.Name, previous, hadPrevious, oldProc)
+		return nil, fmt.Errorf("service %q candidate exited before activation", req.Name)
+	}
+	if err := s.mgr.Activate(req.Name); err != nil {
+		s.restoreFailedDeploy(req.Name, previous, hadPrevious, oldProc)
+		return nil, err
+	}
 	_ = s.reg.MarkRunning(req.Name, newPID, time.Now())
+	_ = s.reg.UpdateCrashState(req.Name, 0, false)
 
 	s.crashMu.Lock()
 	delete(s.crashAttempts, req.Name)
@@ -354,6 +372,10 @@ func (s *Service) restoreFailedDeploy(name string, previous *registry.Service, h
 		}
 	}
 	if hadPrevious {
+		if current, ok := s.reg.Get(name); ok {
+			previous.LastStartedAt = current.LastStartedAt
+			previous.StartHistory = append([]registry.StartEvent(nil), current.StartHistory...)
+		}
 		if err := s.reg.Restore(previous); err != nil {
 			log.Printf("[ERROR] name=%s restore registry failed: %v", name, err)
 		}
@@ -403,7 +425,7 @@ func (s *Service) UsedPorts() map[int]bool {
 func (s *Service) Status(name string) (*registry.Service, error) {
 	svc, ok := s.reg.Get(name)
 	if !ok {
-		return nil, fmt.Errorf("service %q not found", name)
+		return nil, domain.MissingServicef("service %q not found", name)
 	}
 	if isOrphaned(svc) {
 		projected := *svc
@@ -414,6 +436,12 @@ func (s *Service) Status(name string) (*registry.Service, error) {
 }
 
 func (s *Service) Stop(name string) error {
+	if err := s.ensureMutable(); err != nil {
+		return err
+	}
+	if _, ok := s.reg.Get(name); !ok {
+		return domain.MissingServicef("service %q not found", name)
+	}
 	s.wtch.Stop(name)
 	err := s.mgr.Stop(name)
 	if err != nil {
@@ -428,6 +456,9 @@ func (s *Service) Stop(name string) error {
 }
 
 func (s *Service) Restart(name string) error {
+	if err := s.ensureMutable(); err != nil {
+		return err
+	}
 	if err := ValidateServiceName(name); err != nil {
 		return err
 	}
@@ -438,7 +469,7 @@ func (s *Service) Restart(name string) error {
 func (s *Service) restartLocked(name string) error {
 	svc, ok := s.reg.Get(name)
 	if !ok {
-		return fmt.Errorf("service %q not found", name)
+		return domain.MissingServicef("service %q not found", name)
 	}
 
 	if svc.Type != registry.TypeBinary {
@@ -448,15 +479,12 @@ func (s *Service) restartLocked(name string) error {
 	previous := registry.Clone(svc)
 	oldProc := s.mgr.Detach(name)
 
-	startedAt := time.Now()
-	internalPorts, err := s.mgr.Start(svc)
+	internalPorts, err := s.mgr.StartCandidate(svc)
 	if err != nil {
 		log.Printf("[RESTART] name=%s error=%q", name, err)
 		s.restoreFailedDeploy(name, previous, true, oldProc)
 		return err
 	}
-	_ = s.reg.UpdateProcessStarted(name, internalPorts, startedAt)
-
 	hcTimeout := svc.HealthCheckTimeout
 	if hcTimeout == 0 {
 		hcTimeout = defaultHealthCheckTimeout
@@ -467,25 +495,33 @@ func (s *Service) restartLocked(name string) error {
 
 	if err := waitHealthy(hcInternalPort, svc.HealthCheck, hcTimeout); err != nil {
 		log.Printf("[RESTART] name=%s error=%q", name, err)
-		_ = s.mgr.Stop(name)
+		_ = s.mgr.StopFailed(name)
 		s.restoreFailedDeploy(name, previous, true, oldProc)
 		return err
 	}
 	if err := process.VerifyPortsOwnedByProcessTree(internalPorts, s.mgr.PID(name)); err != nil {
 		log.Printf("[RESTART] name=%s ownership=%q", name, err)
-		_ = s.mgr.Stop(name)
+		_ = s.mgr.StopFailed(name)
 		s.restoreFailedDeploy(name, previous, true, oldProc)
 		return err
 	}
 
 	if err := s.prx.SwapPorts(name, internalPorts); err != nil {
-		_ = s.mgr.Stop(name)
+		_ = s.mgr.StopFailed(name)
 		s.restoreFailedDeploy(name, previous, true, oldProc)
 		return err
 	}
-
 	newPID := s.mgr.PID(name)
+	if newPID == 0 {
+		s.restoreFailedDeploy(name, previous, true, oldProc)
+		return fmt.Errorf("service %q candidate exited before activation", name)
+	}
+	if err := s.mgr.Activate(name); err != nil {
+		s.restoreFailedDeploy(name, previous, true, oldProc)
+		return err
+	}
 	_ = s.reg.MarkRunning(name, newPID, time.Time{})
+	_ = s.reg.UpdateCrashState(name, 0, false)
 
 	s.crashMu.Lock()
 	delete(s.crashAttempts, name)
@@ -512,16 +548,113 @@ func (s *Service) restartLocked(name string) error {
 	return nil
 }
 
+func (s *Service) restorePrevious(name string, previous *registry.Service, old *process.DetachedProcess) {
+	if previous == nil {
+		s.prx.UnswapPorts(name)
+		_ = s.reg.UpdateStatus(name, registry.StatusFailed, 0)
+		return
+	}
+
+	// Keep the failed candidate in lifecycle history while restoring the last
+	// known-good deploy configuration and runtime ports.
+	if current, ok := s.reg.Get(name); ok {
+		previous.LastStartedAt = current.LastStartedAt
+		previous.StartHistory = current.StartHistory
+	}
+	if err := s.reg.Restore(previous); err != nil {
+		log.Printf("[ERROR] name=%s registry restore failed: %v", name, err)
+		return
+	}
+	if old != nil {
+		if restored, err := s.mgr.Restore(name, old); err != nil {
+			log.Printf("[ERROR] name=%s process restore failed: %v", name, err)
+		} else if !restored {
+			log.Printf("[ERROR] name=%s process restore skipped: previous process exited", name)
+		} else {
+			if len(previous.InternalPorts) > 0 {
+				if err := s.prx.SwapPorts(name, previous.InternalPorts); err != nil {
+					log.Printf("[ERROR] name=%s proxy restore failed: %v", name, err)
+				}
+			}
+			_ = s.reg.UpdateStatus(name, registry.StatusRunning, old.PID())
+			return
+		}
+	}
+	if previous.Status == registry.StatusRunning && !s.mgr.IsRunning(name) && previous.Type == registry.TypeBinary {
+		s.prx.UnswapPorts(name)
+		_ = s.reg.UpdateStatus(name, registry.StatusFailed, 0)
+	}
+}
+
+func validateDeployRequest(req DeployRequest) error {
+	if err := validateServiceName(req.Name); err != nil {
+		return err
+	}
+	if req.Path == "" {
+		return domain.InvalidConfigf("service path is required")
+	}
+	typeName := req.Type
+	if typeName == "" {
+		typeName = registry.TypeBinary
+	}
+	if typeName != registry.TypeBinary && typeName != registry.TypeStatic {
+		return domain.InvalidConfigf("service %q has unsupported type %q", req.Name, typeName)
+	}
+	info, err := os.Stat(req.Path)
+	if err != nil {
+		return domain.InvalidConfigf("service %q path %s: %v", req.Name, req.Path, err)
+	}
+	if typeName == registry.TypeBinary && info.IsDir() {
+		return domain.InvalidConfigf("service %q binary path is a directory: %s", req.Name, req.Path)
+	}
+	if typeName == registry.TypeStatic && !info.IsDir() {
+		return domain.InvalidConfigf("service %q static path is not a directory: %s", req.Name, req.Path)
+	}
+	if req.HealthCheck != "" && !strings.HasPrefix(req.HealthCheck, "/") {
+		return domain.InvalidConfigf("service %q health_check must start with /", req.Name)
+	}
+	if req.RestartPolicy != "" {
+		switch req.RestartPolicy {
+		case "always", "on-watch", "never":
+		default:
+			return domain.InvalidConfigf("service %q restart_policy must be always, on-watch, or never", req.Name)
+		}
+	}
+	return nil
+}
+
+func validateServiceName(name string) error {
+	if name == "" {
+		return domain.InvalidConfigf("service name is required")
+	}
+	if len(name) > 128 {
+		return domain.InvalidConfigf("service name must be 128 characters or fewer")
+	}
+	if name == DaemonLogName || name == "." || name == ".." {
+		return domain.InvalidConfigf("service name %q is reserved", name)
+	}
+	for _, r := range name {
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '-' || r == '_' || r == '.' {
+			continue
+		}
+		return domain.InvalidConfigf("service name %q contains invalid character %q", name, r)
+	}
+	return nil
+}
+
 func (s *Service) Rollback(name string) (*registry.Service, error) {
+	if err := s.ensureMutable(); err != nil {
+		return nil, err
+	}
 	defer s.lockDeploy(name)()
 
 	current, ok := s.reg.Get(name)
 	if !ok {
-		return nil, fmt.Errorf("service %q not found", name)
+		return nil, domain.MissingServicef("service %q not found", name)
 	}
 	prev := current.PreviousDeployment
 	if prev == nil {
-		return nil, fmt.Errorf("service %q has no previous deployment", name)
+		return nil, domain.InvalidConfigf("service %q has no previous deployment", name)
 	}
 
 	restored := &registry.Service{
@@ -593,6 +726,9 @@ func fallbackString(value, fallback string) string {
 }
 
 func (s *Service) Remove(name string) error {
+	if err := s.ensureMutable(); err != nil {
+		return err
+	}
 	// Read config path before removing from registry.
 	svc, _ := s.reg.Get(name)
 
@@ -616,6 +752,9 @@ func (s *Service) Remove(name string) error {
 // receipt file does not exist (no-op). Errors for individual removals are
 // collected and returned together.
 func (s *Service) Teardown(repoPath string) ([]string, error) {
+	if err := s.ensureMutable(); err != nil {
+		return nil, err
+	}
 	f, err := receipt.Load(repoPath)
 	if err != nil {
 		return nil, fmt.Errorf("teardown: read receipt: %w", err)
@@ -872,6 +1011,43 @@ func (s *Service) handleCrash(name string) {
 	}
 }
 
+// BuildLog runs the build command from the service's config_path and pipes
+// output to ~/.anito/logs/<name>-build.log.
+// Returns the build log path (always) and a non-nil error if the build failed.
+func (s *Service) BuildLog(name string) (string, error) {
+	svc, ok := s.reg.Get(name)
+	if !ok {
+		return "", domain.MissingServicef("service %q not found", name)
+	}
+	if svc.ConfigPath == "" {
+		return "", domain.InvalidConfigf("service %q has no config_path — cannot run build", name)
+	}
+
+	cfg, err := config.Load(svc.ConfigPath)
+	if err != nil {
+		return "", domain.InvalidConfigf("loading config: %v", err)
+	}
+	if cfg.Build == "" {
+		return "", domain.InvalidConfigf("service %q config has no build command", name)
+	}
+
+	buildLogPath := filepath.Join(s.logDir, name+"-build.log")
+	logFile, err := os.Create(buildLogPath)
+	if err != nil {
+		return "", fmt.Errorf("creating build log: %w", err)
+	}
+	defer logFile.Close()
+
+	cmd := shellcmd.Command(cfg.Build, shellcmd.BuildDir(svc.ConfigPath))
+	cmd.Stdout = logFile
+	cmd.Stderr = logFile
+
+	if runErr := cmd.Run(); runErr != nil {
+		return buildLogPath, fmt.Errorf("build failed: %w", runErr)
+	}
+	return buildLogPath, nil
+}
+
 // buildLogFilePath returns the path to the build log for a service.
 // Returns an error if the service is not registered.
 func (s *Service) buildLogFilePath(name string) (string, error) {
@@ -879,7 +1055,7 @@ func (s *Service) buildLogFilePath(name string) (string, error) {
 		return "", err
 	}
 	if _, ok := s.reg.Get(name); !ok {
-		return "", fmt.Errorf("service %q not found", name)
+		return "", domain.MissingServicef("service %q not found", name)
 	}
 	return filepath.Join(s.logDir, name+"-build.log"), nil
 }
@@ -972,7 +1148,7 @@ func (s *Service) logFilePath(name string) (string, error) {
 		return "", err
 	}
 	if _, ok := s.reg.Get(name); !ok {
-		return "", fmt.Errorf("service %q not found", name)
+		return "", domain.MissingServicef("service %q not found", name)
 	}
 	return filepath.Join(s.logDir, name+".log"), nil
 }
@@ -1063,6 +1239,9 @@ func (s *Service) LogStream(ctx context.Context, name string) (<-chan string, er
 // For backward compat, preferredPort allocates a single "default" port.
 // For multi-port, use ReservePorts instead.
 func (s *Service) Reserve(name string, preferredPort int) (int, error) {
+	if err := s.ensureMutable(); err != nil {
+		return 0, err
+	}
 	if err := ValidateServiceName(name); err != nil {
 		return 0, err
 	}
@@ -1088,6 +1267,9 @@ func (s *Service) Reserve(name string, preferredPort int) (int, error) {
 
 // ReservePorts claims multiple named stable ports for a service without deploying it.
 func (s *Service) ReservePorts(name string, preferred map[string]int) (map[string]int, error) {
+	if err := s.ensureMutable(); err != nil {
+		return nil, err
+	}
 	if err := ValidateServiceName(name); err != nil {
 		return nil, err
 	}
@@ -1143,7 +1325,7 @@ func (s *Service) allocatePorts(name string, preferred map[string]int, bindAddre
 func (s *Service) allocateOnePort(name, portName string, preferred int, used map[int]bool, bindAddress string) (int, error) {
 	if preferred != 0 {
 		if reservedPorts[preferred] {
-			return 0, fmt.Errorf("port %d is reserved by Anito and cannot be assigned to a service", preferred)
+			return 0, domain.Conflictf("port %d is reserved by Anito and cannot be assigned to a service", preferred)
 		}
 		if !used[preferred] {
 			if err := s.prx.RegisterPortsWithBind(name, map[string]int{portName: preferred}, bindAddress); err == nil {
@@ -1161,7 +1343,7 @@ func (s *Service) allocateOnePort(name, portName string, preferred int, used map
 			return port, nil
 		}
 	}
-	return 0, fmt.Errorf("no available ports in range %d–%d for %s (port %s)", portRangeStart, portRangeEnd, name, portName)
+	return 0, domain.Conflictf("no available ports in range %d-%d for %s (port %s)", portRangeStart, portRangeEnd, name, portName)
 }
 
 // hashPath returns a short content hash for a file or directory.
@@ -1213,22 +1395,49 @@ func waitHTTPReady(internalPort int, path string, timeout time.Duration) error {
 	deadline := time.Now().Add(timeout)
 	var lastStatus int
 	for time.Now().Before(deadline) {
-		resp, err := http.Get(url) //nolint:noctx
+		remaining := time.Until(deadline)
+		requestTimeout := time.Second
+		if remaining < requestTimeout {
+			requestTimeout = remaining
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), requestTimeout)
+		req, reqErr := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+		var resp *http.Response
+		var err error
+		if reqErr == nil {
+			resp, err = http.DefaultClient.Do(req)
+		} else {
+			err = reqErr
+		}
 		if err == nil {
 			lastStatus = resp.StatusCode
-			resp.Body.Close()
+			_ = resp.Body.Close()
 			if resp.StatusCode == http.StatusOK {
+				cancel()
 				return nil
 			}
 		}
-		time.Sleep(healthCheckInterval)
+		cancel()
+		remaining = time.Until(deadline)
+		if remaining <= 0 {
+			break
+		}
+		wait := healthCheckInterval
+		if remaining < wait {
+			wait = remaining
+		}
+		time.Sleep(wait)
 	}
 	msg := fmt.Sprintf("health check timed out after %s: GET %s did not return 200", timeout, url)
 	if lastStatus > 0 {
 		msg += fmt.Sprintf(" (last status: %d)", lastStatus)
 	}
 	msg += "\nAnito requires your service to expose GET " + path + " → 200 OK and read PORT from the environment."
-	return fmt.Errorf("%s", msg)
+	return domain.ReadinessFailuref("%s", msg)
+}
+
+func (s *Service) Diagnose(req diagnosis.Request) (*diagnosis.Result, error) {
+	return diagnosis.Run(req, s)
 }
 
 // CaseStudyRequest is the structured input for a consumer case study submission.

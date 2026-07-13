@@ -1,6 +1,7 @@
 package sessions
 
 import (
+	"encoding/json"
 	"os"
 	"testing"
 	"time"
@@ -200,6 +201,50 @@ func TestPersistence(t *testing.T) {
 	}
 	if len(list) != 1 || list[0].ID != "persist-me" {
 		t.Errorf("session not persisted; got %v", list)
+	}
+}
+
+func TestSaveCapsTrackedSessions(t *testing.T) {
+	s := newTempStore(t)
+	now := time.Now()
+	m := make(map[string]Session, maxTrackedSessions+3)
+	for i := 0; i < maxTrackedSessions+3; i++ {
+		id := time.Unix(int64(i), 0).Format(time.RFC3339Nano)
+		m[id] = Session{ID: id, CreatedAt: now, LastSeenAt: now.Add(time.Duration(i) * time.Second)}
+	}
+	if err := s.save(m); err != nil {
+		t.Fatal(err)
+	}
+	list, err := s.List()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(list) != maxTrackedSessions {
+		t.Fatalf("session count = %d, want cap %d", len(list), maxTrackedSessions)
+	}
+}
+
+func TestCleanupAppliesCapWithoutAgeExpiry(t *testing.T) {
+	s := newTempStore(t)
+	now := time.Now()
+	m := make(map[string]Session, maxTrackedSessions+1)
+	for i := 0; i < maxTrackedSessions+1; i++ {
+		id := time.Unix(int64(i), 0).Format(time.RFC3339Nano)
+		m[id] = Session{ID: id, CreatedAt: now, LastSeenAt: now.Add(time.Duration(i) * time.Second)}
+	}
+	data, err := json.MarshalIndent(storeFile{Sessions: m}, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(s.path, data, 0644); err != nil {
+		t.Fatal(err)
+	}
+	removed, err := s.Cleanup(24 * time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if removed != 1 {
+		t.Fatalf("removed = %d, want 1 session over cap", removed)
 	}
 }
 

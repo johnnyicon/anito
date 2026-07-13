@@ -89,7 +89,7 @@ Vite has its own HMR, so watch paths are usually empty or omitted. Anito just ke
 `.anito/my-frontend-dev.sh`
 ```bash
 #!/bin/bash
-exec npx vite --port "$PORT" --host
+exec npx vite --port "$PORT" --host --force
 ```
 
 `.anito/config.yaml`
@@ -104,6 +104,8 @@ watch: []
 ```
 
 With `restart_policy: on-watch` and empty `watch:`, the service will not auto-restart on crash (no watch paths configured). Change to `always` if you want crash recovery without file watching.
+
+The `--force` flag makes Vite rebuild its module/dependency graph on each Anito restart. This avoids stale frontend content in git worktrees after branch switches, cherry-picks, or newly added source files.
 
 ---
 

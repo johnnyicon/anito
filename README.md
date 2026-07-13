@@ -189,8 +189,9 @@ anito deploy
   4. Atomically swap proxy: :3000 → :51234
   5. SIGTERM old process → SIGKILL after 5s grace period
 
-Consumers connected to :3000 see zero downtime.
-SSE streams and MCP connections survive.
+New requests connected to :3000 see zero downtime. Long-lived SSE and
+WebSocket requests receive the configured drain window before the old process
+is terminated; clients should reconnect if a stream outlives that window.
 ```
 
 ---

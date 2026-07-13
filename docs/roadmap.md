@@ -20,16 +20,16 @@ Anito is a local production service manager for macOS. This document describes w
 | **Issue logging** | Every failure logged with error, inputs, and last 15 lines of service output. |
 | **Orphaned detection** | Services whose binary is gone surface as `orphaned`, not `failed`. |
 | **Admin dashboard** | Services list, log viewer, issue drawer, activity feed at `localhost:7700`. |
+| **Dashboard service actions** | Restart, stop, and remove services from rows, detail panels, and the command palette. |
 | **Session tracking** | Persistent record of MCP client sessions — when connected, what tool was last called. |
 | **Composite app setup** | `anito_setup` generates `ports.env`, per-service configs, and Vite/Next proxy patches. |
 | **Deployment receipts** | `deployed.json` written to consuming repos — source of truth for teardown and re-entry. |
 
 ### What's coming in v1.x
 
-- **Admin SPA write operations** — restart, stop, remove from the browser
 - **Sessions panel** — who's connected, last tool called, session age
 - **Native macOS app** — drag-to-Applications install, menu bar status dot, one-button daemon setup
-- **`anito init` CLI** — terminal equivalent of `anito_setup`, for developers who don't use an AI assistant
+- **Composite setup parity** — expose the MCP dry-run/apply workflow through the CLI and HTTP API
 - **Spring Boot (Java/Kotlin)** — `SERVER_PORT` injection (parallel to the `ASPNETCORE_HTTP_PORTS` fix already shipped)
 
 ### Shipped in v1.x

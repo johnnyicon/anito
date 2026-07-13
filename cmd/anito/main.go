@@ -1,6 +1,8 @@
 package main
 
 import (
+	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -16,6 +18,8 @@ import (
 	"github.com/johnnyicon/anito/internal/auth"
 	"github.com/johnnyicon/anito/internal/client"
 	"github.com/johnnyicon/anito/internal/config"
+	"github.com/johnnyicon/anito/internal/diagnosis"
+	"github.com/johnnyicon/anito/internal/domain"
 	"github.com/johnnyicon/anito/internal/issues"
 	mcpserver "github.com/johnnyicon/anito/internal/mcp"
 	"github.com/johnnyicon/anito/internal/process"
@@ -39,6 +43,10 @@ const (
 	defaultMCPPort    = 7701
 	daemonWaitTimeout = 60 * time.Second
 )
+
+var daemonRestoreAll = func(ctx context.Context, svc *service.Service, opts service.RestoreAllOptions) (*service.RestoreAllResult, error) {
+	return svc.RestoreAll(ctx, opts)
+}
 
 func main() {
 	daemonCmd := flag.NewFlagSet("daemon", flag.ExitOnError)
@@ -80,6 +88,9 @@ func main() {
 			path = os.Args[2]
 		}
 		runDoctor(cli, path)
+
+	case "diagnose":
+		runDiagnose(cli, os.Args[2:])
 
 	case "deploy":
 		configPath := defaultConfigPath()
@@ -261,12 +272,12 @@ func main() {
 // config to disk. It is the CLI counterpart of the anito_setup MCP tool.
 // For composite apps (multiple services), use the MCP tool or see docs/mcp.md.
 func runSetup(path string) {
-	result, err := setup.Inspect(path)
+	plan, err := setup.DryRun(setup.PlanRequest{Path: path}, nil)
 	if err != nil {
 		fatal(err)
 	}
 
-	fmt.Printf("inspecting %s...\n\n", result.RepoPath)
+	fmt.Printf("inspecting %s...\n\n", plan.RepoPath)
 
 	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
 	check := func(ok bool) string {
@@ -275,41 +286,38 @@ func runSetup(path string) {
 		}
 		return "✗"
 	}
-	fmt.Fprintf(w, "  language:\t%s\n", result.Language)
-	fmt.Fprintf(w, "  PORT env var:\t%s\n", check(result.HasPORT))
-	fmt.Fprintf(w, "  /health route:\t%s\n", check(result.HasHealthRoute))
-	fmt.Fprintf(w, "  .anito/config.yaml:\t%s\n", check(result.HasAnitoConfig))
+	fmt.Fprintf(w, "  language:\t%s\n", plan.Language)
+	fmt.Fprintf(w, "  PORT env var:\t%s\n", check(plan.HasPORT))
+	fmt.Fprintf(w, "  /health route:\t%s\n", check(plan.HasHealthRoute))
+	fmt.Fprintf(w, "  .anito/config.yaml:\t%s\n", check(plan.HasAnitoConfig))
 	_ = w.Flush()
 	fmt.Println()
 
-	if len(result.Issues) > 0 {
+	if len(plan.Issues) > 0 {
 		fmt.Println("issues:")
-		for _, iss := range result.Issues {
+		for _, iss := range plan.Issues {
 			fmt.Printf("  [%s] %s\n    → %s\n", iss.Severity, iss.What, iss.Fix)
 		}
 		fmt.Println()
 	}
 
 	// Write the generated config unless one already exists.
-	configPath := filepath.Join(result.RepoPath, ".anito", "config.yaml")
-	if result.SuggestedConfig != "" && !result.HasAnitoConfig {
-		if err := os.MkdirAll(filepath.Dir(configPath), 0755); err != nil {
-			fatal(err)
-		}
-		if err := os.WriteFile(configPath, []byte(result.SuggestedConfig), 0644); err != nil {
+	configPath := filepath.Join(plan.RepoPath, ".anito", "config.yaml")
+	if len(plan.GeneratedFiles) > 0 && !plan.HasAnitoConfig {
+		if _, err := setup.Apply(plan, nil); err != nil {
 			fatal(err)
 		}
 		fmt.Printf("wrote %s\n\n", configPath)
-	} else if result.HasAnitoConfig {
+	} else if plan.HasAnitoConfig {
 		fmt.Printf("config already exists at %s — skipping write\n\n", configPath)
 	}
 
 	fmt.Println("next steps:")
-	for _, step := range result.Instructions {
+	for _, step := range plan.Instructions {
 		fmt.Printf("  %s\n", step)
 	}
 
-	if len(result.Issues) == 0 {
+	if len(plan.Issues) == 0 {
 		fmt.Println("\n✓ repo is Anito-ready. Run `anito deploy` to start.")
 	}
 }
@@ -523,6 +531,50 @@ func runLogs(cli *client.Client, name string) {
 	}
 	for _, line := range lines {
 		fmt.Println(line)
+	}
+}
+
+func runDiagnose(cli *client.Client, args []string) {
+	req := diagnosis.Request{RepoPath: "."}
+	if len(args) > 0 {
+		target := args[0]
+		if info, err := os.Stat(target); err == nil && info.IsDir() {
+			req.RepoPath = target
+		} else {
+			req = diagnosis.Request{ServiceName: target}
+		}
+	}
+	result, err := cli.Diagnose(req)
+	if err != nil {
+		fatal(err)
+	}
+	if result.Service != nil {
+		fmt.Printf("service: %s (%s)\n", result.Service.Name, result.Service.Status)
+	}
+	if result.Healthy {
+		fmt.Println("✓ no diagnosis findings")
+		return
+	}
+	for _, finding := range result.Findings {
+		marker := "info"
+		if finding.Severity != "" {
+			marker = finding.Severity
+		}
+		scope := finding.Scope
+		if scope != "" {
+			scope += " "
+		}
+		field := finding.Field
+		if field != "" {
+			field += ": "
+		}
+		fmt.Printf("[%s:%s] %s%s%s\n", finding.Code, marker, scope, field, finding.Message)
+		if finding.Action != "" {
+			fmt.Printf("  -> %s\n", finding.Action)
+		}
+	}
+	if result.Errors > 0 {
+		os.Exit(1)
 	}
 }
 
@@ -757,113 +809,6 @@ func runDaemon(apiPort, mcpPort int, dataDir string) {
 		log.Printf("[STARTUP] pruned %d stale MCP sessions", n)
 	}
 
-	// Restore services that were running before the daemon last stopped.
-	for _, svc := range reg.All() {
-		if len(svc.StablePorts) == 0 && svc.StablePort == 0 {
-			continue
-		}
-		// Register all proxy listeners for this service.
-		if len(svc.StablePorts) > 0 {
-			if err := prx.RegisterPortsWithBind(svc.Name, svc.StablePorts, svc.ProxyBindAddress); err != nil {
-				log.Printf("warn: could not re-register proxy for %s: %v", svc.Name, err)
-				continue
-			}
-		} else {
-			if err := prx.RegisterWithBind(svc.Name, svc.StablePort, svc.ProxyBindAddress); err != nil {
-				log.Printf("warn: could not re-register proxy for %s: %v", svc.Name, err)
-				continue
-			}
-		}
-		if svc.Status == registry.StatusRunning {
-			log.Printf("restoring %s on %s", svc.Name, svc.Address())
-			if svc.Type == registry.TypeStatic {
-				if err := prx.SwapStatic(svc.Name, svc.BinaryPath); err != nil {
-					log.Printf("[RESTORE_FAILED] name=%s reason=%v", svc.Name, err)
-					_ = reg.UpdateStatus(svc.Name, registry.StatusFailed, 0)
-					_ = iss.Append(issues.Issue{
-						Source:   "daemon:restore_failed",
-						Tool:     "startup",
-						Error:    fmt.Sprintf("service %s: %v", svc.Name, err),
-						Severity: "error",
-					})
-				}
-				continue
-			}
-			// Verify binary exists before attempting to start.
-			if _, err := os.Stat(svc.BinaryPath); os.IsNotExist(err) {
-				log.Printf("[ORPHAN] name=%s binary_path=%s", svc.Name, svc.BinaryPath)
-				_ = reg.UpdateStatus(svc.Name, registry.StatusOrphaned, 0)
-				continue
-			} else if err != nil {
-				log.Printf("[RESTORE_FAILED] name=%s reason=stat error: %v", svc.Name, err)
-				_ = reg.UpdateStatus(svc.Name, registry.StatusFailed, 0)
-				_ = iss.Append(issues.Issue{
-					Source:   "daemon:restore_failed",
-					Tool:     "startup",
-					Error:    fmt.Sprintf("service %s: stat error: %v", svc.Name, err),
-					Severity: "error",
-				})
-				continue
-			}
-			if reason := restoreStartBlockedReason(svc); reason != "" {
-				log.Printf("[RESTORE_BLOCKED] name=%s %s", svc.Name, reason)
-				_ = reg.UpdateStatus(svc.Name, registry.StatusFailed, svc.PID)
-				_ = iss.Append(issues.Issue{
-					Source:   "daemon:restore_blocked",
-					Tool:     "startup",
-					Error:    fmt.Sprintf("service %s: %s", svc.Name, reason),
-					Severity: "error",
-				})
-				continue
-			}
-			internalPorts, err := mgr.Start(svc)
-			if err != nil {
-				log.Printf("[RESTORE_FAILED] name=%s error=%v", svc.Name, err)
-				_ = reg.UpdateStatus(svc.Name, registry.StatusFailed, 0)
-				_ = iss.Append(issues.Issue{
-					Source:   "daemon:restore_failed",
-					Tool:     "startup",
-					Error:    fmt.Sprintf("service %s: %v", svc.Name, err),
-					Severity: "error",
-				})
-				continue
-			}
-
-			hcTimeout := svc.HealthCheckTimeout
-			if hcTimeout == 0 {
-				hcTimeout = 15 * time.Second
-			}
-			hcPort := registry.PickPort(internalPorts, svc.HealthCheckPort)
-			if err := service.WaitHealthy(hcPort, svc.HealthCheck, hcTimeout); err != nil {
-				log.Printf("[RESTORE_FAILED] name=%s health_check=%v", svc.Name, err)
-				_ = mgr.Stop(svc.Name)
-				_ = reg.UpdateStatus(svc.Name, registry.StatusFailed, 0)
-				_ = iss.Append(issues.Issue{
-					Source:   "daemon:restore_failed",
-					Tool:     "startup",
-					Error:    fmt.Sprintf("service %s: health check: %v", svc.Name, err),
-					Severity: "error",
-				})
-				continue
-			}
-
-			if err := prx.SwapPorts(svc.Name, internalPorts); err != nil {
-				log.Printf("[RESTORE_FAILED] name=%s proxy_swap=%v", svc.Name, err)
-				_ = mgr.Stop(svc.Name)
-				_ = reg.UpdateStatus(svc.Name, registry.StatusFailed, 0)
-				_ = iss.Append(issues.Issue{
-					Source:   "daemon:restore_failed",
-					Tool:     "startup",
-					Error:    fmt.Sprintf("service %s: proxy swap: %v", svc.Name, err),
-					Severity: "error",
-				})
-				continue
-			}
-			newPID := mgr.PID(svc.Name)
-			_ = reg.UpdateStatus(svc.Name, registry.StatusRunning, newPID)
-		}
-	}
-
 	log.Printf("[STARTUP] version=%s data=%s api=:%d mcp=:%d", version, dataDir, apiPort, mcpPort)
 
 	capabilityToken, capabilitySource, err := auth.LoadOrCreateToken()
@@ -873,7 +818,7 @@ func runDaemon(apiPort, mcpPort int, dataDir string) {
 	log.Printf("[STARTUP] capability auth source=%s", capabilitySource)
 
 	svc := service.New(reg, mgr, prx, logDir, wtch, iss)
-	svc.StartWatchers()
+	svc.BeginStartup(4)
 
 	mcpSrv := mcpserver.New(svc, iss, sess, mcpPort)
 	mcpSrv.SetCapabilityToken(capabilityToken)
@@ -881,6 +826,16 @@ func runDaemon(apiPort, mcpPort int, dataDir string) {
 		if err := mcpSrv.Start(); err != nil {
 			log.Printf("MCP server error: %v", err)
 		}
+	}()
+
+	go func() {
+		result, err := daemonRestoreAll(context.Background(), svc, service.RestoreAllOptions{IssueSource: "daemon:restore_failed"})
+		if err != nil {
+			log.Printf("[STARTUP] restore error: %v", err)
+			return
+		}
+		log.Printf("[STARTUP] restore complete total=%d targets=%d restored=%d failed=%d orphaned=%d skipped=%d bind_failed=%d",
+			result.Total, result.Targets, result.Restored, result.Failed, result.Orphaned, result.Skipped, result.BindFailed)
 	}()
 
 	srv := server.New(svc, iss, sess, apiPort, version)
@@ -922,6 +877,11 @@ func hasSingleDefault(ports map[string]int) bool {
 }
 
 func fatal(err error) {
+	var de *domain.Error
+	if errors.As(err, &de) {
+		fmt.Fprintf(os.Stderr, "error [%s]: %s\n", de.Code, de.Message)
+		os.Exit(1)
+	}
 	fmt.Fprintln(os.Stderr, "error:", err)
 	os.Exit(1)
 }
@@ -946,6 +906,7 @@ Usage:
   anito daemon [flags]                      start the anito daemon
   anito setup [path]                        inspect repo, check service contract, write .anito/config.yaml
   anito doctor [path]                       validate .anito/config.yaml and check registry alignment
+  anito diagnose [service-or-path]          run shared read-only diagnosis and print stable issue codes
   anito deploy [config]                     build + deploy (default: .anito/config.yaml)
   anito promote <stable-config> [dev-name]  build stable binary and deploy it
   anito services                            list all running services

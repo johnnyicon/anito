@@ -15,13 +15,14 @@ import (
 	"io"
 	"log"
 	"net/http"
-	"strings"
 	"time"
 
 	sdkmcp "github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/johnnyicon/anito/internal/auth"
+	"github.com/johnnyicon/anito/internal/diagnosis"
 	"github.com/johnnyicon/anito/internal/doctor"
+	"github.com/johnnyicon/anito/internal/domain"
 	"github.com/johnnyicon/anito/internal/issues"
 	"github.com/johnnyicon/anito/internal/registry"
 	"github.com/johnnyicon/anito/internal/service"
@@ -70,7 +71,7 @@ func (s *Server) logErr(tool string, input any, err error) {
 		Source:   "mcp:" + tool,
 		Tool:     tool,
 		Input:    inputJSON,
-		Error:    err.Error(),
+		Error:    domain.Redact(err.Error()),
 		Severity: "error",
 	})
 }
@@ -282,27 +283,39 @@ type deployInput struct {
 	HealthCheckTimeout string         `json:"health_check_timeout"  jsonschema:"how long to wait for /health to return 200 (e.g. '30s', '60s'). Default: '15s'. Increase for slow-starting services."`
 	RestartPolicy      string         `json:"restart_policy"        jsonschema:"crash restart behavior: 'on-watch' (default, restart only if watch paths set), 'always' (always restart on crash), 'never' (never auto-restart)"`
 	ConfigPath         string         `json:"config_path,omitempty" jsonschema:"absolute path to the .anito/config.yaml that defines this service. Doctor will flag services without a recorded config path."`
+	ReplaceConfig      bool           `json:"replace_config"        jsonschema:"for redeploys only: replace optional configuration instead of preserving omitted fields from the registered service. Default false."`
 }
 
 type serviceView struct {
-	Name             string            `json:"name"`
-	Version          string            `json:"version,omitempty"`
-	Type             string            `json:"type"`
-	StablePort       int               `json:"stable_port"`                // primary port (backward compat)
-	PinnedAddress    string            `json:"pinned_address"`             // primary address (backward compat)
-	StablePorts      map[string]int    `json:"stable_ports,omitempty"`     // all named ports
-	PinnedAddresses  map[string]string `json:"pinned_addresses,omitempty"` // all named addresses
-	ProxyBindAddress string            `json:"proxy_bind_address,omitempty"`
-	InternalPort     int               `json:"internal_port,omitempty"`     // primary internal port (backward compat)
-	InternalPorts    map[string]int    `json:"internal_ports,omitempty"`    // all named internal ports
-	HealthCheckPort  string            `json:"health_check_port,omitempty"` // which named port is health-checked
-	Status           string            `json:"status"`
-	PID              int               `json:"pid,omitempty"`
-	BinaryPath       string            `json:"binary_path"`
-	ConfigPath       string            `json:"config_path,omitempty"`
-	DeployedAt       time.Time         `json:"deployed_at,omitempty"`
-	UpdatedAt        time.Time         `json:"updated_at,omitempty"`
-	LastDeployedAt   time.Time         `json:"last_deployed_at,omitempty"`
+	Name               string                `json:"name"`
+	Version            string                `json:"version,omitempty"`
+	Type               string                `json:"type"`
+	StablePort         int                   `json:"stable_port"`                // primary port (backward compat)
+	PinnedAddress      string                `json:"pinned_address"`             // primary address (backward compat)
+	StablePorts        map[string]int        `json:"stable_ports,omitempty"`     // all named ports
+	PinnedAddresses    map[string]string     `json:"pinned_addresses,omitempty"` // all named addresses
+	ProxyBindAddress   string                `json:"proxy_bind_address,omitempty"`
+	InternalPort       int                   `json:"internal_port,omitempty"`     // primary internal port (backward compat)
+	InternalPorts      map[string]int        `json:"internal_ports,omitempty"`    // all named internal ports
+	HealthCheckPort    string                `json:"health_check_port,omitempty"` // which named port is health-checked
+	HealthCheck        string                `json:"health_check,omitempty"`
+	HealthCheckTimeout string                `json:"health_check_timeout,omitempty"`
+	DrainWindow        string                `json:"drain_window,omitempty"`
+	WatchPaths         []string              `json:"watch_paths,omitempty"`
+	RestartPolicy      string                `json:"restart_policy,omitempty"`
+	Status             string                `json:"status"`
+	PID                int                   `json:"pid,omitempty"`
+	CrashAttempts      int                   `json:"crash_attempts,omitempty"`
+	GaveUp             bool                  `json:"gave_up,omitempty"`
+	BinaryPath         string                `json:"binary_path"`
+	Args               []string              `json:"args,omitempty"`
+	EnvFile            string                `json:"env_file,omitempty"`
+	ConfigPath         string                `json:"config_path,omitempty"`
+	DeployedAt         time.Time             `json:"deployed_at,omitempty"`
+	UpdatedAt          time.Time             `json:"updated_at,omitempty"`
+	LastDeployedAt     time.Time             `json:"last_deployed_at,omitempty"`
+	LastStartedAt      time.Time             `json:"last_started_at,omitempty"`
+	StartHistory       []registry.StartEvent `json:"start_history,omitempty"`
 }
 
 // setupInput is the unified input for anito_setup.
@@ -426,6 +439,11 @@ type doctorInput struct {
 	Path string `json:"path" jsonschema:"absolute path to the repo root containing .anito/"`
 }
 
+type diagnosisInput struct {
+	ServiceName string `json:"service_name,omitempty" jsonschema:"optional service name to check against the Anito registry"`
+	RepoPath    string `json:"repo_path,omitempty" jsonschema:"optional absolute path to the repo root containing .anito/"`
+}
+
 type doctorIssueView struct {
 	Severity string `json:"severity"`
 	Field    string `json:"field"`
@@ -455,15 +473,22 @@ type issuesQueryInput struct {
 }
 
 type issueView struct {
-	ID        string    `json:"id"`
-	Timestamp time.Time `json:"timestamp"`
-	Source    string    `json:"source"`
-	Tool      string    `json:"tool,omitempty"`
-	Input     string    `json:"input,omitempty"`
-	Error     string    `json:"error"`
-	Context   string    `json:"context,omitempty"`
-	RepoPath  string    `json:"repo_path,omitempty"`
-	Severity  string    `json:"severity"`
+	ID              string     `json:"id"`
+	Timestamp       time.Time  `json:"timestamp"`
+	Source          string     `json:"source"`
+	Tool            string     `json:"tool,omitempty"`
+	Input           string     `json:"input,omitempty"`
+	Error           string     `json:"error"`
+	Context         string     `json:"context,omitempty"`
+	RepoPath        string     `json:"repo_path,omitempty"`
+	Severity        string     `json:"severity"`
+	State           string     `json:"state"`
+	FirstSeen       time.Time  `json:"first_seen,omitempty"`
+	LastSeen        time.Time  `json:"last_seen,omitempty"`
+	OccurrenceCount int        `json:"occurrence_count,omitempty"`
+	AcknowledgedAt  *time.Time `json:"acknowledged_at,omitempty"`
+	ResolvedAt      *time.Time `json:"resolved_at,omitempty"`
+	TrackerURL      string     `json:"tracker_url,omitempty"`
 }
 
 type issuesOutput struct {
@@ -482,6 +507,27 @@ type reportInput struct {
 type reportOutput struct {
 	ID     string `json:"id"`
 	Status string `json:"status"`
+}
+
+func issueToView(iss issues.Issue) issueView {
+	return issueView{
+		ID: iss.ID, Timestamp: iss.Timestamp, Source: iss.Source, Tool: iss.Tool,
+		Input: iss.Input, Error: iss.Error, Context: iss.Context, RepoPath: iss.RepoPath,
+		Severity: iss.Severity, State: iss.State, FirstSeen: iss.FirstSeen, LastSeen: iss.LastSeen,
+		OccurrenceCount: iss.OccurrenceCount, AcknowledgedAt: iss.AcknowledgedAt,
+		ResolvedAt: iss.ResolvedAt, TrackerURL: iss.TrackerURL,
+	}
+}
+
+type issueTransitionInput struct {
+	ID         string `json:"id" jsonschema:"required — issue aggregate ID"`
+	Actor      string `json:"actor,omitempty" jsonschema:"optional operator or agent identity"`
+	TrackerURL string `json:"tracker_url,omitempty" jsonschema:"optional opaque external tracker URL, resolve only"`
+}
+
+type issueTransitionOutput struct {
+	Status string    `json:"status"`
+	Issue  issueView `json:"issue"`
 }
 
 type caseStudyInput struct {
@@ -511,17 +557,21 @@ func (s *Server) registerTools(srv *sdkmcp.Server) {
 			"Re-deploying an existing service is zero-downtime. " +
 			"If stable_port is 0 or omitted, a port is auto-allocated from the range 8100-8200. " +
 			"IMPORTANT: the stable_port returned is permanent and pinned to this service name. " +
+			"On redeploy, omitted optional fields preserve their registered values; set replace_config=true only for a complete configuration replacement. " +
 			"It will never change on subsequent deploys. Record it — other services and agents " +
 			"should connect to this service at localhost:<stable_port> going forward. " +
 			"Ports 7700 (management API) and 7701 (MCP) are reserved and cannot be used.",
 	}, func(ctx context.Context, req *sdkmcp.CallToolRequest, in deployInput) (*sdkmcp.CallToolResult, serviceView, error) {
 		log.Printf("[MCP] tool=anito_deploy name=%s path=%s port=%d", in.Name, in.Path, in.StablePort)
+		if existing, err := s.svc.Status(in.Name); err == nil {
+			in = mergeDeployInput(in, existing)
+		}
 
 		var drainWindow time.Duration
 		if in.DrainWindow != "" {
 			d, err := time.ParseDuration(in.DrainWindow)
 			if err != nil {
-				return nil, serviceView{}, fmt.Errorf("invalid drain_window %q: use a duration string like '3s' or '500ms'", in.DrainWindow)
+				return nil, serviceView{}, domain.InvalidConfigf("invalid drain_window %q: use a duration string like '3s' or '500ms'", in.DrainWindow)
 			}
 			drainWindow = d
 		}
@@ -529,7 +579,7 @@ func (s *Server) registerTools(srv *sdkmcp.Server) {
 		if in.HealthCheckTimeout != "" {
 			d, err := time.ParseDuration(in.HealthCheckTimeout)
 			if err != nil {
-				return nil, serviceView{}, fmt.Errorf("invalid health_check_timeout %q: use a duration string like '30s'", in.HealthCheckTimeout)
+				return nil, serviceView{}, domain.InvalidConfigf("invalid health_check_timeout %q: use a duration string like '30s'", in.HealthCheckTimeout)
 			}
 			hcTimeout = d
 		}
@@ -559,6 +609,75 @@ func (s *Server) registerTools(srv *sdkmcp.Server) {
 			return nil, serviceView{}, err
 		}
 		return nil, toView(svc), nil
+	})
+
+	sdkmcp.AddTool(srv, &sdkmcp.Tool{
+		Name:        "anito_issue_acknowledge",
+		Description: "Acknowledge one local issue aggregate without affecting other issues.",
+	}, func(ctx context.Context, req *sdkmcp.CallToolRequest, in issueTransitionInput) (*sdkmcp.CallToolResult, issueTransitionOutput, error) {
+		iss, err := s.iss.Acknowledge(in.ID, in.Actor)
+		if err != nil {
+			return nil, issueTransitionOutput{}, err
+		}
+		return nil, issueTransitionOutput{Status: "acknowledged", Issue: issueToView(*iss)}, nil
+	})
+
+	sdkmcp.AddTool(srv, &sdkmcp.Tool{
+		Name:        "anito_issue_resolve",
+		Description: "Resolve one local issue aggregate and optionally preserve an opaque tracker URL.",
+	}, func(ctx context.Context, req *sdkmcp.CallToolRequest, in issueTransitionInput) (*sdkmcp.CallToolResult, issueTransitionOutput, error) {
+		iss, err := s.iss.Resolve(in.ID, in.Actor, in.TrackerURL)
+		if err != nil {
+			return nil, issueTransitionOutput{}, err
+		}
+		return nil, issueTransitionOutput{Status: "resolved", Issue: issueToView(*iss)}, nil
+	})
+
+	sdkmcp.AddTool(srv, &sdkmcp.Tool{
+		Name:        "anito_issue_reopen",
+		Description: "Reopen one resolved local issue aggregate.",
+	}, func(ctx context.Context, req *sdkmcp.CallToolRequest, in issueTransitionInput) (*sdkmcp.CallToolResult, issueTransitionOutput, error) {
+		iss, err := s.iss.Reopen(in.ID, in.Actor)
+		if err != nil {
+			return nil, issueTransitionOutput{}, err
+		}
+		return nil, issueTransitionOutput{Status: "reopened", Issue: issueToView(*iss)}, nil
+	})
+
+	sdkmcp.AddTool(srv, &sdkmcp.Tool{
+		Name:        "anito_archive",
+		Description: "Archive a stopped, failed, or orphaned service without releasing its stable-port metadata.",
+	}, func(ctx context.Context, req *sdkmcp.CallToolRequest, in nameInput) (*sdkmcp.CallToolResult, serviceView, error) {
+		svc, err := s.svc.Archive(in.Name)
+		if err != nil {
+			return nil, serviceView{}, err
+		}
+		return nil, toView(svc), nil
+	})
+
+	sdkmcp.AddTool(srv, &sdkmcp.Tool{
+		Name:        "anito_restore_archived",
+		Description: "Restore an archived service registration to the stopped state.",
+	}, func(ctx context.Context, req *sdkmcp.CallToolRequest, in nameInput) (*sdkmcp.CallToolResult, serviceView, error) {
+		svc, err := s.svc.RestoreArchived(in.Name)
+		if err != nil {
+			return nil, serviceView{}, err
+		}
+		return nil, toView(svc), nil
+	})
+
+	sdkmcp.AddTool(srv, &sdkmcp.Tool{
+		Name:        "anito_prune",
+		Description: "Permanently prune an archived service registration. Requires explicit confirmation and leaves a tombstone.",
+	}, func(ctx context.Context, req *sdkmcp.CallToolRequest, in struct {
+		Name    string `json:"name" jsonschema:"required — service name"`
+		Confirm bool   `json:"confirm" jsonschema:"required — must be true"`
+	}) (*sdkmcp.CallToolResult, registry.Tombstone, error) {
+		if !in.Confirm {
+			return nil, registry.Tombstone{}, domain.Conflictf("prune requires confirm=true")
+		}
+		tomb, err := s.svc.Prune(in.Name)
+		return nil, tomb, err
 	})
 
 	sdkmcp.AddTool(srv, &sdkmcp.Tool{
@@ -719,113 +838,25 @@ func (s *Server) registerTools(srv *sdkmcp.Server) {
 			"After setup, call anito_deploy to start services. " +
 			"One-time scaffolding only. If .anito/config.yaml already exists, call anito_deploy instead.",
 	}, func(ctx context.Context, req *sdkmcp.CallToolRequest, in setupInput) (*sdkmcp.CallToolResult, setupResult, error) {
-		// --- composite mode ---
+		mode := "single"
 		if len(in.Services) > 0 {
-			log.Printf("[MCP] tool=anito_setup mode=composite path=%s services=%d", in.Path, len(in.Services))
-			specs := make([]setup.ServiceSpec, len(in.Services))
-			for i, svc := range in.Services {
-				preferredPort := svc.PreferredPort
-				if preferredPort == 0 {
-					if existing, err := s.svc.Status(svc.Name); err == nil {
-						preferredPort = existing.StablePort
-					}
-				}
-				specs[i] = setup.ServiceSpec{
-					Name:          svc.Name,
-					Path:          svc.Path,
-					PreferredPort: preferredPort,
-				}
-			}
-			rels := make([]setup.Relationship, len(in.Relationships))
-			for i, rel := range in.Relationships {
-				rels[i] = setup.Relationship{
-					From:      rel.From,
-					To:        rel.To,
-					ProxyPath: rel.ProxyPath,
-				}
-			}
-			result, err := setup.CoordinateApp(in.Path, specs, rels, s.svc.UsedPorts())
-			if err != nil {
-				log.Printf("[MCP] tool=anito_setup mode=composite path=%s error=%q", in.Path, err)
-				return nil, setupResult{}, err
-			}
-			out := setupResult{
-				Mode:         "composite",
-				RepoPath:     in.Path,
-				Allocations:  map[string]int(result.Allocations),
-				Instructions: result.Instructions,
-			}
-			for _, f := range result.GeneratedFiles {
-				out.GeneratedFiles = append(out.GeneratedFiles, coordinateFile{RelPath: f.RelPath, Content: f.Content})
-			}
-			for _, p := range result.SourcePatches {
-				out.SourcePatches = append(out.SourcePatches, coordinatePatch{
-					RelPath: p.RelPath, Marker: p.Marker, Block: p.Block, Instruction: p.Instruction,
-				})
-			}
-			if in.Apply {
-				if err := s.applySetup(&out); err != nil {
-					log.Printf("[MCP] tool=anito_setup mode=composite path=%s apply error=%q", in.Path, err)
-					s.logErr("anito_setup", in, err)
-					return nil, setupResult{}, err
-				}
-			}
-			return nil, out, nil
+			mode = "composite"
 		}
-
-		// --- single-service mode ---
-		log.Printf("[MCP] tool=anito_setup mode=single path=%s", in.Path)
-		result, err := setup.Inspect(in.Path)
+		log.Printf("[MCP] tool=anito_setup mode=%s path=%s services=%d", mode, in.Path, len(in.Services))
+		plan, err := setup.DryRun(toSetupPlanRequest(in), setupPorts{s: s})
 		if err != nil {
-			log.Printf("[MCP] tool=anito_setup mode=single path=%s error=%q", in.Path, err)
+			log.Printf("[MCP] tool=anito_setup mode=%s path=%s error=%q", mode, in.Path, err)
 			return nil, setupResult{}, err
 		}
-		if in.Apply && result.HasAnitoConfig {
-			err := fmt.Errorf("%s already has .anito/config.yaml; call anito_deploy or anito_doctor instead of applying setup", result.RepoPath)
-			s.logErr("anito_setup", in, err)
-			return nil, setupResult{}, err
-		}
-		issues := make([]setupIssue, len(result.Issues))
-		for i, iss := range result.Issues {
-			issues[i] = setupIssue{Severity: iss.Severity, What: iss.What, Fix: iss.Fix}
-		}
-		out := setupResult{
-			Mode:           "single",
-			RepoPath:       result.RepoPath,
-			ServiceName:    result.ServiceName,
-			Language:       string(result.Language),
-			HasAnitoConfig: result.HasAnitoConfig,
-			HasPORT:        result.HasPORT,
-			HasHealthRoute: result.HasHealthRoute,
-			Issues:         issues,
-			Instructions:   result.Instructions,
-		}
-		// Surface the suggested config as a generated file so the LLM can
-		// write it directly — same pattern as composite mode.
-		if result.SuggestedConfig != "" {
-			content := result.SuggestedConfig
-			if in.Apply {
-				port, err := s.svc.Reserve(result.ServiceName, 0)
-				if err != nil {
-					log.Printf("[MCP] tool=anito_setup mode=single path=%s reserve error=%q", in.Path, err)
-					s.logErr("anito_setup", in, err)
-					return nil, setupResult{}, err
-				}
-				out.Allocations = map[string]int{result.ServiceName: port}
-				content = strings.Replace(content, "# port: 3000  # omit to auto-allocate from 8100-8200", fmt.Sprintf("port: %d", port), 1)
-				out.Instructions = append(out.Instructions, fmt.Sprintf("✓ Reserved stable port %d for %s.", port, result.ServiceName))
-			}
-			out.GeneratedFiles = append(out.GeneratedFiles, coordinateFile{
-				RelPath: ".anito/config.yaml",
-				Content: content,
-			})
-		}
+		out := toSetupResult(plan, nil)
 		if in.Apply {
-			if err := s.applySetup(&out); err != nil {
-				log.Printf("[MCP] tool=anito_setup mode=single path=%s apply error=%q", in.Path, err)
+			applied, err := s.applySetup(plan)
+			if err != nil {
+				log.Printf("[MCP] tool=anito_setup mode=%s path=%s apply error=%q", mode, in.Path, err)
 				s.logErr("anito_setup", in, err)
 				return nil, setupResult{}, err
 			}
+			out = toSetupResult(applied.Plan, applied)
 		}
 		return nil, out, nil
 	})
@@ -872,6 +903,22 @@ func (s *Server) registerTools(srv *sdkmcp.Server) {
 	})
 
 	sdkmcp.AddTool(srv, &sdkmcp.Tool{
+		Name: "anito_diagnose",
+		Description: "Run shared read-only diagnosis for a service name, repo path, or both. " +
+			"Returns stable finding codes: missing_service, invalid_config, readiness_failure, and conflict. " +
+			"Does not restart, repair, or read local log files.",
+	}, func(ctx context.Context, req *sdkmcp.CallToolRequest, in diagnosisInput) (*sdkmcp.CallToolResult, diagnosis.Result, error) {
+		log.Printf("[MCP] tool=anito_diagnose service=%q repo=%q", in.ServiceName, in.RepoPath)
+		result, err := s.svc.Diagnose(diagnosis.Request{ServiceName: in.ServiceName, RepoPath: in.RepoPath})
+		if err != nil {
+			log.Printf("[MCP] tool=anito_diagnose service=%q repo=%q error=%q", in.ServiceName, in.RepoPath, err)
+			s.logErr("anito_diagnose", in, err)
+			return nil, diagnosis.Result{}, err
+		}
+		return nil, *result, nil
+	})
+
+	sdkmcp.AddTool(srv, &sdkmcp.Tool{
 		Name: "anito_issues",
 		Description: "Retrieve recent issues logged by Anito — tool errors, deploy failures, and manual reports from consuming repos. " +
 			"Use this to investigate what went wrong after a failed deploy or restart. " +
@@ -888,17 +935,7 @@ func (s *Server) registerTools(srv *sdkmcp.Server) {
 		}
 		out := issuesOutput{Issues: make([]issueView, len(list))}
 		for i, iss := range list {
-			out.Issues[i] = issueView{
-				ID:        iss.ID,
-				Timestamp: iss.Timestamp,
-				Source:    iss.Source,
-				Tool:      iss.Tool,
-				Input:     iss.Input,
-				Error:     iss.Error,
-				Context:   iss.Context,
-				RepoPath:  iss.RepoPath,
-				Severity:  iss.Severity,
-			}
+			out.Issues[i] = issueToView(iss)
 		}
 		return nil, out, nil
 	})
@@ -997,23 +1034,100 @@ func (s *Server) registerTools(srv *sdkmcp.Server) {
 	})
 }
 
+func toSetupPlanRequest(in setupInput) setup.PlanRequest {
+	req := setup.PlanRequest{
+		Path:          in.Path,
+		Services:      make([]setup.ServiceSpec, len(in.Services)),
+		Relationships: make([]setup.Relationship, len(in.Relationships)),
+	}
+	for i, svc := range in.Services {
+		req.Services[i] = setup.ServiceSpec{
+			Name:          svc.Name,
+			Path:          svc.Path,
+			PreferredPort: svc.PreferredPort,
+		}
+	}
+	for i, rel := range in.Relationships {
+		req.Relationships[i] = setup.Relationship{
+			From:      rel.From,
+			To:        rel.To,
+			ProxyPath: rel.ProxyPath,
+		}
+	}
+	return req
+}
+
+func toSetupResult(plan *setup.Plan, applied *setup.ApplyResult) setupResult {
+	if plan == nil {
+		return setupResult{}
+	}
+	out := setupResult{
+		Mode:           string(plan.Mode),
+		RepoPath:       plan.RepoPath,
+		ServiceName:    plan.ServiceName,
+		Language:       string(plan.Language),
+		HasAnitoConfig: plan.HasAnitoConfig,
+		HasPORT:        plan.HasPORT,
+		HasHealthRoute: plan.HasHealthRoute,
+		Instructions:   append([]string(nil), plan.Instructions...),
+	}
+	if len(plan.Issues) > 0 {
+		out.Issues = make([]setupIssue, len(plan.Issues))
+		for i, iss := range plan.Issues {
+			out.Issues[i] = setupIssue{Severity: iss.Severity, What: iss.What, Fix: iss.Fix}
+		}
+	}
+	if len(plan.Allocations) > 0 {
+		out.Allocations = make(map[string]int, len(plan.Allocations))
+		for name, port := range plan.Allocations {
+			out.Allocations[name] = port
+		}
+	}
+	for _, f := range plan.GeneratedFiles {
+		out.GeneratedFiles = append(out.GeneratedFiles, coordinateFile{RelPath: f.RelPath, Content: f.Content})
+	}
+	for _, p := range plan.SourcePatches {
+		out.SourcePatches = append(out.SourcePatches, coordinatePatch{
+			RelPath: p.RelPath, Marker: p.Marker, Block: p.Block, Instruction: p.Instruction,
+		})
+	}
+	if applied != nil {
+		out.Applied = applied.Applied
+		out.AppliedFiles = append([]string(nil), applied.AppliedFiles...)
+		out.AppliedPatches = append([]string(nil), applied.AppliedPatches...)
+		out.UnappliedPatches = append([]string(nil), applied.UnappliedPatches...)
+	}
+	return out
+}
+
 func toView(svc *registry.Service) serviceView {
 	v := serviceView{
-		Name:             svc.Name,
-		Version:          svc.Version,
-		Type:             string(svc.Type),
-		StablePort:       svc.StablePort,
-		PinnedAddress:    svc.Address(),
-		ProxyBindAddress: svc.ProxyBindAddress,
-		InternalPort:     svc.InternalPort,
-		HealthCheckPort:  svc.HealthCheckPort,
-		Status:           string(svc.Status),
-		PID:              svc.PID,
-		BinaryPath:       svc.BinaryPath,
-		ConfigPath:       svc.ConfigPath,
-		DeployedAt:       svc.DeployedAt,
-		UpdatedAt:        svc.UpdatedAt,
-		LastDeployedAt:   svc.LastDeployedAt,
+		Name:               svc.Name,
+		Version:            svc.Version,
+		Type:               string(svc.Type),
+		StablePort:         svc.StablePort,
+		PinnedAddress:      svc.Address(),
+		ProxyBindAddress:   svc.ProxyBindAddress,
+		InternalPort:       svc.InternalPort,
+		HealthCheckPort:    svc.HealthCheckPort,
+		HealthCheck:        svc.HealthCheck,
+		HealthCheckTimeout: durationString(svc.HealthCheckTimeout),
+		DrainWindow:        durationString(svc.DrainWindow),
+		WatchPaths:         svc.WatchPaths,
+		RestartPolicy:      svc.RestartPolicy,
+		Status:             string(svc.Status),
+		PID:                svc.PID,
+		CrashAttempts:      svc.CrashAttempts,
+		GaveUp:             svc.GaveUp,
+		BinaryPath:         svc.BinaryPath,
+		Args:               svc.Args,
+		EnvFile:            svc.EnvFile,
+		ConfigPath:         svc.ConfigPath,
+		DeployedAt:         svc.DeployedAt,
+		UpdatedAt:          svc.UpdatedAt,
+		LastDeployedAt:     svc.LastDeployedAt,
+		LastStartedAt:      svc.LastStartedAt,
+		StartHistory:       svc.StartHistory,
 	}
 	// Multi-port: include all named ports and addresses.
 	if len(svc.StablePorts) > 0 {
@@ -1027,4 +1141,51 @@ func toView(svc *registry.Service) serviceView {
 		v.InternalPorts = svc.InternalPorts
 	}
 	return v
+}
+
+func durationString(value time.Duration) string {
+	if value == 0 {
+		return ""
+	}
+	return value.String()
+}
+
+func mergeDeployInput(in deployInput, existing *registry.Service) deployInput {
+	if existing == nil || in.ReplaceConfig {
+		return in
+	}
+	if in.Type == "" {
+		in.Type = string(existing.Type)
+	}
+	if in.Args == nil {
+		in.Args = append([]string(nil), existing.Args...)
+	}
+	if in.ProxyBindAddress == "" {
+		in.ProxyBindAddress = existing.ProxyBindAddress
+	}
+	if in.HealthCheckPort == "" {
+		in.HealthCheckPort = existing.HealthCheckPort
+	}
+	if in.EnvFile == "" {
+		in.EnvFile = existing.EnvFile
+	}
+	if in.HealthCheck == "" {
+		in.HealthCheck = existing.HealthCheck
+	}
+	if in.WatchPaths == nil {
+		in.WatchPaths = append([]string(nil), existing.WatchPaths...)
+	}
+	if in.DrainWindow == "" {
+		in.DrainWindow = durationString(existing.DrainWindow)
+	}
+	if in.HealthCheckTimeout == "" {
+		in.HealthCheckTimeout = durationString(existing.HealthCheckTimeout)
+	}
+	if in.RestartPolicy == "" {
+		in.RestartPolicy = existing.RestartPolicy
+	}
+	if in.ConfigPath == "" {
+		in.ConfigPath = existing.ConfigPath
+	}
+	return in
 }

@@ -79,10 +79,59 @@ export interface Issue {
   context:   string
   repo_path: string
   severity:  'error' | 'warning' | 'info'
+  state: string
+  first_seen?: string
+  last_seen?: string
+  occurrence_count?: number
+  acknowledged_at?: string
+  resolved_at?: string
+  tracker_url?: string
 }
 
 export interface IssuesResponse {
   issues: Issue[]
+}
+
+export type DomainErrorCode = 'missing_service' | 'invalid_config' | 'readiness_failure' | 'conflict'
+
+export class ApiError extends Error {
+  status: number
+  code?: DomainErrorCode
+  details?: Record<string, string>
+
+  constructor(message: string, status: number, code?: DomainErrorCode, details?: Record<string, string>) {
+    super(message)
+    this.name = 'ApiError'
+    this.status = status
+    this.code = code
+    this.details = details
+  }
+}
+
+export interface DiagnosisFinding {
+  code:     DomainErrorCode
+  severity: 'error' | 'warning' | 'info'
+  scope?:   string
+  field?:   string
+  message:  string
+  action?:  string
+}
+
+export interface DiagnosisServiceSnapshot {
+  name:     string
+  status:   ServiceStatus
+  address?: string
+  pid?:     number
+  gave_up?: boolean
+}
+
+export interface DiagnosisResult {
+  request:  { service_name?: string; repo_path?: string }
+  healthy:  boolean
+  errors:   number
+  warnings: number
+  findings?: DiagnosisFinding[]
+  service?:  DiagnosisServiceSnapshot
 }
 
 // ── Fetch helpers ──────────────────────────────────────────────────────────
@@ -90,8 +139,14 @@ export interface IssuesResponse {
 async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(path, init)
   if (!res.ok) {
-    const text = await res.text().catch(() => res.statusText)
-    throw new Error(text || res.statusText)
+    const text = await res.text().catch(() => '')
+    try {
+      const body = JSON.parse(text) as { code?: DomainErrorCode; error?: string; message?: string; details?: Record<string, string> }
+      throw new ApiError(body.message || body.error || res.statusText, res.status, body.code, body.details)
+    } catch (err) {
+      if (err instanceof ApiError) throw err
+      throw new ApiError(text || res.statusText, res.status)
+    }
   }
   return res.json() as Promise<T>
 }
@@ -147,6 +202,19 @@ export const doctorQuery = (repoPath: string, enabled = true) => queryOptions({
   retry:     false,
 })
 
+export const diagnosisQuery = (input: { serviceName?: string; repoPath?: string }, enabled = true) => queryOptions({
+  queryKey: ['diagnosis', input.serviceName ?? '', input.repoPath ?? ''],
+  queryFn:  () => {
+    const qs = new URLSearchParams()
+    if (input.serviceName) qs.set('service_name', input.serviceName)
+    if (input.repoPath) qs.set('path', input.repoPath)
+    return apiFetch<DiagnosisResult>(`/diagnose?${qs.toString()}`)
+  },
+  enabled:   enabled && !!(input.serviceName || input.repoPath),
+  staleTime: 30_000,
+  retry:     false,
+})
+
 // ── Mutations ──────────────────────────────────────────────────────────────
 
 export function useServiceAction() {
@@ -187,6 +255,16 @@ export function useClearIssues() {
     mutationFn: () => apiDelete<{ status: string }>('/issues'),
     onSuccess: () => qc.invalidateQueries({ queryKey: ['issues'] }),
   })
+}
+
+export function useIssueLifecycle() {
+  const qc = useQueryClient()
+  const transition = useMutation({
+    mutationFn: ({ id, action, trackerUrl }: { id: string; action: 'acknowledge' | 'resolve' | 'reopen'; trackerUrl?: string }) =>
+      apiPost<Issue>(`/issues/${encodeURIComponent(id)}/${action}`, { tracker_url: trackerUrl }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['issues'] }),
+  })
+  return transition
 }
 
 // ── Helpers ────────────────────────────────────────────────────────────────

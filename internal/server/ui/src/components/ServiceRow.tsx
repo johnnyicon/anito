@@ -59,6 +59,7 @@ export function ServiceRow({ service: svc, stale, onOpenLogs, onOpenDetail, onRe
   const qc = useQueryClient()
   const [expanded, setExpanded] = useState(false)
   const [actionError, setActionError] = useState<string | null>(null)
+  const detailsId = `service-details-${svc.name}`
 
   const restart = useMutation({
     mutationFn: () => fetch(`/restart/${svc.name}`, { method: 'POST' }).then(r => {
@@ -88,11 +89,21 @@ export function ServiceRow({ service: svc, stale, onOpenLogs, onOpenDetail, onRe
   const isOrphaned = svc.status === 'orphaned'
 
   return (
-    <div className={`rounded-lg border ${style.border} ${style.bg} transition-all hover:shadow-sm`}>
+    <article className={`rounded-lg border ${style.border} ${style.bg} transition-all hover:shadow-sm`} aria-label={`${svc.name} service`}>
       {/* Card header — always visible */}
       <div
         className="px-4 pt-3.5 pb-3 cursor-pointer"
         onClick={() => setExpanded(e => !e)}
+        onKeyDown={e => {
+          if (e.key === 'Enter' || e.key === ' ') {
+            e.preventDefault()
+            setExpanded(prev => !prev)
+          }
+        }}
+        role="button"
+        tabIndex={0}
+        aria-expanded={expanded}
+        aria-controls={detailsId}
       >
         {/* Top row: status dot + name + badges */}
         <div className="flex items-center gap-2 mb-2">
@@ -170,6 +181,8 @@ export function ServiceRow({ service: svc, stale, onOpenLogs, onOpenDetail, onRe
         <button
           className="inline-flex items-center rounded-md border border-border px-2 py-1.5 text-xs text-muted-foreground hover:text-foreground hover:bg-muted transition-colors ml-auto"
           onClick={() => setExpanded(e => !e)}
+          aria-expanded={expanded}
+          aria-controls={detailsId}
         >
           {expanded ? 'Less' : 'More'}
         </button>
@@ -177,7 +190,7 @@ export function ServiceRow({ service: svc, stale, onOpenLogs, onOpenDetail, onRe
 
       {/* Expanded detail */}
       {expanded && (
-        <div className="px-4 pb-4 pt-1 border-t border-border/50">
+        <div className="px-4 pb-4 pt-1 border-t border-border/50" id={detailsId}>
           <div className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-1.5 text-xs mt-2">
             {svc.last_deployed_at && svc.last_deployed_at !== '0001-01-01T00:00:00Z' && (
               <>
@@ -279,6 +292,6 @@ export function ServiceRow({ service: svc, stale, onOpenLogs, onOpenDetail, onRe
           </div>
         </div>
       )}
-    </div>
+    </article>
   )
 }

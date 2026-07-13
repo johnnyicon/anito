@@ -8,6 +8,32 @@ Format: `## [date] — description`, breaking changes marked **BREAKING**.
 
 ---
 
+## 2026-07-13 — Reversible service archive and prune
+
+**Registry / HTTP API / MCP:** Service registrations can now be archived and restored without losing stable-port or deployment metadata. Pruning requires an archived state plus explicit confirmation and records a registry tombstone; active default service listings exclude archived entries.
+
+## 2026-07-13 — Issue lifecycle actions
+
+**HTTP API / MCP:** Fingerprinted issues now retain lifecycle state, acknowledgement/resolution timestamps, optional opaque tracker links, occurrence history, and automatic reopen-on-occurrence behavior. Use the issue transition endpoints or `anito_issue_acknowledge`, `anito_issue_resolve`, and `anito_issue_reopen`.
+
+## 2026-07-13 — Shared diagnosis and typed domain errors
+
+**HTTP API / MCP / CLI:** Service failures now use stable domain codes for missing services, invalid configuration, readiness failures, and conflicts. HTTP error responses include additive structured fields (`code`, `error`, `message`) where the current surface can carry them. New read-only diagnosis surfaces are available as `GET /diagnose`, `anito_diagnose`, and `anito diagnose`.
+
+**Dashboard:** Shared API types now understand the stable error and diagnosis codes. Diagnosis redacts common secret/token patterns and does not perform repair, restart services, or read local log files.
+
+## 2026-07-13 — Startup reconciliation gate
+
+**HTTP API:** Mutating service requests made while daemon startup reconciliation is in progress now return `409 Conflict` with startup progress fields instead of a generic server error. `GET /health` now includes additive startup phase/progress fields. Read-only endpoints remain available during reconciliation.
+
+## 2026-07-12 — Safer process replacement and richer MCP status
+
+**MCP:** `anito_services` and `anito_status` responses now include additive operational fields: `args`, `env_file`, `health_check`, `health_check_timeout`, `drain_window`, `watch_paths`, `restart_policy`, `crash_attempts`, `gave_up`, `last_started_at`, and `start_history`. Partial `anito_deploy` redeploys now preserve omitted registered configuration by default; callers can pass the new `replace_config: true` field to request complete replacement semantics.
+
+**Lifecycle:** Failed deploy and restart candidates now restore the previous tracked process and deployment metadata. Consumer-provided environment files can no longer override Anito-owned `PORT`, `PORT_<NAME>`, or ASP.NET Core port variables. Start-history entries are completed with exit code and duration when a process exits.
+
+**Operations:** Persistent MCP session history is capped at the 500 most recently active sessions and is written atomically, preventing handshake-heavy clients from growing `sessions.json` without bound.
+
 ## 2026-05-09 — Artifact-based generated versions
 
 **Config:** New optional `version_path` field. When `version` is omitted, Anito hashes `version_path` instead of `output` to generate the `sha:xxxxxxxx` service version. This is intended for services whose `output` is a stable wrapper script while the real deployable artifact is a built file or directory.

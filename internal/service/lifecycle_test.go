@@ -5,7 +5,10 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"path/filepath"
+	"sort"
 	"strconv"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -19,30 +22,96 @@ func TestHelperFakeServiceLifecycle(t *testing.T) {
 	if os.Getenv("TEST_HELPER") != "fake_service_lifecycle" {
 		t.Skip("not a subprocess helper")
 	}
-	portStr := os.Getenv("PORT")
-	port, err := strconv.Atoi(portStr)
-	if err != nil || port == 0 {
-		fmt.Fprintf(os.Stderr, "TestHelperFakeServiceLifecycle: invalid PORT=%q\n", portStr)
-		os.Exit(1)
+	mode := os.Getenv("TEST_SERVICE_MODE")
+	if mode == "" {
+		if os.Getenv("TEST_UNHEALTHY") == "1" {
+			mode = "unhealthy"
+		} else {
+			mode = "healthy"
+		}
 	}
-	status := http.StatusOK
+	healthStatus := http.StatusOK
 	if raw := os.Getenv("HEALTH_STATUS"); raw != "" {
 		parsed, err := strconv.Atoi(raw)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "TestHelperFakeServiceLifecycle: invalid HEALTH_STATUS=%q\n", raw)
 			os.Exit(1)
 		}
-		status = parsed
+		healthStatus = parsed
 	}
-	mux := http.NewServeMux()
-	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(status)
-	})
-	srv := &http.Server{Addr: fmt.Sprintf("localhost:%d", port), Handler: mux}
-	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+	body := os.Getenv("TEST_RESPONSE_BODY")
+	if body == "" {
+		body = "ok"
+	}
+
+	ports := helperPortsFromEnv()
+	if len(ports) == 0 {
+		fmt.Fprintf(os.Stderr, "TestHelperFakeServiceLifecycle: no PORT or PORT_<NAME> set\n")
 		os.Exit(1)
 	}
+
+	for _, portCfg := range ports {
+		portCfg := portCfg
+		mux := http.NewServeMux()
+		mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
+			switch mode {
+			case "hang":
+				<-r.Context().Done()
+			case "unhealthy":
+				w.WriteHeader(http.StatusServiceUnavailable)
+			default:
+				w.WriteHeader(healthStatus)
+				_, _ = w.Write([]byte("ok"))
+			}
+		})
+		mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(fmt.Sprintf("%s:%s", body, portCfg.name)))
+		})
+		srv := &http.Server{Addr: fmt.Sprintf("localhost:%d", portCfg.port), Handler: mux}
+		go func() {
+			if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+				os.Exit(1)
+			}
+		}()
+	}
 	select {}
+}
+
+type helperPortConfig struct {
+	name string
+	port int
+}
+
+func helperPortsFromEnv() []helperPortConfig {
+	var ports []helperPortConfig
+	seen := map[int]bool{}
+	for _, env := range os.Environ() {
+		key, value, ok := strings.Cut(env, "=")
+		if !ok || !strings.HasPrefix(key, "PORT_") {
+			continue
+		}
+		port, err := strconv.Atoi(value)
+		if err != nil || port == 0 || seen[port] {
+			continue
+		}
+		name := strings.ToLower(strings.TrimPrefix(key, "PORT_"))
+		if name == "" {
+			continue
+		}
+		ports = append(ports, helperPortConfig{name: name, port: port})
+		seen[port] = true
+	}
+
+	if portStr := os.Getenv("PORT"); portStr != "" {
+		port, err := strconv.Atoi(portStr)
+		if err == nil && port != 0 && !seen[port] {
+			ports = append(ports, helperPortConfig{name: "default", port: port})
+		}
+	}
+
+	sort.Slice(ports, func(i, j int) bool { return ports[i].name < ports[j].name })
+	return ports
 }
 
 // newFakeSvc returns a registry.Service pointing at os.Args[0] (the test
@@ -246,6 +315,128 @@ func TestConcurrentDeploy_Serialized(t *testing.T) {
 	}
 	if got.Status != registry.StatusRunning {
 		t.Errorf("status = %q after concurrent deploys, want %q", got.Status, registry.StatusRunning)
+	}
+}
+
+func TestFailedRedeployRestoresServingProcessAndRegistry(t *testing.T) {
+	t.Setenv("TEST_HELPER", "fake_service_lifecycle")
+	svc := newTestService(t)
+	healthyEnv := filepath.Join(t.TempDir(), "healthy.env")
+	unhealthyEnv := filepath.Join(t.TempDir(), "unhealthy.env")
+	if err := os.WriteFile(healthyEnv, []byte("TEST_UNHEALTHY=0\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(unhealthyEnv, []byte("TEST_UNHEALTHY=1\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	first, err := svc.Deploy(DeployRequest{
+		Name:               "failed-redeploy",
+		Version:            "good",
+		Type:               registry.TypeBinary,
+		Path:               os.Args[0],
+		Args:               []string{"-test.run=TestHelperFakeServiceLifecycle", "-test.v"},
+		EnvFile:            healthyEnv,
+		HealthCheck:        "/health",
+		HealthCheckTimeout: 5 * time.Second,
+		DrainWindow:        time.Millisecond,
+	})
+	if err != nil {
+		t.Fatalf("initial deploy: %v", err)
+	}
+	t.Cleanup(func() { _ = svc.Stop("failed-redeploy") })
+	originalPID := first.PID
+
+	_, err = svc.Deploy(DeployRequest{
+		Name:               "failed-redeploy",
+		Version:            "bad",
+		Type:               registry.TypeBinary,
+		Path:               os.Args[0],
+		Args:               []string{"-test.run=TestHelperFakeServiceLifecycle", "-test.v"},
+		EnvFile:            unhealthyEnv,
+		HealthCheck:        "/health",
+		HealthCheckTimeout: 300 * time.Millisecond,
+		DrainWindow:        time.Millisecond,
+	})
+	if err == nil {
+		t.Fatal("unhealthy redeploy unexpectedly succeeded")
+	}
+
+	restored, err := svc.Status("failed-redeploy")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if restored.Version != "good" || restored.EnvFile != healthyEnv {
+		t.Fatalf("registry retained rejected deploy: version=%q env=%q", restored.Version, restored.EnvFile)
+	}
+	if restored.Status != registry.StatusRunning || restored.PID != originalPID {
+		t.Fatalf("restored runtime = status %q pid %d, want running pid %d", restored.Status, restored.PID, originalPID)
+	}
+	if got := svc.mgr.PID("failed-redeploy"); got != originalPID {
+		t.Fatalf("tracked PID = %d, want restored PID %d", got, originalPID)
+	}
+	if len(restored.StartHistory) != 2 || restored.StartHistory[1].ExitCode != 1 {
+		t.Fatalf("start history = %+v, want rejected candidate recorded with exit 1", restored.StartHistory)
+	}
+
+	resp, err := http.Get(restored.Address() + "/health") //nolint:noctx
+	if err != nil {
+		t.Fatalf("stable proxy after failed redeploy: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("stable proxy status = %d, want 200 from restored process", resp.StatusCode)
+	}
+}
+
+func TestRestorePreviousMarksFailedWhenDetachedProcessAlreadyExited(t *testing.T) {
+	t.Setenv("TEST_HELPER", "fake_service_lifecycle")
+	svc := newTestService(t)
+
+	deployed, err := svc.Deploy(DeployRequest{
+		Name:               "restore-previous-exited",
+		Version:            "good",
+		Type:               registry.TypeBinary,
+		Path:               os.Args[0],
+		Args:               []string{"-test.run=TestHelperFakeServiceLifecycle", "-test.v"},
+		HealthCheck:        "/health",
+		HealthCheckTimeout: 5 * time.Second,
+		DrainWindow:        time.Millisecond,
+	})
+	if err != nil {
+		t.Fatalf("initial deploy: %v", err)
+	}
+	t.Cleanup(func() { _ = svc.Stop("restore-previous-exited") })
+
+	previous := *deployed
+	old := svc.mgr.Detach("restore-previous-exited")
+	if old == nil {
+		t.Fatal("Detach returned nil")
+	}
+	if err := svc.mgr.Drain(old); err != nil {
+		t.Fatalf("Drain detached process: %v", err)
+	}
+
+	svc.restorePrevious("restore-previous-exited", &previous, old)
+
+	restored, err := svc.Status("restore-previous-exited")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if restored.Status != registry.StatusFailed || restored.PID != 0 {
+		t.Fatalf("restored runtime = status %q pid %d, want failed pid 0", restored.Status, restored.PID)
+	}
+	if svc.mgr.IsRunning("restore-previous-exited") {
+		t.Fatal("manager still tracks exited detached process")
+	}
+
+	resp, err := http.Get(restored.Address() + "/health") //nolint:noctx
+	if err != nil {
+		t.Fatalf("stable proxy after failed restore: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("stable proxy status = %d, want 503 after failed restore", resp.StatusCode)
 	}
 }
 
