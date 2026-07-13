@@ -10,7 +10,7 @@ Format: `## [date] — description`, breaking changes marked **BREAKING**.
 
 ## 2026-07-13 — Startup reconciliation gate
 
-**HTTP API:** Mutating service requests made while daemon startup reconciliation is in progress now return `409 Conflict` with startup progress fields instead of a generic server error. Read-only endpoints remain available during reconciliation.
+**HTTP API:** Mutating service requests made while daemon startup reconciliation is in progress now return `409 Conflict` with startup progress fields instead of a generic server error. `GET /health` now includes additive startup phase/progress fields. Read-only endpoints remain available during reconciliation.
 
 ## 2026-07-12 — Safer process replacement and richer MCP status
 

@@ -128,7 +128,20 @@ type DeployRequest struct {
 }
 
 func (s *Server) handleHealth(c echo.Context) error {
-	return c.JSON(http.StatusOK, map[string]string{"status": "ok", "version": s.version})
+	startup := s.svc.StartupState()
+	return c.JSON(http.StatusOK, map[string]any{
+		"status":  "ok",
+		"version": s.version,
+		"startup": map[string]any{
+			"phase":             startup.Phase,
+			"started_at":        startup.StartedAt,
+			"completed_at":      startup.CompletedAt,
+			"total":             startup.Total,
+			"completed":         startup.Completed,
+			"max_parallel":      startup.MaxParallel,
+			"mutations_blocked": startup.MutationsBlocked,
+		},
+	})
 }
 
 func (s *Server) handleServices(c echo.Context) error {

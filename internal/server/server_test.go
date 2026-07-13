@@ -152,15 +152,18 @@ func TestHandleHealth(t *testing.T) {
 		t.Fatalf("expected 200, got %d", rec.Code)
 	}
 
-	var resp map[string]string
+	var resp map[string]any
 	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
 	if resp["status"] != "ok" {
-		t.Errorf("expected status=ok, got %q", resp["status"])
+		t.Errorf("expected status=ok, got %v", resp["status"])
 	}
 	if resp["version"] != "test-v0.0.1" {
-		t.Errorf("expected version=test-v0.0.1, got %q", resp["version"])
+		t.Errorf("expected version=test-v0.0.1, got %v", resp["version"])
+	}
+	if _, ok := resp["startup"].(map[string]any); !ok {
+		t.Fatalf("expected startup object, got %T", resp["startup"])
 	}
 }
 
