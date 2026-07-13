@@ -3,6 +3,7 @@ package server
 import (
 	"embed"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io/fs"
 	"log"
@@ -190,7 +191,7 @@ func (s *Server) handleDeploy(c echo.Context) error {
 				Severity: "error",
 			})
 		}
-		return echo.NewHTTPError(http.StatusInternalServerError, err.Error())
+		return serviceHTTPError(err)
 	}
 	return c.JSON(http.StatusOK, svc)
 }
@@ -199,7 +200,7 @@ func (s *Server) handleStop(c echo.Context) error {
 	name := c.Param("name")
 	if err := s.svc.Stop(name); err != nil {
 		log.Printf("[ERROR] stop name=%s error=%q", name, err)
-		return echo.NewHTTPError(http.StatusInternalServerError, err.Error())
+		return serviceHTTPError(err)
 	}
 	return c.JSON(http.StatusOK, map[string]string{"status": "stopped", "name": name})
 }
@@ -208,7 +209,7 @@ func (s *Server) handleRestart(c echo.Context) error {
 	name := c.Param("name")
 	if err := s.svc.Restart(name); err != nil {
 		log.Printf("[ERROR] restart name=%s error=%q", name, err)
-		return echo.NewHTTPError(http.StatusInternalServerError, err.Error())
+		return serviceHTTPError(err)
 	}
 	svc, err := s.svc.Status(name)
 	if err != nil {
@@ -222,7 +223,7 @@ func (s *Server) handleRollback(c echo.Context) error {
 	svc, err := s.svc.Rollback(name)
 	if err != nil {
 		log.Printf("[ERROR] rollback name=%s error=%q", name, err)
-		return echo.NewHTTPError(http.StatusInternalServerError, err.Error())
+		return serviceHTTPError(err)
 	}
 	return c.JSON(http.StatusOK, svc)
 }
@@ -240,7 +241,7 @@ func (s *Server) handleRemove(c echo.Context) error {
 	name := c.Param("name")
 	if err := s.svc.Remove(name); err != nil {
 		log.Printf("[ERROR] remove name=%s error=%q", name, err)
-		return echo.NewHTTPError(http.StatusInternalServerError, err.Error())
+		return serviceHTTPError(err)
 	}
 	return c.JSON(http.StatusOK, map[string]string{"status": "removed", "name": name})
 }
@@ -316,10 +317,23 @@ func (s *Server) handleTeardown(c echo.Context) error {
 	removed, err := s.svc.Teardown(req.RepoPath)
 	if err != nil {
 		log.Printf("[ERROR] teardown repo=%s error=%q", req.RepoPath, err)
-		return echo.NewHTTPError(http.StatusInternalServerError, err.Error())
+		return serviceHTTPError(err)
 	}
 	log.Printf("[TEARDOWN] repo=%s removed=%v", req.RepoPath, removed)
 	return c.JSON(http.StatusOK, map[string]any{"removed": removed, "count": len(removed)})
+}
+
+func serviceHTTPError(err error) error {
+	var gate *service.StartupGateError
+	if errors.As(err, &gate) {
+		return echo.NewHTTPError(http.StatusConflict, map[string]any{
+			"error":     gate.Error(),
+			"phase":     gate.Phase,
+			"completed": gate.Completed,
+			"total":     gate.Total,
+		})
+	}
+	return echo.NewHTTPError(http.StatusInternalServerError, err.Error())
 }
 
 func (s *Server) handlePostIssue(c echo.Context) error {

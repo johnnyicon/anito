@@ -8,6 +8,10 @@ Format: `## [date] — description`, breaking changes marked **BREAKING**.
 
 ---
 
+## 2026-07-13 — Startup reconciliation gate
+
+**HTTP API:** Mutating service requests made while daemon startup reconciliation is in progress now return `409 Conflict` with startup progress fields instead of a generic server error. Read-only endpoints remain available during reconciliation.
+
 ## 2026-07-12 — Safer process replacement and richer MCP status
 
 **MCP:** `anito_services` and `anito_status` responses now include additive operational fields: `args`, `env_file`, `health_check`, `health_check_timeout`, `drain_window`, `watch_paths`, `restart_policy`, `crash_attempts`, `gave_up`, `last_started_at`, and `start_history`. Partial `anito_deploy` redeploys now preserve omitted registered configuration by default; callers can pass the new `replace_config: true` field to request complete replacement semantics.

@@ -73,6 +73,8 @@ type Service struct {
 
 	deployLocks sync.Map // map[string]*sync.Mutex — per-service deploy serialization
 
+	startup startupTracker
+
 	deploysTotal atomic.Int64
 	crashesTotal atomic.Int64
 }
@@ -119,6 +121,7 @@ func New(reg *registry.Registry, mgr *process.Manager, prx *proxy.Manager, logDi
 		wtch:          wtch,
 		iss:           iss,
 		crashAttempts: make(map[string]int),
+		startup:       newStartupTracker(),
 	}
 	mgr.OnCrash = svc.handleCrash
 	return svc
@@ -159,6 +162,9 @@ func (s *Service) lockDeploy(name string) func() {
 //   - If StablePorts is nil and StablePort == 0, a port is auto-allocated.
 //   - Re-deploying an existing service always preserves its stable port(s).
 func (s *Service) Deploy(req DeployRequest) (*registry.Service, error) {
+	if err := s.ensureMutable(); err != nil {
+		return nil, err
+	}
 	defer s.lockDeploy(req.Name)()
 
 	if err := validateDeployRequest(req); err != nil {
@@ -371,6 +377,9 @@ func (s *Service) Status(name string) (*registry.Service, error) {
 }
 
 func (s *Service) Stop(name string) error {
+	if err := s.ensureMutable(); err != nil {
+		return err
+	}
 	s.wtch.Stop(name)
 	err := s.mgr.Stop(name)
 	if err != nil {
@@ -385,6 +394,9 @@ func (s *Service) Stop(name string) error {
 }
 
 func (s *Service) Restart(name string) error {
+	if err := s.ensureMutable(); err != nil {
+		return err
+	}
 	defer s.lockDeploy(name)()
 	return s.restartLocked(name)
 }
@@ -568,6 +580,9 @@ func validateServiceName(name string) error {
 }
 
 func (s *Service) Rollback(name string) (*registry.Service, error) {
+	if err := s.ensureMutable(); err != nil {
+		return nil, err
+	}
 	defer s.lockDeploy(name)()
 
 	current, ok := s.reg.Get(name)
@@ -648,6 +663,9 @@ func fallbackString(value, fallback string) string {
 }
 
 func (s *Service) Remove(name string) error {
+	if err := s.ensureMutable(); err != nil {
+		return err
+	}
 	// Read config path before removing from registry.
 	svc, _ := s.reg.Get(name)
 
@@ -671,6 +689,9 @@ func (s *Service) Remove(name string) error {
 // receipt file does not exist (no-op). Errors for individual removals are
 // collected and returned together.
 func (s *Service) Teardown(repoPath string) ([]string, error) {
+	if err := s.ensureMutable(); err != nil {
+		return nil, err
+	}
 	f, err := receipt.Load(repoPath)
 	if err != nil {
 		return nil, fmt.Errorf("teardown: read receipt: %w", err)
@@ -1039,6 +1060,9 @@ func (s *Service) LogStream(ctx context.Context, name string) (<-chan string, er
 // For backward compat, preferredPort allocates a single "default" port.
 // For multi-port, use ReservePorts instead.
 func (s *Service) Reserve(name string, preferredPort int) (int, error) {
+	if err := s.ensureMutable(); err != nil {
+		return 0, err
+	}
 	if err := validateServiceName(name); err != nil {
 		return 0, err
 	}
@@ -1064,6 +1088,9 @@ func (s *Service) Reserve(name string, preferredPort int) (int, error) {
 
 // ReservePorts claims multiple named stable ports for a service without deploying it.
 func (s *Service) ReservePorts(name string, preferred map[string]int) (map[string]int, error) {
+	if err := s.ensureMutable(); err != nil {
+		return nil, err
+	}
 	if err := validateServiceName(name); err != nil {
 		return nil, err
 	}

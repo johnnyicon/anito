@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"fmt"
 	"io"
@@ -38,6 +39,10 @@ const (
 	defaultMCPPort    = 7701
 	daemonWaitTimeout = 60 * time.Second
 )
+
+var daemonRestoreAll = func(ctx context.Context, svc *service.Service, opts service.RestoreAllOptions) (*service.RestoreAllResult, error) {
+	return svc.RestoreAll(ctx, opts)
+}
 
 func main() {
 	daemonCmd := flag.NewFlagSet("daemon", flag.ExitOnError)
@@ -756,122 +761,26 @@ func runDaemon(apiPort, mcpPort int, dataDir string) {
 		log.Printf("[STARTUP] pruned %d stale MCP sessions", n)
 	}
 
-	// Restore services that were running before the daemon last stopped.
-	for _, svc := range reg.All() {
-		if len(svc.StablePorts) == 0 && svc.StablePort == 0 {
-			continue
-		}
-		// Register all proxy listeners for this service.
-		if len(svc.StablePorts) > 0 {
-			if err := prx.RegisterPortsWithBind(svc.Name, svc.StablePorts, svc.ProxyBindAddress); err != nil {
-				log.Printf("warn: could not re-register proxy for %s: %v", svc.Name, err)
-				continue
-			}
-		} else {
-			if err := prx.RegisterWithBind(svc.Name, svc.StablePort, svc.ProxyBindAddress); err != nil {
-				log.Printf("warn: could not re-register proxy for %s: %v", svc.Name, err)
-				continue
-			}
-		}
-		if svc.Status == registry.StatusRunning {
-			log.Printf("restoring %s on %s", svc.Name, svc.Address())
-			if svc.Type == registry.TypeStatic {
-				if err := prx.SwapStatic(svc.Name, svc.BinaryPath); err != nil {
-					log.Printf("[RESTORE_FAILED] name=%s reason=%v", svc.Name, err)
-					_ = reg.UpdateStatus(svc.Name, registry.StatusFailed, 0)
-					_ = iss.Append(issues.Issue{
-						Source:   "daemon:restore_failed",
-						Tool:     "startup",
-						Error:    fmt.Sprintf("service %s: %v", svc.Name, err),
-						Severity: "error",
-					})
-				}
-				continue
-			}
-			// Verify binary exists before attempting to start.
-			if _, err := os.Stat(svc.BinaryPath); os.IsNotExist(err) {
-				log.Printf("[ORPHAN] name=%s binary_path=%s", svc.Name, svc.BinaryPath)
-				_ = reg.UpdateStatus(svc.Name, registry.StatusOrphaned, 0)
-				continue
-			} else if err != nil {
-				log.Printf("[RESTORE_FAILED] name=%s reason=stat error: %v", svc.Name, err)
-				_ = reg.UpdateStatus(svc.Name, registry.StatusFailed, 0)
-				_ = iss.Append(issues.Issue{
-					Source:   "daemon:restore_failed",
-					Tool:     "startup",
-					Error:    fmt.Sprintf("service %s: stat error: %v", svc.Name, err),
-					Severity: "error",
-				})
-				continue
-			}
-			internalPorts, err := mgr.Start(svc)
-			if err != nil {
-				log.Printf("[RESTORE_FAILED] name=%s error=%v", svc.Name, err)
-				_ = reg.UpdateStatus(svc.Name, registry.StatusFailed, 0)
-				_ = iss.Append(issues.Issue{
-					Source:   "daemon:restore_failed",
-					Tool:     "startup",
-					Error:    fmt.Sprintf("service %s: %v", svc.Name, err),
-					Severity: "error",
-				})
-				continue
-			}
-
-			hcTimeout := svc.HealthCheckTimeout
-			if hcTimeout == 0 {
-				hcTimeout = 15 * time.Second
-			}
-			hcPort := svc.PrimaryInternalPort()
-			if p, ok := internalPorts[svc.HealthCheckPort]; ok && svc.HealthCheckPort != "" {
-				hcPort = p
-			} else if p, ok := internalPorts["default"]; ok {
-				hcPort = p
-			} else {
-				for _, p := range internalPorts {
-					hcPort = p
-					break
-				}
-			}
-			if err := service.WaitHealthy(hcPort, svc.HealthCheck, hcTimeout); err != nil {
-				log.Printf("[RESTORE_FAILED] name=%s health_check=%v", svc.Name, err)
-				_ = mgr.Stop(svc.Name)
-				_ = reg.UpdateStatus(svc.Name, registry.StatusFailed, 0)
-				_ = iss.Append(issues.Issue{
-					Source:   "daemon:restore_failed",
-					Tool:     "startup",
-					Error:    fmt.Sprintf("service %s: health check: %v", svc.Name, err),
-					Severity: "error",
-				})
-				continue
-			}
-
-			if err := prx.SwapPorts(svc.Name, internalPorts); err != nil {
-				log.Printf("[RESTORE_FAILED] name=%s proxy_swap=%v", svc.Name, err)
-				_ = mgr.Stop(svc.Name)
-				_ = reg.UpdateStatus(svc.Name, registry.StatusFailed, 0)
-				_ = iss.Append(issues.Issue{
-					Source:   "daemon:restore_failed",
-					Tool:     "startup",
-					Error:    fmt.Sprintf("service %s: proxy swap: %v", svc.Name, err),
-					Severity: "error",
-				})
-				continue
-			}
-			newPID := mgr.PID(svc.Name)
-			_ = reg.UpdateStatus(svc.Name, registry.StatusRunning, newPID)
-		}
-	}
-
 	log.Printf("[STARTUP] version=%s data=%s api=:%d mcp=:%d", version, dataDir, apiPort, mcpPort)
 
 	svc := service.New(reg, mgr, prx, logDir, wtch, iss)
-	svc.StartWatchers()
+	svc.BeginStartup(4)
 
 	mcpSrv := mcpserver.New(svc, iss, sess, mcpPort)
 	go func() {
 		if err := mcpSrv.Start(); err != nil {
 			log.Printf("MCP server error: %v", err)
 		}
+	}()
+
+	go func() {
+		result, err := daemonRestoreAll(context.Background(), svc, service.RestoreAllOptions{IssueSource: "daemon:restore_failed"})
+		if err != nil {
+			log.Printf("[STARTUP] restore error: %v", err)
+			return
+		}
+		log.Printf("[STARTUP] restore complete total=%d targets=%d restored=%d failed=%d orphaned=%d skipped=%d bind_failed=%d",
+			result.Total, result.Targets, result.Restored, result.Failed, result.Orphaned, result.Skipped, result.BindFailed)
 	}()
 
 	srv := server.New(svc, iss, sess, apiPort, version)
