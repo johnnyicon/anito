@@ -28,3 +28,13 @@
 ## Disposition
 
 The Anito daemon and MCP control plane are healthy and the rollout path is operational. The no-disruption acceptance condition is not fully green because `tahua-web-api` could not pass its own configured readiness endpoint. Keep the rollout AWF brief open until that service is independently repaired or the operator explicitly accepts the pre-existing stale-registration condition. The source branch remains on the new implementation; the previous daemon binary and registry are preserved for rollback.
+
+## Fleet Follow-up
+
+- Main commit: `51c526b` (`merge: integrate audit remediation with main hardening`).
+- Deployed Anito daemon version `51c526b` to this computer (`m4`), M1, and Hetzner. Each management endpoint returned `200` with startup `phase=ready` and `mutations_blocked=false`.
+- M1 was updated in place at `~/.local/bin/anito`; its launchd daemon restarted successfully. The previous binary is preserved as `~/.local/bin/anito.pre-51c526b`.
+- Hetzner was updated in place at `/usr/local/bin/anito` under systemd; the previous binary is preserved as `/usr/local/bin/anito.pre-51c526b`.
+- Hetzner's existing `gomanan-mcp` config used wildcard `proxy_bind_address: 0.0.0.0`, which the new validation correctly rejected during restart. The config was backed up, changed to the actual Tailscale address `100.127.96.57`, and redeployed. Authority returned on `http://100.127.96.57:8100/health` with `X-Anito-Proxy: 1`.
+- 2019 was not updated: Tailscale reported it offline through a relay and SSH to `100.76.130.110` timed out. No change was made there.
+- The pre-existing `tahua-web-api` readiness failure remains the rollout brief's service-level blocker.
