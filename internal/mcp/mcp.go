@@ -513,6 +513,42 @@ func (s *Server) registerTools(srv *sdkmcp.Server) {
 	})
 
 	sdkmcp.AddTool(srv, &sdkmcp.Tool{
+		Name:        "anito_archive",
+		Description: "Archive a stopped, failed, or orphaned service without releasing its stable-port metadata.",
+	}, func(ctx context.Context, req *sdkmcp.CallToolRequest, in nameInput) (*sdkmcp.CallToolResult, serviceView, error) {
+		svc, err := s.svc.Archive(in.Name)
+		if err != nil {
+			return nil, serviceView{}, err
+		}
+		return nil, toView(svc), nil
+	})
+
+	sdkmcp.AddTool(srv, &sdkmcp.Tool{
+		Name:        "anito_restore_archived",
+		Description: "Restore an archived service registration to the stopped state.",
+	}, func(ctx context.Context, req *sdkmcp.CallToolRequest, in nameInput) (*sdkmcp.CallToolResult, serviceView, error) {
+		svc, err := s.svc.RestoreArchived(in.Name)
+		if err != nil {
+			return nil, serviceView{}, err
+		}
+		return nil, toView(svc), nil
+	})
+
+	sdkmcp.AddTool(srv, &sdkmcp.Tool{
+		Name:        "anito_prune",
+		Description: "Permanently prune an archived service registration. Requires explicit confirmation and leaves a tombstone.",
+	}, func(ctx context.Context, req *sdkmcp.CallToolRequest, in struct {
+		Name    string `json:"name" jsonschema:"required — service name"`
+		Confirm bool   `json:"confirm" jsonschema:"required — must be true"`
+	}) (*sdkmcp.CallToolResult, registry.Tombstone, error) {
+		if !in.Confirm {
+			return nil, registry.Tombstone{}, domain.Conflictf("prune requires confirm=true")
+		}
+		tomb, err := s.svc.Prune(in.Name)
+		return nil, tomb, err
+	})
+
+	sdkmcp.AddTool(srv, &sdkmcp.Tool{
 		Name:        "anito_services",
 		Description: "List all services registered with Anito, including their stable ports and current status.",
 		InputSchema: json.RawMessage(`{"type":"object","properties":{}}`),

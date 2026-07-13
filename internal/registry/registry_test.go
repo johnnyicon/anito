@@ -14,6 +14,46 @@ func newTestRegistry(t *testing.T) *Registry {
 	return r
 }
 
+func TestArchiveRestoreAndPrunePreservePortAndTombstone(t *testing.T) {
+	r := newTestRegistry(t)
+	if err := r.Register(&Service{Name: "archivable", Type: TypeBinary, BinaryPath: "/bin/true", StablePort: 8123, Status: StatusStopped}); err != nil {
+		t.Fatal(err)
+	}
+	archived, err := r.Archive("archivable")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if archived.Status != StatusArchived || archived.StablePort != 8123 {
+		t.Fatalf("archived = %+v", archived)
+	}
+	if got := r.All(); len(got) != 0 {
+		t.Fatalf("active services = %d, want 0", len(got))
+	}
+	restored, err := r.RestoreArchived("archivable")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if restored.Status != StatusStopped || restored.StablePort != 8123 {
+		t.Fatalf("restored = %+v", restored)
+	}
+	if _, err := r.Prune("archivable"); err == nil {
+		t.Fatal("prune unexpectedly succeeded for non-archived service")
+	}
+	if _, err := r.Archive("archivable"); err != nil {
+		t.Fatal(err)
+	}
+	tomb, err := r.Prune("archivable")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tomb.Name != "archivable" || tomb.StablePorts["default"] != 8123 {
+		t.Fatalf("tombstone = %+v", tomb)
+	}
+	if _, ok := r.Get("archivable"); ok {
+		t.Fatal("pruned service still registered")
+	}
+}
+
 // TestStablePortPreservedOnRedeploy verifies the core invariant: re-registering
 // a service with a different StablePort value must not change the port that was
 // stored on the first registration.

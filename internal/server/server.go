@@ -72,6 +72,9 @@ func (s *Server) Start() error {
 	e.POST("/rollback/:name", s.handleRollback)
 	e.GET("/status/:name", s.handleStatus)
 	e.POST("/remove/:name", s.handleRemove)
+	e.POST("/archive/:name", s.handleArchive)
+	e.POST("/restore/:name", s.handleRestoreArchived)
+	e.POST("/prune/:name", s.handlePrune)
 	e.GET("/logs/:name", s.handleLogs)
 	e.POST("/issues", s.handlePostIssue)
 	e.GET("/issues", s.handleGetIssues)
@@ -263,6 +266,34 @@ func (s *Server) handleRemove(c echo.Context) error {
 		return serviceHTTPError(err)
 	}
 	return c.JSON(http.StatusOK, map[string]string{"status": "removed", "name": name})
+}
+
+func (s *Server) handleArchive(c echo.Context) error {
+	name := c.Param("name")
+	archived, err := s.svc.Archive(name)
+	if err != nil {
+		return serviceHTTPError(err)
+	}
+	return c.JSON(http.StatusOK, archived)
+}
+
+func (s *Server) handleRestoreArchived(c echo.Context) error {
+	service, err := s.svc.RestoreArchived(c.Param("name"))
+	if err != nil {
+		return serviceHTTPError(err)
+	}
+	return c.JSON(http.StatusOK, service)
+}
+
+func (s *Server) handlePrune(c echo.Context) error {
+	if c.QueryParam("confirm") != "prune" && c.Request().Header.Get("X-Anito-Confirm") != "prune" {
+		return domainHTTPError(domain.Conflictf("prune requires confirm=prune or X-Anito-Confirm: prune"))
+	}
+	tomb, err := s.svc.Prune(c.Param("name"))
+	if err != nil {
+		return serviceHTTPError(err)
+	}
+	return c.JSON(http.StatusOK, tomb)
 }
 
 func (s *Server) handleLogs(c echo.Context) error {

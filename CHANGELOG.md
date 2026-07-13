@@ -8,6 +8,10 @@ Format: `## [date] — description`, breaking changes marked **BREAKING**.
 
 ---
 
+## 2026-07-13 — Reversible service archive and prune
+
+**Registry / HTTP API / MCP:** Service registrations can now be archived and restored without losing stable-port or deployment metadata. Pruning requires an archived state plus explicit confirmation and records a registry tombstone; active default service listings exclude archived entries.
+
 ## 2026-07-13 — Issue lifecycle actions
 
 **HTTP API / MCP:** Fingerprinted issues now retain lifecycle state, acknowledgement/resolution timestamps, optional opaque tracker links, occurrence history, and automatic reopen-on-occurrence behavior. Use the issue transition endpoints or `anito_issue_acknowledge`, `anito_issue_resolve`, and `anito_issue_reopen`.
