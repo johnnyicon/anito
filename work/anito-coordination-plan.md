@@ -9,7 +9,7 @@
 ## Current position
 
 - Canonical AWF plan: `019f5bb0-cf2a-7d33-ae7b-fa2aea3e5875` — **Anito Reliability and Control-Plane Consolidation**.
-- Plan status: `active`; tracker reports `13/37` work packages complete (`35.1%`). The audit baseline and two research briefs are complete; issue aggregation is complete; RestoreAll implementation is in progress.
+- Plan status: `active`; the audit baseline, RestoreAll design/implementation, MCP telemetry design, and issue aggregation are complete. The next executable gates are typed diagnosis/errors and shared setup planning.
 - AWF v2 routing work is in progress on M1 under `codex/awf-v2-planned-routing`. The plan currently stores useful model recommendations and dependency waves, but agent/persona, harness, effort, reviewer, write scope, fallback, and routing provenance are not consistently durable first-class fields yet.
 - AWF schema feature requests: `019f5bba-e76a-7697-a3dd-2fe10f1da3d5` and `019f5bc1-2156-7e72-b392-bf562099c141`.
 - The M1 AWF-plans session has acknowledged the routing/schema work and reported no implementation blocker. Its status evidence is inbox item `019f5cf5-88ca-7be3-abb9-37010e41c4c5`.
@@ -54,7 +54,7 @@ The AWF dependency graph is authoritative. The table gives the coordinator a con
 | 2 | Specify RestoreAll and Startup Reconciliation | `019f5bb3-0523-7e7c-bac0-308ea854cbde` | Architect + SRE | `claude-sonnet-4-6` | high | Senior Go Engineer | in_progress |
 | 2 | Add Issue Fingerprints and Occurrence Aggregation | `019f5bb4-6b4a-73c6-b7c5-3d22bf27d2a0` | SRE + Go Engineer | `gpt-5.4` | medium | Architect | done |
 | 2 | Reframe MCP Session Telemetry as Client Activity | `019f5bb4-6c2f-7854-98bb-13535c8253fc` | MCP / AI Integration | `claude-sonnet-4-6` | medium | SRE | in_progress |
-| 3 | Implement Two-Phase Bounded Restore | `019f5bb2-c5db-7a20-9ea8-30854640925e` | Go Engineer + SRE | `gpt-5.5` | high | Architect | pending |
+| 3 | Implement Two-Phase Bounded Restore | `019f5bb2-c5db-7a20-9ea8-30854640925e` | Go Engineer + SRE | `gpt-5.5` | high | Architect | done |
 | 3 | Add Issue Acknowledge, Resolve, Reopen, and Tracker Links | `019f5bb4-6b6a-7647-9667-2e453756af00` | Go Engineer + SRE | `gpt-5.4` | medium | QA / Test Engineer | pending |
 | 4 | Prove Restore Failure and Remove Duplicate Lifecycle Code | `019f5bb2-c629-771b-a1ac-232178be4ded` | QA / Test + Go Engineer | `gpt-5.4` | high | Architect + SRE | pending |
 | 4 | Add Reversible Service Archive and Prune Workflows | `019f5bb4-6ba5-7382-b2db-1d8dc96a54f2` | SRE + DevOps | `gpt-5.5` | medium | QA / Test Engineer | pending |
@@ -107,3 +107,4 @@ Research briefs must additionally leave a decision record or implementation-read
 | 2026-07-13 | Independent review found one P1 rollback race: a detached old process can exit after the restore check and still be reattached as running. Routed the fix to Go lifecycle worker `019f5d1e-9a46-7a22-b259-6b0c3571fea2`; baseline remains open pending deterministic regression coverage. |
 | 2026-07-13 | Closed the baseline after fix `20a8f98` and independent re-review. The rollback race now latches process exit under the manager lock and has deterministic regression coverage; no unresolved P0/P1 remained in scope. |
 | 2026-07-13 | Completed issue aggregation in `255b9ff`: versioned storage, legacy migration, conservative fingerprinting, occurrence retention, atomic persistence, and race-safe tests. RestoreAll implementation remains the active critical-path work. |
+| 2026-07-13 | Completed RestoreAll in `73d316b`: service-owned listener-first reconciliation, bounded worker pool, startup mutation gate, liveness-before-restore wiring, cancellation outcomes, and focused/race tests. |

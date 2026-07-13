@@ -3,9 +3,13 @@ package service
 import (
 	"context"
 	"errors"
+	"fmt"
+	"io"
 	"net"
+	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -298,6 +302,261 @@ func TestRestoreAllRestoresRunningBinary(t *testing.T) {
 	if got.Status != registry.StatusRunning || got.PID == 0 {
 		t.Fatalf("status=%q pid=%d, want running with pid", got.Status, got.PID)
 	}
+}
+
+func TestRestoreAllMixedFixturesPreserveRegistryAndProxyOutcomes(t *testing.T) {
+	resetRestoreHooks(t)
+	svc := newTestService(t)
+
+	healthyEnv := writeRestoreHelperEnv(t, "healthy", "healthy")
+	unhealthyEnv := writeRestoreHelperEnv(t, "unhealthy", "unhealthy")
+	hangEnv := writeRestoreHelperEnv(t, "hang", "hang")
+	staleEnv := writeRestoreHelperEnv(t, "healthy", "stale")
+	multiEnv := writeRestoreHelperEnv(t, "healthy", "multi")
+
+	registerRestoreService(t, svc, newRestoreBinaryRecord("healthy", healthyEnv, 800*time.Millisecond))
+	registerRestoreService(t, svc, newRestoreBinaryRecord("unhealthy", unhealthyEnv, 350*time.Millisecond))
+	registerRestoreService(t, svc, newRestoreBinaryRecord("hang", hangEnv, 350*time.Millisecond))
+
+	stale := newRestoreBinaryRecord("stale", staleEnv, 800*time.Millisecond)
+	stale.PID = 43210
+	stale.InternalPorts = map[string]int{"default": 43211}
+	stale.InternalPort = 43211
+	registerRestoreService(t, svc, stale)
+
+	stopped := newRestoreBinaryRecord("stopped", healthyEnv, 8001)
+	stopped.Status = registry.StatusStopped
+	registerRestoreService(t, svc, stopped)
+
+	registerRestoreService(t, svc, &registry.Service{
+		Name:               "orphaned",
+		Type:               registry.TypeBinary,
+		BinaryPath:         filepath.Join(t.TempDir(), "missing-binary"),
+		Args:               helperLifecycleArgs(),
+		EnvFile:            healthyEnv,
+		HealthCheck:        "/health",
+		HealthCheckTimeout: 350 * time.Millisecond,
+		Status:             registry.StatusRunning,
+	})
+
+	multi := &registry.Service{
+		Name:             "multi",
+		Type:             registry.TypeBinary,
+		BinaryPath:       os.Args[0],
+		Args:             helperLifecycleArgs(),
+		EnvFile:          multiEnv,
+		HealthCheck:      "/health",
+		HealthCheckPort:  "api",
+		StablePorts:      map[string]int{"api": freeStablePort(t), "ws": freeStablePort(t)},
+		ProxyBindAddress: registry.DefaultProxyBindAddress,
+		Status:           registry.StatusRunning,
+	}
+	registerRestoreService(t, svc, multi)
+
+	for _, name := range []string{"healthy", "stale", "multi"} {
+		name := name
+		t.Cleanup(func() { _ = svc.Stop(name) })
+	}
+
+	result, err := svc.RestoreAll(context.Background(), RestoreAllOptions{MaxParallel: 3})
+	if err != nil {
+		t.Fatalf("RestoreAll: %v", err)
+	}
+
+	gotOutcome := map[string]RestoreOutcome{}
+	for _, serviceResult := range result.Services {
+		gotOutcome[serviceResult.Name] = serviceResult.Outcome
+	}
+	wantOutcome := map[string]RestoreOutcome{
+		"healthy":   RestoreRunning,
+		"unhealthy": RestoreFailed,
+		"hang":      RestoreFailed,
+		"stale":     RestoreRunning,
+		"stopped":   RestoreSkipped,
+		"orphaned":  RestoreOrphaned,
+		"multi":     RestoreRunning,
+	}
+	for name, want := range wantOutcome {
+		if got := gotOutcome[name]; got != want {
+			t.Fatalf("%s outcome = %q, want %q", name, got, want)
+		}
+	}
+
+	assertStatus(t, svc, "healthy", registry.StatusRunning)
+	assertStatus(t, svc, "unhealthy", registry.StatusFailed)
+	assertStatus(t, svc, "hang", registry.StatusFailed)
+	assertStatus(t, svc, "stale", registry.StatusRunning)
+	assertStatus(t, svc, "stopped", registry.StatusStopped)
+	assertStatus(t, svc, "orphaned", registry.StatusOrphaned)
+	assertStatus(t, svc, "multi", registry.StatusRunning)
+
+	staleStatus, err := svc.Status("stale")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if staleStatus.PID == 0 || staleStatus.PID == 43210 {
+		t.Fatalf("stale PID = %d, want non-zero replacement PID", staleStatus.PID)
+	}
+	if staleStatus.InternalPorts["default"] == 43211 {
+		t.Fatalf("stale internal port = %d, want replacement port", staleStatus.InternalPorts["default"])
+	}
+
+	multiStatus, err := svc.Status("multi")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(multiStatus.InternalPorts) != 2 {
+		t.Fatalf("multi internal ports = %v, want two restored ports", multiStatus.InternalPorts)
+	}
+
+	assertProxyBodyContains(t, proxyURLFor("healthy", svc, "default"), http.StatusOK, "healthy:default")
+	assertProxyBodyContains(t, proxyURLFor("stale", svc, "default"), http.StatusOK, "stale:default")
+	assertProxyStatus(t, proxyURLFor("unhealthy", svc, "default"), http.StatusServiceUnavailable)
+	assertProxyStatus(t, proxyURLFor("hang", svc, "default"), http.StatusServiceUnavailable)
+	assertProxyStatus(t, proxyURLFor("stopped", svc, "default"), http.StatusServiceUnavailable)
+	assertProxyStatus(t, proxyURLFor("orphaned", svc, "default"), http.StatusServiceUnavailable)
+	assertProxyBodyContains(t, proxyURLFor("multi", svc, "api"), http.StatusOK, "multi:api")
+	assertProxyBodyContains(t, proxyURLFor("multi", svc, "ws"), http.StatusOK, "multi:ws")
+}
+
+func TestRestoreAllSlowFailureDoesNotBlockHealthyPeer(t *testing.T) {
+	resetRestoreHooks(t)
+	svc := newTestService(t)
+
+	healthyEnv := writeRestoreHelperEnv(t, "healthy", "healthy")
+	hangEnv := writeRestoreHelperEnv(t, "hang", "hang")
+
+	registerRestoreService(t, svc, newRestoreBinaryRecord("healthy-peer", healthyEnv, 800*time.Millisecond))
+	registerRestoreService(t, svc, newRestoreBinaryRecord("slow-fail", hangEnv, 3*time.Second))
+	t.Cleanup(func() { _ = svc.Stop("healthy-peer") })
+
+	done := make(chan struct{})
+	var result *RestoreAllResult
+	var restoreErr error
+	go func() {
+		result, restoreErr = svc.RestoreAll(context.Background(), RestoreAllOptions{MaxParallel: 2})
+		close(done)
+	}()
+
+	waitForProxyStatus(t, proxyURLFor("healthy-peer", svc, "default"), http.StatusOK, 5*time.Second)
+
+	select {
+	case <-done:
+		t.Fatal("RestoreAll finished before the slow failure timed out")
+	default:
+	}
+
+	if state := svc.StartupState(); state.Phase != StartPhaseReconciling || !state.MutationsBlocked {
+		t.Fatalf("startup state during slow failure = %+v, want reconciling with mutations blocked", state)
+	}
+	assertProxyStatus(t, proxyURLFor("slow-fail", svc, "default"), http.StatusServiceUnavailable)
+
+	<-done
+	if restoreErr != nil {
+		t.Fatalf("RestoreAll: %v", restoreErr)
+	}
+
+	gotOutcome := map[string]RestoreOutcome{}
+	for _, serviceResult := range result.Services {
+		gotOutcome[serviceResult.Name] = serviceResult.Outcome
+	}
+	if gotOutcome["healthy-peer"] != RestoreRunning {
+		t.Fatalf("healthy-peer outcome = %q, want %q", gotOutcome["healthy-peer"], RestoreRunning)
+	}
+	if gotOutcome["slow-fail"] != RestoreFailed {
+		t.Fatalf("slow-fail outcome = %q, want %q", gotOutcome["slow-fail"], RestoreFailed)
+	}
+	assertProxyBodyContains(t, proxyURLFor("healthy-peer", svc, "default"), http.StatusOK, "healthy:default")
+}
+
+func newRestoreBinaryRecord(name, envFile string, timeout time.Duration) *registry.Service {
+	return &registry.Service{
+		Name:               name,
+		Type:               registry.TypeBinary,
+		BinaryPath:         os.Args[0],
+		Args:               helperLifecycleArgs(),
+		EnvFile:            envFile,
+		HealthCheck:        "/health",
+		HealthCheckTimeout: timeout,
+		Status:             registry.StatusRunning,
+	}
+}
+
+func helperLifecycleArgs() []string {
+	return []string{"-test.run=TestHelperFakeServiceLifecycle", "-test.v"}
+}
+
+func writeRestoreHelperEnv(t *testing.T, mode, body string) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), fmt.Sprintf("%s.env", mode))
+	content := "TEST_HELPER=fake_service_lifecycle\n" +
+		"TEST_SERVICE_MODE=" + mode + "\n" +
+		"TEST_RESPONSE_BODY=" + body + "\n"
+	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+func proxyURLFor(name string, svc *Service, portName string) string {
+	entry, ok := svc.reg.Get(name)
+	if !ok {
+		return ""
+	}
+	entry.NormalizePorts()
+	return registry.AddressFor(entry.ProxyBindAddress, entry.StablePorts[portName])
+}
+
+func waitForProxyStatus(t *testing.T, url string, want int, timeout time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		status, _, err := fetchHTTP(url)
+		if err == nil && status == want {
+			return
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+	t.Fatalf("%s did not return %d before deadline", url, want)
+}
+
+func assertProxyStatus(t *testing.T, url string, want int) {
+	t.Helper()
+	status, _, err := fetchHTTP(url)
+	if err != nil {
+		t.Fatalf("GET %s: %v", url, err)
+	}
+	if status != want {
+		t.Fatalf("GET %s status = %d, want %d", url, status, want)
+	}
+}
+
+func assertProxyBodyContains(t *testing.T, url string, wantStatus int, wantSubstring string) {
+	t.Helper()
+	status, body, err := fetchHTTP(url)
+	if err != nil {
+		t.Fatalf("GET %s: %v", url, err)
+	}
+	if status != wantStatus {
+		t.Fatalf("GET %s status = %d, want %d", url, status, wantStatus)
+	}
+	if !strings.Contains(body, wantSubstring) {
+		t.Fatalf("GET %s body = %q, want substring %q", url, body, wantSubstring)
+	}
+}
+
+func fetchHTTP(url string) (int, string, error) {
+	client := &http.Client{Timeout: 300 * time.Millisecond}
+	resp, err := client.Get(url) //nolint:noctx
+	if err != nil {
+		return 0, "", err
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return 0, "", err
+	}
+	return resp.StatusCode, string(body), nil
 }
 
 func assertGateError(t *testing.T, err error) {

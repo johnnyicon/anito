@@ -6,7 +6,9 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -20,25 +22,87 @@ func TestHelperFakeServiceLifecycle(t *testing.T) {
 	if os.Getenv("TEST_HELPER") != "fake_service_lifecycle" {
 		t.Skip("not a subprocess helper")
 	}
-	portStr := os.Getenv("PORT")
-	port, err := strconv.Atoi(portStr)
-	if err != nil || port == 0 {
-		fmt.Fprintf(os.Stderr, "TestHelperFakeServiceLifecycle: invalid PORT=%q\n", portStr)
+	mode := os.Getenv("TEST_SERVICE_MODE")
+	if mode == "" {
+		if os.Getenv("TEST_UNHEALTHY") == "1" {
+			mode = "unhealthy"
+		} else {
+			mode = "healthy"
+		}
+	}
+	body := os.Getenv("TEST_RESPONSE_BODY")
+	if body == "" {
+		body = "ok"
+	}
+
+	ports := helperPortsFromEnv()
+	if len(ports) == 0 {
+		fmt.Fprintf(os.Stderr, "TestHelperFakeServiceLifecycle: no PORT or PORT_<NAME> set\n")
 		os.Exit(1)
 	}
-	mux := http.NewServeMux()
-	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
-		if os.Getenv("TEST_UNHEALTHY") == "1" {
-			w.WriteHeader(http.StatusServiceUnavailable)
-			return
-		}
-		w.WriteHeader(http.StatusOK)
-	})
-	srv := &http.Server{Addr: fmt.Sprintf("localhost:%d", port), Handler: mux}
-	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-		os.Exit(1)
+
+	for _, portCfg := range ports {
+		portCfg := portCfg
+		mux := http.NewServeMux()
+		mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
+			switch mode {
+			case "hang":
+				<-r.Context().Done()
+			case "unhealthy":
+				w.WriteHeader(http.StatusServiceUnavailable)
+			default:
+				w.WriteHeader(http.StatusOK)
+				_, _ = w.Write([]byte("ok"))
+			}
+		})
+		mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(fmt.Sprintf("%s:%s", body, portCfg.name)))
+		})
+		srv := &http.Server{Addr: fmt.Sprintf("localhost:%d", portCfg.port), Handler: mux}
+		go func() {
+			if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+				os.Exit(1)
+			}
+		}()
 	}
 	select {}
+}
+
+type helperPortConfig struct {
+	name string
+	port int
+}
+
+func helperPortsFromEnv() []helperPortConfig {
+	var ports []helperPortConfig
+	seen := map[int]bool{}
+	for _, env := range os.Environ() {
+		key, value, ok := strings.Cut(env, "=")
+		if !ok || !strings.HasPrefix(key, "PORT_") {
+			continue
+		}
+		port, err := strconv.Atoi(value)
+		if err != nil || port == 0 || seen[port] {
+			continue
+		}
+		name := strings.ToLower(strings.TrimPrefix(key, "PORT_"))
+		if name == "" {
+			continue
+		}
+		ports = append(ports, helperPortConfig{name: name, port: port})
+		seen[port] = true
+	}
+
+	if portStr := os.Getenv("PORT"); portStr != "" {
+		port, err := strconv.Atoi(portStr)
+		if err == nil && port != 0 && !seen[port] {
+			ports = append(ports, helperPortConfig{name: "default", port: port})
+		}
+	}
+
+	sort.Slice(ports, func(i, j int) bool { return ports[i].name < ports[j].name })
+	return ports
 }
 
 // newFakeSvc returns a registry.Service pointing at os.Args[0] (the test
