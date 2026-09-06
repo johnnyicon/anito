@@ -280,12 +280,11 @@ func (s *Service) Deploy(req DeployRequest) (*registry.Service, error) {
 		return nil, err
 	}
 	svc, _ = s.reg.Get(req.Name)
-	if err := s.prx.RegisterPortsWithBind(svc.Name, svc.StablePorts, svc.ProxyBindAddress); err != nil {
-		s.restorePrevious(req.Name, previous, nil)
-		return nil, err
-	}
-
 	if req.Type == registry.TypeStatic {
+		if err := s.prx.RegisterPortsWithBind(svc.Name, svc.StablePorts, svc.ProxyBindAddress); err != nil {
+			s.restorePrevious(req.Name, previous, nil)
+			return nil, err
+		}
 		if err := s.prx.SwapStatic(req.Name, req.Path); err != nil {
 			s.restoreFailedDeploy(req.Name, previous, hadPrevious, nil)
 			return nil, err
@@ -321,6 +320,14 @@ func (s *Service) Deploy(req DeployRequest) (*registry.Service, error) {
 		return nil, err
 	}
 
+	// Keep the old stable listener (including its public bind address) until
+	// the candidate passes readiness. Registry rollback alone cannot resurrect
+	// a public listener that was replaced with a loopback listener too early.
+	if err := s.prx.RegisterPortsWithBind(svc.Name, svc.StablePorts, svc.ProxyBindAddress); err != nil {
+		_ = s.mgr.StopFailed(req.Name)
+		s.restoreFailedDeploy(req.Name, previous, hadPrevious, oldProc)
+		return nil, err
+	}
 	if err := s.prx.SwapPorts(req.Name, internalPorts); err != nil {
 		_ = s.mgr.StopFailed(req.Name)
 		s.restoreFailedDeploy(req.Name, previous, hadPrevious, oldProc)
@@ -378,6 +385,17 @@ func (s *Service) restoreFailedDeploy(name string, previous *registry.Service, h
 		}
 		if err := s.reg.Restore(previous); err != nil {
 			log.Printf("[ERROR] name=%s restore registry failed: %v", name, err)
+		}
+		if err := s.prx.RegisterPortsWithBind(name, previous.StablePorts, previous.ProxyBindAddress); err != nil {
+			log.Printf("[ERROR] name=%s restore proxy listener failed: %v", name, err)
+		} else if previous.Type == registry.TypeStatic {
+			if err := s.prx.SwapStatic(name, previous.BinaryPath); err != nil {
+				log.Printf("[ERROR] name=%s restore static upstream failed: %v", name, err)
+			}
+		} else if len(previous.InternalPorts) > 0 {
+			if err := s.prx.SwapPorts(name, previous.InternalPorts); err != nil {
+				log.Printf("[ERROR] name=%s restore upstream failed: %v", name, err)
+			}
 		}
 		return
 	}

@@ -2,6 +2,7 @@ package service
 
 import (
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"os"
@@ -269,6 +270,105 @@ func TestDeploy_FailedRedeployRestoresOldProcessAndRegistry(t *testing.T) {
 	if svc.mgr.PID("failed-redeploy-test") != firstPID {
 		t.Fatalf("process manager PID = %d, want restored old PID %d", svc.mgr.PID("failed-redeploy-test"), firstPID)
 	}
+}
+
+func TestFailedReadinessKeepsStableProxyThroughRepeatedRedeploys(t *testing.T) {
+	t.Setenv("TEST_HELPER", "fake_service_lifecycle")
+	t.Setenv("TEST_RESPONSE_BODY", "old-release")
+	s := newTestService(t)
+	req := DeployRequest{Name: "readiness-proxy", Version: "v1", Type: registry.TypeBinary, Path: os.Args[0], Args: []string{"-test.run=TestHelperFakeServiceLifecycle"}, ProxyBindAddress: "127.0.0.1", HealthCheck: "/health", HealthCheckTimeout: 10 * time.Second}
+	first, err := s.Deploy(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = s.Stop(req.Name) })
+	url := fmt.Sprintf("http://127.0.0.1:%d/", first.StablePort)
+	probe := func() error {
+		client := http.Client{Timeout: time.Second}
+		resp, e := client.Get(url)
+		if e != nil {
+			return e
+		}
+		defer resp.Body.Close()
+		body, e := io.ReadAll(resp.Body)
+		if e != nil {
+			return e
+		}
+		if resp.StatusCode != 200 || !strings.HasPrefix(string(body), "old-release:") {
+			return fmt.Errorf("proxy returned %d %q", resp.StatusCode, body)
+		}
+		return nil
+	}
+	if err := probe(); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HEALTH_STATUS", "403")
+	// A changed candidate bind used to close the old listener before readiness.
+	req.ProxyBindAddress = "::1"
+	req.Version = "v2"
+	req.HealthCheckTimeout = 300 * time.Millisecond
+	for i := 0; i < 2; i++ {
+		done := make(chan error, 1)
+		go func() { _, e := s.Deploy(req); done <- e }()
+		for {
+			select {
+			case e := <-done:
+				if e == nil || !strings.Contains(e.Error(), "403") {
+					t.Fatalf("expected failed readiness with HTTP 403, got %v", e)
+				}
+				goto checked
+			default:
+				if e := probe(); e != nil {
+					t.Fatal(e)
+				}
+				time.Sleep(10 * time.Millisecond)
+			}
+		}
+	checked:
+		if e := probe(); e != nil {
+			t.Fatal(e)
+		}
+		got, _ := s.reg.Get(req.Name)
+		if got.PID != first.PID || got.Version != "v1" || got.ProxyBindAddress != "127.0.0.1" {
+			t.Fatalf("previous release not restored: %+v", got)
+		}
+		t.Logf("readiness 403 attempt %d: stable proxy continuously serves old release; original PID and bind retained", i+1)
+	}
+}
+
+func TestFailedDeployRestoresChangedListenerAndUpstream(t *testing.T) {
+	t.Setenv("TEST_HELPER", "fake_service_lifecycle")
+	t.Setenv("TEST_RESPONSE_BODY", "original")
+	s := newTestService(t)
+	req := DeployRequest{Name: "restore-proxy", Version: "v1", Type: registry.TypeBinary, Path: os.Args[0], Args: []string{"-test.run=TestHelperFakeServiceLifecycle"}, ProxyBindAddress: "127.0.0.1", HealthCheck: "/health", HealthCheckTimeout: 10 * time.Second}
+	first, err := s.Deploy(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = s.Stop(req.Name) })
+	previous := registry.Clone(first)
+	// Simulate a failure after candidate cutover changed both listener and target.
+	if err := s.prx.RegisterPortsWithBind(req.Name, first.StablePorts, "::1"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.prx.SwapPorts(req.Name, map[string]int{"default": 1}); err != nil {
+		t.Fatal(err)
+	}
+	s.restoreFailedDeploy(req.Name, previous, true, nil)
+	client := http.Client{Timeout: time.Second}
+	resp, err := client.Get(fmt.Sprintf("http://127.0.0.1:%d/", first.StablePort))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != 200 || !strings.HasPrefix(string(body), "original:") {
+		t.Fatalf("restored proxy returned %d %q", resp.StatusCode, body)
+	}
+	t.Log("failed cutover: original listener and upstream restored, HTTP 200 from original release")
 }
 
 // TestConcurrentDeploy_Serialized launches two goroutines that both try to
